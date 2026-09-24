@@ -683,7 +683,7 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 3. 发布来源与合规边界
 
-- **预编译二进制**：推送 `v*` tag 时 Actions 构建 linux/windows amd64 的 `wb2api`、`signin_bin`、`login`、`credit` 并挂到该 Release。Actions 页手动运行只上传 artifact，不发 Release。Docker 仍由本地 `docker compose build` 构建
+- **调试二进制**：Actions 页手动运行 `binaries`，产物在该次 artifact，不发 Release。Docker 仍由本地 `docker compose build` 构建
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
 - **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
