@@ -20,11 +20,18 @@ jobs:
       - name: build
         run: |
           set -euo pipefail
-          # ponytail: 上游 Release 只有 Windows 包，里面三个文件。
+          # ponytail: 包结构跟上游一样；主程序分 windows/linux，amd64。
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
             go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
           mkdir -p dist
-          python3 -c 'import os,zipfile; n="dist/wb2api-panel-"+os.environ["GITHUB_REF_NAME"]+"-windows-amd64.zip"; z=zipfile.ZipFile(n,"w",zipfile.ZIP_DEFLATED); [z.write(f) for f in ("wb2api.exe","config.example.json","README.md")]; z.close()'
+          pack() {
+            python3 -c 'import sys,zipfile; n,b=sys.argv[1:]; z=zipfile.ZipFile(n,"w",zipfile.ZIP_DEFLATED); [z.write(f) for f in (b,"config.example.json","README.md")]; z.close()' \
+              "dist/wb2api-panel-${GITHUB_REF_NAME}-$1-amd64.zip" "$2"
+          }
+          pack windows wb2api.exe
+          pack linux wb2api
 
       - uses: actions/upload-artifact@v4
         with:
