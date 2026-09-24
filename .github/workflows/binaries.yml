@@ -24,8 +24,12 @@ jobs:
           # ponytail: 包结构跟上游一样；主程序 windows/linux × amd64/arm64。
           mkdir -p dist
           pack() {
-            python3 -c 'import sys,zipfile; n,b=sys.argv[1:]; z=zipfile.ZipFile(n,"w",zipfile.ZIP_DEFLATED); [z.write(f) for f in (b,"config.example.json","README.md")]; z.close()' \
-              "dist/wb2api-panel-${GITHUB_REF_NAME}-$1-$2.zip" "$3"
+            dir="dist/$1-$2"
+            mkdir -p "$dir"
+            cp "$3" "$dir/"
+            cp config.example.json README.md "$dir/"
+            python3 -c 'import os,sys,zipfile; n,d=sys.argv[1:]; z=zipfile.ZipFile(n,"w",zipfile.ZIP_DEFLATED); [z.write(os.path.join(d,f), f) for f in os.listdir(d)]; z.close()' \
+              "dist/wb2api-panel-${GITHUB_REF_NAME}-$1-$2.zip" "$dir"
           }
           for os in windows linux; do
             bin=wb2api
@@ -37,14 +41,30 @@ jobs:
             done
           done
 
+      # ponytail: 四个 upload，每个系统架构一个 artifact。matrix 等构建时间不够再用。
       - uses: actions/upload-artifact@v4
         with:
-          name: binaries
-          path: dist/*
+          name: wb2api-panel-${{ github.ref_name }}-windows-amd64
+          path: dist/windows-amd64
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb2api-panel-${{ github.ref_name }}-windows-arm64
+          path: dist/windows-arm64
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb2api-panel-${{ github.ref_name }}-linux-amd64
+          path: dist/linux-amd64
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb2api-panel-${{ github.ref_name }}-linux-arm64
+          path: dist/linux-arm64
           if-no-files-found: error
 
       - name: release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/*.zip --title "$GITHUB_REF_NAME" --generate-notes
