@@ -1,0 +1,50 @@
+name: binaries
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: build
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # ponytail: 与 Dockerfile 同一组四个二进制；trial 不发布。
+          build_one() {
+            name=$1 pkg=$2 os=$3 arch=$4
+            ext=
+            [ "$os" = windows ] && ext=.exe
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags="-s -w" \
+              -o "dist/${name}-${os}-${arch}${ext}" "$pkg"
+          }
+          for os in linux windows; do
+            build_one wb2api ./cmd/server "$os" amd64
+            build_one signin_bin ./cmd/signin "$os" amd64
+            build_one login ./cmd/login "$os" amd64
+            build_one credit ./cmd/credit "$os" amd64
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/*
+          if-no-files-found: error
+
+      - name: release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
