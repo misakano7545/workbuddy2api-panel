@@ -20,18 +20,21 @@ jobs:
       - name: build
         run: |
           set -euo pipefail
-          # ponytail: 包结构跟上游一样；主程序分 windows/linux，amd64。
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-            go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
+          # ponytail: 包结构跟上游一样；主程序 windows/linux × amd64/arm64。
           mkdir -p dist
           pack() {
             python3 -c 'import sys,zipfile; n,b=sys.argv[1:]; z=zipfile.ZipFile(n,"w",zipfile.ZIP_DEFLATED); [z.write(f) for f in (b,"config.example.json","README.md")]; z.close()' \
-              "dist/wb2api-panel-${GITHUB_REF_NAME}-$1-amd64.zip" "$2"
+              "dist/wb2api-panel-${GITHUB_REF_NAME}-$1-$2.zip" "$3"
           }
-          pack windows wb2api.exe
-          pack linux wb2api
+          for os in windows linux; do
+            bin=wb2api
+            [ "$os" = windows ] && bin=wb2api.exe
+            for arch in amd64 arm64; do
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+                go build -trimpath -ldflags="-s -w" -o "$bin" ./cmd/server
+              pack "$os" "$arch" "$bin"
+            done
+          done
 
       - uses: actions/upload-artifact@v4
         with:
