@@ -134,11 +134,6 @@ var autoActions = []autoAction{
 		run:      runBlackCat,
 	},
 	{
-		TaskCode: "school_season",
-		Desc:     "校园日（小程序口径）：accept → mini 对话+activityId 上报 → 领奖（+100c+5e）",
-		run:      runSchoolSeason,
-	},
-	{
 		TaskCode: "Sequential_Tasks_1",
 		Desc:     "小程序首对话（小程序口径）：accept → mini 对话上报 → 领奖（+100c+5e）",
 		run:      runSequentialChat,
@@ -198,7 +193,6 @@ func autoActionIndex(code string) int {
 // mpTaskCodes 小程序口径专属下发的成长任务：默认（无 mp 头）列表不出现，
 // accept/claim 均要求 X-Client-Platform: miniprogram。新任务出现时在此登记。
 var mpTaskCodes = map[string]bool{
-	"school_season":      true, // 校园日（mini chat + activityId）
 	"Sequential_Tasks_1": true, // 小程序首对话（mini chat，无 activityId）
 	"Sequential_Tasks_2": true, // 小程序选中专家并完成有效对话（mp 指纹 expert_actual_use）
 	"Sequential_Tasks_3": true, // 小程序完成 5 次对话（与 Tasks_1 同形状，target=5 逐条累加）
@@ -269,7 +263,7 @@ func (p *Panel) taskByCodeWaiting(a *auth.Auth, code string) (*upstream.Task, er
 }
 
 // taskByCodeMP 以小程序口径拉取任务列表并定位单个任务；未找到返回 nil。
-// 小程序限定任务（school_season / Sequential_Tasks_1）在默认口径列表不出现。
+// 小程序限定任务（Sequential_Tasks_*）在默认口径列表不出现。
 func (p *Panel) taskByCodeMP(a *auth.Auth, code string) (*upstream.Task, error) {
 	tasks, err := p.cfg.Upstream.ListTasksMP(a)
 	if err != nil {
@@ -317,10 +311,8 @@ func acceptStatusOr(t *upstream.Task) string {
 var mpActionGap = 2 * time.Second
 
 // runMPMiniChatTask growth 域小程序限定任务通用闭环：
-// mp 查询 → accept（带登记回读验证）→ mini chat 事件上报（withActivityId 决定
-// 是否带开学季 activityId：school_season 必带，Sequential_Tasks_1 不带——服务端按
-// source=mini_program 指纹关联）→ 回读 → 达标即领奖。
-func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool) (string, error) {
+// mp 查询 → accept（带登记回读验证）→ mini chat 事件上报 → 回读 → 达标即领奖。
+func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string) (string, error) {
 	t, err := p.taskByCodeMP(a, code)
 	if err != nil {
 		return "", err
@@ -352,13 +344,7 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 	need := target - t.Current
 	for i := int64(0); i < need; i++ {
 		conv := fmt.Sprintf("wb2api-mp-%d-%d", time.Now().UnixMilli(), i)
-		var ev map[string]any
-		if withActivityId {
-			ev = upstream.SchoolSeasonChatEvent(conv)
-		} else {
-			ev = upstream.SchoolChatTimesEvents(conv)
-		}
-		if err := p.cfg.Upstream.ReportMPEvent(a, ev); err != nil {
+		if err := p.cfg.Upstream.ReportMPEvent(a, upstream.MiniChatSendEvent(conv)); err != nil {
 			return fmt.Sprintf("完成 %d/%d 次上报后中断: %v", i, need, err), nil
 		}
 		time.Sleep(mpActionGap)
@@ -388,18 +374,11 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 	return fmt.Sprintf("任务点亮并领取奖励（+%dc +%de）", credit, energy), nil
 }
 
-// runSchoolSeason 完成 school_season「校园日」（growth 域小程序限定）。
-// 判据 = mini chat_request_send + activityId=school_open_day_2026（无 activityId
-// 不点亮，与 school 域开学季同活动关联；上游 task_runner e2e 实测 +100c+5e）。
-func runSchoolSeason(p *Panel, a *auth.Auth) (string, error) {
-	return p.runMPMiniChatTask(a, "school_season", true)
-}
-
 // runSequentialChat 完成 Sequential_Tasks_1「小程序内完成 1 次有效对话」。
 // 判据 = mini chat_request_send（无 activityId，服务端按 source=mini_program
 // 指纹关联；上游 task_runner 实测 +100c+5e）。
 func runSequentialChat(p *Panel, a *auth.Auth) (string, error) {
-	return p.runMPMiniChatTask(a, "Sequential_Tasks_1", false)
+	return p.runMPMiniChatTask(a, "Sequential_Tasks_1")
 }
 
 // runSequentialChat5 完成 Sequential_Tasks_3「在小程序内完成 5 次有效对话」。
@@ -408,14 +387,14 @@ func runSequentialChat(p *Panel, a *auth.Auth) (string, error) {
 // 补报（含未 accept 时 progress 为 null 的 target 兜底），无需新事件形状
 // （上游 task_runner 实测两账号 +300c+5e，重跑幂等）。
 func runSequentialChat5(p *Panel, a *auth.Auth) (string, error) {
-	return p.runMPMiniChatTask(a, "Sequential_Tasks_3", false)
+	return p.runMPMiniChatTask(a, "Sequential_Tasks_3")
 }
 
 // runSequentialChat10 完成 Sequential_Tasks_6「在小程序内完成 10 次有效对话」（预留）。
 // 判据假定与 Tasks_1/3 同形状（mini chat_request_send），target 由任务自带（回读），
 // runMPMiniChatTask 按差额补报——issue #42 称 target=10，以解锁后实际下发为准。
 func runSequentialChat10(p *Panel, a *auth.Auth) (string, error) {
-	return p.runMPMiniChatTask(a, "Sequential_Tasks_6", false)
+	return p.runMPMiniChatTask(a, "Sequential_Tasks_6")
 }
 
 // runSequentialEventTask Sequential 链预留任务通用骨架：mp 查询 → accept（带验证）
@@ -524,8 +503,8 @@ func runSequentialPlaybook(p *Panel, a *auth.Auth) (string, error) {
 
 // runMiniExpert 完成 Sequential_Tasks_2「在小程序内选中专家并完成有效对话」。
 // 判据 = mp 指纹 expert_actual_use（**不带** activityId/conversationId、
-// extVersion=2.2.8、type=send_message——小程序源码实测形状，与 school 域 expert
-// 事件两套口径勿混；上游 task_runner 实测上报即 completed，claim +200c+5e）。
+// extVersion=2.2.8、type=send_message——小程序源码实测形状；
+// 上游 task_runner 实测上报即 completed，claim +200c+5e）。
 // 专家 id 必须是市场真实 ex_ id（空 id 服务端不入账）→ **accept 之前**先解析市场
 // 列表：拉不到就整任务不动作，避免留下「已登记未上报」的半程态（上游 9a26ae7
 // 的 ids 前置判定同款）。复用既有 MarketExpertList（expert_5 任务同源，实测可用）。

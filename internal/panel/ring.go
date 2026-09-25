@@ -29,10 +29,10 @@ type LogEntry struct {
 
 // taskPrefixes 任务动作日志的行首标识（scheduler 与 panel 的既有口径）。
 var taskPrefixes = []string{
-	"school ", "streak-bonus ", "travel ", "blackcat ", "lottery ",
+	"streak-bonus ", "travel ", "blackcat ", "lottery ",
 	"checkin ", "activity ", "keepalive ", "balance ", "user-resource ",
 	"panel: 任务", "panel: 一键", "panel: checkin", "panel: 手动",
-	"panel: 队列", "panel: 开学季",
+	"panel: 队列",
 }
 
 // tsPrefixRe log 包默认 flags（日期 时间）产生的行首时间戳。

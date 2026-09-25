@@ -9,7 +9,7 @@ import (
 func TestClassifyLine(t *testing.T) {
 	cases := map[string]string{
 		"| #001 | glm-5.2 | stream | 200 | uid=c8a3e793 | TTFB=120ms |": ChChat,
-		"school c8a3e793: ★ 分享任务完成":                                     ChTask,
+		"checkin c8a3e793: 已签到（幂等）":                                     ChTask,
 		"streak-bonus 5c162cc9: 🎊 新手礼包 +100c":                           ChTask,
 		"blackcat c8a3e793: 完成 3 次夜间对话":                                 ChTask,
 		"checkin 5c162cc9: 已签到":                                         ChTask,
@@ -28,7 +28,7 @@ func TestClassifyLine(t *testing.T) {
 
 func TestRingWriteStripsTimestamp(t *testing.T) {
 	r := NewRing(4)
-	if _, err := r.Write([]byte("2026/09/14 00:12:34 school x: done\n")); err != nil {
+	if _, err := r.Write([]byte("2026/09/14 00:12:34 checkin x: done\n")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.Write([]byte("| #002 | glm | stream | 200 | ok |")); err != nil {

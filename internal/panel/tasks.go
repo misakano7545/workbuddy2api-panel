@@ -38,7 +38,7 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
 		return
 	}
-	// 合并小程序口径任务（school_season / Sequential_Tasks_1 等仅在 mp 头列表下发）。
+	// 合并小程序口径任务（Sequential_Tasks_* 等仅在 mp 头列表下发）。
 	// mp 列表是默认口径的超集（实测含常规任务），按 task_code 去重；失败静默。
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
 		seen := map[string]bool{}

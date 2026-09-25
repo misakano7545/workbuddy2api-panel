@@ -30,7 +30,7 @@ const (
 	tasksAcceptPath = "/v2/activity/growth/tasks/accept"
 )
 
-// mpPlatform 小程序口径头值：小程序限定任务（Sequential_Tasks_1 / school_season）
+// mpPlatform 小程序口径头值：小程序限定任务（Sequential_Tasks_*）
 // 的列表下发、accept、claim 全链路要求 X-Client-Platform: miniprogram。
 const mpPlatform = "miniprogram"
 
@@ -68,7 +68,7 @@ func (c *Client) ListTasks(a *auth.Auth) ([]Task, error) {
 }
 
 // ListTasksMP 拉取小程序口径的任务列表（X-Client-Platform: miniprogram）。
-// 小程序限定任务（Sequential_Tasks_1「小程序首对话」/ school_season「校园日」等）
+// 小程序限定任务（Sequential_Tasks_* 等）
 // 仅在该口径下发——默认列表不出现，accept/claim 同样要求该头（缺头 accept 返回
 // task not found，上游 task_runner 实测）。**实测 mp 列表是默认口径的超集**
 // （含 RichMeow/Model_chat 等常规任务 + wb_wechat_oa_subscribe_task 等 mp 专属），
