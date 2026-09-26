@@ -773,3 +773,57 @@ func TestStreamNormalPassthroughRegression(t *testing.T) {
 		})
 	}
 }
+
+// TestNormalizeUsageCacheAliasesMirrorsNestedHit / PreservesZeroResult 自
+// usage_test.go 迁入（PR #57 原新文件按仓库规则不收，核心断言保留在此——
+// normalize 钩子就挂在 sse.go 的 Aggregate/normalizeFrame 两个出口）。
+func TestNormalizeUsageCacheAliasesMirrorsNestedHit(t *testing.T) {
+	usage := map[string]any{
+		"prompt_tokens":            21041.0,
+		"completion_tokens":        8.0,
+		"total_tokens":             21049.0,
+		"cache_read_input_tokens":  0.0,
+		"cached_tokens":            0.0,
+		"prompt_cache_hit_tokens":  0.0,
+		"prompt_cache_miss_tokens": 177.0,
+		"prompt_tokens_details": map[string]any{
+			"cached_tokens": 20864.0,
+		},
+	}
+
+	got := normalizeUsageCacheAliases(usage)
+
+	for _, key := range []string{
+		"cache_read_input_tokens",
+		"cached_tokens",
+		"prompt_cache_hit_tokens",
+	} {
+		if got[key] != 20864.0 {
+			t.Fatalf("%s=%v want 20864", key, got[key])
+		}
+	}
+	details := got["prompt_tokens_details"].(map[string]any)
+	if details["cached_tokens"] != 20864.0 {
+		t.Fatalf("prompt_tokens_details.cached_tokens=%v want 20864", details["cached_tokens"])
+	}
+}
+
+func TestNormalizeUsageCacheAliasesPreservesZeroResult(t *testing.T) {
+	usage := map[string]any{
+		"prompt_tokens":           35.0,
+		"completion_tokens":       2.0,
+		"total_tokens":            37.0,
+		"cache_read_input_tokens": 0.0,
+		"prompt_cache_hit_tokens": 0.0,
+		"prompt_tokens_details": map[string]any{
+			"cached_tokens": 0.0,
+		},
+	}
+
+	got := normalizeUsageCacheAliases(usage)
+
+	details := got["prompt_tokens_details"].(map[string]any)
+	if details["cached_tokens"] != 0.0 {
+		t.Fatalf("prompt_tokens_details.cached_tokens=%v want 0", details["cached_tokens"])
+	}
+}
