@@ -326,3 +326,37 @@ func TestResponsesToChatInvalidJSON(t *testing.T) {
 		t.Fatalf("code=%d", rec.Code)
 	}
 }
+
+// TestUsageCacheFields 上游的缓存命中数必须透出到两种格式的 usage（此前一律 0，
+// 客户端和面板都看不见缓存是否生效）。
+func TestUsageCacheFields(t *testing.T) {
+	up := map[string]any{
+		"prompt_tokens":             float64(100),
+		"completion_tokens":         float64(5),
+		"prompt_cache_hit_tokens":   float64(8960),
+		"prompt_cache_write_tokens": float64(0),
+		"prompt_tokens_details":     map[string]any{"cached_tokens": float64(8960)},
+	}
+	if got := anthropicUsage(up)["cache_read_input_tokens"]; got != float64(8960) {
+		t.Fatalf("anthropic cache_read_input_tokens=%v want 8960", got)
+	}
+	if got := anthropicUsage(nil)["cache_read_input_tokens"]; got != nil {
+		t.Fatalf("nil usage 不该凭空造缓存字段, got=%v", got)
+	}
+	d, _ := convertUsage(up)["input_tokens_details"].(map[string]any)
+	if d == nil || d["cached_tokens"] != float64(8960) {
+		t.Fatalf("responses input_tokens_details=%v want cached_tokens 8960", d)
+	}
+
+	chat, err := responsesToChat([]byte(`{"model":"m","prompt_cache_key":"sess-1","input":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(chat, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["prompt_cache_key"] != "sess-1" {
+		t.Fatalf("prompt_cache_key 未透传: %v", obj["prompt_cache_key"])
+	}
+}

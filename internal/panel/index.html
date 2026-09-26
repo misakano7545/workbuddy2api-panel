@@ -332,9 +332,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .uschart-hd .sw { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-left: 8px; }
   .uschart-hd .sw-p { background: var(--accent); }
   .uschart-hd .sw-c { background: var(--ok); }
+  .uschart-hd .sw-hit { background: var(--warn); }
   .uschart-body { padding: 10px 12px 6px; }
   .uschart-body svg { display: block; width: 100%; height: auto; }
   .uschart-body .ax { stroke: var(--line-soft); stroke-width: 1; }
+  /* 缓存命中率曲线（右轴 0-100%）：折线 + 每个数据点一个圆点。 */
+  .uschart-body .hitline { fill: none; stroke: var(--warn); stroke-width: 1.6; }
+  .uschart-body .hitdot { fill: var(--warn); }
   .uschart-body .gl { stroke: var(--line-soft); stroke-width: 1; stroke-dasharray: 2 3; opacity: .7; }
   .uschart-body .tk { fill: var(--ink-3); font: 10px var(--mono); }
   .uschart-body .us-empty { padding: 28px 0; text-align: center; color: var(--ink-3); font-size: 12.5px; }
@@ -533,7 +537,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="uschart-hd">
               <span class="lb">Token 时序</span>
               <span class="grow"></span>
-              <span class="legend"><i class="sw sw-p"></i>prompt<i class="sw sw-c"></i>completion</span>
+              <span class="legend"><i class="sw sw-p"></i>prompt<i class="sw sw-c"></i>completion<i class="sw sw-hit"></i>缓存命中率</span>
             </div>
             <div id="usChart" class="uschart-body"></div>
           </div>
@@ -548,7 +552,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <thead><tr>
               <th class="mark" aria-hidden="true"></th><th>账号</th><th>域</th>
               <th class="num">请求</th><th class="num">失败</th>
-              <th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>
+              <th class="num">Prompt</th><th class="num">命中率</th><th class="num">Completion</th><th class="num">合计</th>
               <th class="num">均延迟</th><th class="num">均速率</th>
             </tr></thead>
             <tbody id="usAccBody"></tbody>
@@ -563,7 +567,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <thead><tr>
               <th class="mark" aria-hidden="true"></th><th>模型</th>
               <th class="num">请求</th><th class="num">失败</th>
-              <th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>
+              <th class="num">Prompt</th><th class="num">命中率</th><th class="num">Completion</th><th class="num">合计</th>
             </tr></thead>
             <tbody id="usModelBody"></tbody>
           </table>
@@ -577,7 +581,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <thead><tr>
               <th class="mark" aria-hidden="true"></th><th>realm</th>
               <th class="num">请求</th><th class="num">失败</th>
-              <th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>
+              <th class="num">Prompt</th><th class="num">命中率</th><th class="num">Completion</th><th class="num">合计</th>
             </tr></thead>
             <tbody id="usRealmBody"></tbody>
           </table>

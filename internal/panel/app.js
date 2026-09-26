@@ -1004,6 +1004,7 @@ function usRow(name, sub, a, mid, withPerf) {
     '<td class="num">' + fmtTok(a.requests) + '</td>' +
     '<td class="num">' + (a.errors ? '<span style="color:var(--warn)">' + fmtTok(a.errors) + '</span>' : '—') + '</td>' +
     '<td class="num">' + fmtTok(a.prompt_tokens) + '</td>' +
+    '<td class="num">' + fmtHit(a) + '</td>' +
     '<td class="num">' + fmtTok(a.completion_tokens) + '</td>' +
     '<td class="num">' + fmtTok(a.total_tokens) + '</td>' +
     (withPerf
@@ -1036,13 +1037,13 @@ function renderUsage(d) {
   $('usAccBody').innerHTML = (d.by_account || []).map(x =>
     usRow(x.key.slice(0, 8), x.extra || '', x,
       '<td class="num">' + esc(x.realm || '') + '</td>', true)
-  ).join('') || '<tr><td colspan="10" class="empty">暂无数据</td></tr>';
+  ).join('') || '<tr><td colspan="11" class="empty">暂无数据</td></tr>';
 
   $('usModelBody').innerHTML = (d.by_model || []).map(x =>
-    usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+    usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
 
   $('usRealmBody').innerHTML = (d.by_realm || []).map(x =>
-    usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+    usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
 
   renderUsageChart(d.series || []);
 }
@@ -1079,16 +1080,24 @@ function renderUsageChart(series) {
     const pt = Number(p.prompt_tokens || 0);
     const ct = Number(p.completion_tokens || 0);
     pts.push({ t, scope: p.scope, raw: p.t, pt, ct, tt: Number(p.total_tokens || 0) || (pt + ct),
-               req: p.requests || 0 });
+               req: p.requests || 0,
+               ch: Number(p.cache_hit_tokens || 0), cm: Number(p.cache_miss_tokens || 0) });
   }
   if (!pts.length) {
     host.innerHTML = '<div class="us-empty">暂无用量数据。发起一次对话后再刷新。</div>';
     return;
   }
 
-  const W = 760, H = 180, PL = 52, PR = 12, PT = 12, PB = 30;
-  const iw = W - PL - PR, ih = H - PT - PB;
+  // 缓存命中率 = 命中/(命中+未命中)。没这两个字段的点（旧桶/上游没给）留 null，
+  // 曲线在那里断开，不拿 0 顶替——0% 和「没观测到」是两件事。
+  let hasHit = false;
+  for (const p of pts) {
+    p.rate = (p.ch + p.cm) > 0 ? p.ch / (p.ch + p.cm) : null;
+    if (p.rate !== null) hasHit = true;
+  }
 
+  const W = 760, H = 180, PL = 52, PR = hasHit ? 34 : 12, PT = 12, PB = 30;
+  const iw = W - PL - PR, ih = H - PT - PB;
   const t0 = pts[0].t;
   const t1 = pts[pts.length - 1].t;
   const span = Math.max(1, t1 - t0);
@@ -1132,7 +1141,28 @@ function renderUsageChart(series) {
       '" width="' + bw.toFixed(2) + '" height="' + hC.toFixed(2) +
       '" fill="var(--ok)" rx="1.5"/>';
     out += '<title>' + esc(p.raw) + '  ' + fmtTok(p.pt) + ' prompt / ' +
-           fmtTok(p.ct) + ' completion / ' + p.req + ' 次</title>';
+           fmtTok(p.ct) + ' completion / ' + p.req + ' 次' +
+           (p.rate !== null ? ' / 缓存 ' + Math.round(p.rate * 100) + '%' : '') + '</title>';
+  }
+
+  // 缓存命中率曲线（有数据才画）。右轴 0-100%，缺口断开，单点也画个点。
+  if (hasHit) {
+    for (const pct of [0, 50, 100]) {
+      const y = PT + ih - ih * (pct / 100);
+      out += '<text class="tk" x="' + (W - PR + 4) + '" y="' + (y + 3.5).toFixed(1) + '">' + pct + '%</text>';
+    }
+    let seg = [];
+    const flush = () => {
+      if (seg.length > 1) out += '<polyline class="hitline" points="' + seg.join(' ') + '"/>';
+      seg = [];
+    };
+    for (const p of pts) {
+      if (p.rate === null) { flush(); continue; }
+      const x = xOf(p.t).toFixed(1), y = (PT + ih - ih * p.rate).toFixed(1);
+      out += '<circle class="hitdot" cx="' + x + '" cy="' + y + '" r="2"/>';
+      seg.push(x + ',' + y);
+    }
+    flush();
   }
 
   // x 轴基线画在柱子之后，避免压在柱底
@@ -1181,6 +1211,14 @@ function renderUsageChart(series) {
 }
 
 function fmtTokTip(v) { return fmtTok(v); }
+
+/* 缓存命中率 = 命中/(命中+未命中)。两个数都是 0 时显示 —，不伪造 0%。 */
+function fmtHit(a) {
+  const h = Number(a.cache_hit_tokens || 0), m = Number(a.cache_miss_tokens || 0);
+  if (!h && !m) return '—';
+  const title = '命中 ' + fmtTok(h) + ' / 未命中 ' + fmtTok(m);
+  return '<span title="' + esc(title) + '">' + Math.round(h * 100 / (h + m)) + '%</span>';
+}
 
 async function loadUsage() {
   const hours = ($('usWindow') && $('usWindow').value) || 72;

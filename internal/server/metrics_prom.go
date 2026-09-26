@@ -23,6 +23,7 @@ type promAcc struct {
 	latSum                               float64
 	genSec                               float64
 	compTok                              int64
+	cacheHit, cacheMiss                  int64
 	credit                               float64
 }
 
@@ -71,6 +72,10 @@ func noteProm(s *chatStat, total time.Duration) {
 		if gen > 0 {
 			mm.genSec += gen / 1000
 		}
+	}
+	if s.hasCache {
+		mm.cacheHit += int64(s.cacheHit)
+		mm.cacheMiss += int64(s.cacheMiss)
 	}
 	if s.hasCredit && s.credit > 0 {
 		mm.credit += s.credit
@@ -126,6 +131,7 @@ func deriveProm(name string, mm *promAcc) ModelStatPayload {
 	p := ModelStatPayload{
 		Model: name, Success: mm.success, Failed: mm.failed, Streaming: mm.streaming,
 		CompletionTokens: mm.compTok, Credit: mm.credit,
+		CacheHitTokens: mm.cacheHit, CacheMissTokens: mm.cacheMiss,
 	}
 	if mm.ttfbN > 0 {
 		p.AvgTTFBMS = mm.ttfbSum / float64(mm.ttfbN)
@@ -284,6 +290,11 @@ func writePromMetrics(snap MetricsSnapshot, health []promRealmHealth, sticky int
 	for _, m := range snap.Models {
 		w.sample("wb2api_model_tokens_total", float64(m.PromptTokens), "model", m.Model, "type", "prompt")
 		w.sample("wb2api_model_tokens_total", float64(m.CompletionTokens), "model", m.Model, "type", "completion")
+	}
+	w.family("wb2api_model_prompt_cache_tokens_total", "Upstream prompt cache tokens by model. Hit rate = hit/(hit+miss).", "counter")
+	for _, m := range snap.Models {
+		w.sample("wb2api_model_prompt_cache_tokens_total", float64(m.CacheHitTokens), "model", m.Model, "type", "hit")
+		w.sample("wb2api_model_prompt_cache_tokens_total", float64(m.CacheMissTokens), "model", m.Model, "type", "miss")
 	}
 	w.family("wb2api_model_avg_ttfb_seconds", "Average TTFB by model.", "gauge")
 	for _, m := range snap.Models {

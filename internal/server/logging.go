@@ -42,6 +42,9 @@ type chatStat struct {
 	status    int
 	credit    float64
 	hasCredit bool
+	cacheHit  int
+	cacheMiss int
+	hasCache  bool
 	budget    *dailyBudget
 
 	logged bool
@@ -63,7 +66,7 @@ func (s *chatStat) done() {
 	}
 	s.logged = true
 	total := time.Since(s.start)
-	logChatRow(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks)
+	logChatRow(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks, s.cacheHit, s.cacheMiss, s.hasCache)
 	s.budget.add(s.credit, s.hasCredit)
 	noteProm(s, total)
 }
@@ -85,6 +88,9 @@ type chatStatsReader struct {
 	// credit 上游末帧 usage.credit（本次真实扣费积分），供成本台账（NoteModelCost）。
 	hasCredit bool
 	credit    float64
+	cacheHit  int
+	cacheMiss int
+	hasCache  bool
 	pend      []byte // 已读未返回的行缓存
 }
 
@@ -114,7 +120,15 @@ func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
 		CompletionTokens:    int64(s.completionTokens),
 		HasTotalTokens:      s.hasTotalTokens,
 		TotalTokens:         int64(s.totalTokens),
+		HasCacheTokens:      s.hasCache,
+		CacheHitTokens:      int64(s.cacheHit),
+		CacheMissTokens:     int64(s.cacheMiss),
 	}
+}
+
+// Cache 返回末帧 usage 的 prompt 缓存命中/未命中 token 与是否缺失。
+func (s *chatStatsReader) Cache() (hit, miss int, ok bool) {
+	return s.cacheHit, s.cacheMiss, s.hasCache
 }
 
 // parseSSELine 解析一行 "data: {...}"：首帧记 TTFB，含 usage 时采信精确 completion_tokens。
@@ -133,10 +147,12 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	}
 	var chunk struct {
 		Usage *struct {
-			PromptTokens     *int     `json:"prompt_tokens"`
-			CompletionTokens *int     `json:"completion_tokens"`
-			TotalTokens      *int     `json:"total_tokens"`
-			Credit           *float64 `json:"credit"`
+			PromptTokens          *int     `json:"prompt_tokens"`
+			CompletionTokens      *int     `json:"completion_tokens"`
+			TotalTokens           *int     `json:"total_tokens"`
+			Credit                *float64 `json:"credit"`
+			PromptCacheHitTokens  *int     `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTokens *int     `json:"prompt_cache_miss_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
@@ -157,6 +173,14 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	if chunk.Usage.Credit != nil {
 		s.hasCredit = true
 		s.credit = *chunk.Usage.Credit
+	}
+	if chunk.Usage.PromptCacheHitTokens != nil {
+		s.hasCache = true
+		s.cacheHit = *chunk.Usage.PromptCacheHitTokens
+	}
+	if chunk.Usage.PromptCacheMissTokens != nil {
+		s.hasCache = true
+		s.cacheMiss = *chunk.Usage.PromptCacheMissTokens
 	}
 }
 
@@ -247,6 +271,12 @@ func usageDeltaFromResponse(resp map[string]any) pool.TokenUsageDelta {
 	if n, ok := read("total_tokens"); ok {
 		delta.HasTotalTokens, delta.TotalTokens = true, n
 	}
+	if n, ok := read("prompt_cache_hit_tokens"); ok {
+		delta.HasCacheTokens, delta.CacheHitTokens = true, n
+	}
+	if n, ok := read("prompt_cache_miss_tokens"); ok {
+		delta.HasCacheTokens, delta.CacheMissTokens = true, n
+	}
 	return delta
 }
 
@@ -278,10 +308,11 @@ const (
 	// 旧的 11 字节截断会把 "cn:deepseek-v4-flash" 切成 "cn:deepseek"，让人误以为是另一个模型。
 	chatModelWidth = 26
 	// chatAcctWidth 容纳 "昵称(uid8)"：中文昵称按 2 列/字算，5 字中文 + "(xxxxxxxx)" = 20 列。
-	chatAcctWidth = 22
-	chatTTFBWidth = 8
-	chatTokWidth  = 6
-	chatRateWidth = 11 // 形如 "183.6tok/s"
+	chatAcctWidth  = 22
+	chatTTFBWidth  = 8
+	chatTokWidth   = 6
+	chatRateWidth  = 11 // 形如 "183.6tok/s"
+	chatCacheWidth = 6  // 形如 "97%" / "-"
 )
 
 // logChatRow 打印一行请求级表格日志（输出 chatLogOut，无 log 时间戳前缀）。
@@ -291,7 +322,7 @@ const (
 //   - uid/nick：完整 uid 与账号昵称，经 logfmt.Label 拼成 "昵称(uid8)" 展示——只有
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。
-func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
+func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int, cacheHit, cacheMiss int, hasCache bool) {
 	if !chatLogEnabled {
 		return
 	}
@@ -313,7 +344,12 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 	if ttfb > 0 {
 		ttfbMS = fmt.Sprintf("%dms", ttfb.Milliseconds())
 	}
-	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |\n",
+	// 缓存命中率=hit/(hit+miss)。上游没给缓存字段时显示 "-"（不伪造 0%）。
+	cacheField := "-"
+	if hasCache && cacheHit+cacheMiss > 0 {
+		cacheField = fmt.Sprintf("%d%%", cacheHit*100/(cacheHit+cacheMiss))
+	}
+	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | cache=%s | total=%.1fs |\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
@@ -323,6 +359,7 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 		logfmt.Pad(ttfbMS, chatTTFBWidth),
 		logfmt.Pad(tokField, chatTokWidth),
 		logfmt.Pad(tokpsField, chatRateWidth),
+		logfmt.Pad(cacheField, chatCacheWidth),
 		total.Seconds(),
 	)
 }

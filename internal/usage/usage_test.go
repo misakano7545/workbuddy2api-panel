@@ -18,15 +18,21 @@ func TestAddAndTotals(t *testing.T) {
 	// 上游没给 total 时用 pt+ct 兜底，保证总量口径连续。
 	r.Add(now, "cn", "uid1", "glm-5.2", Delta{PromptTokens: 10, HasPromptTokens: true, CompletionTokens: 5, HasCompletion: true}, true)
 
+	// 缓存命中/未命中随桶累计，并出现在按账号/按模型的聚合行里（面板命中率列的来源）。
+	r.Add(now, "cn", "uid1", "glm-5.2", Delta{CacheHitTokens: 8960, CacheMissTokens: 197, HasCache: true}, true)
+
 	s := r.Snapshot(24, nil)
-	if s.Totals.Requests != 3 || s.Totals.Errors != 1 {
-		t.Fatalf("requests/errors = %d/%d, want 3/1", s.Totals.Requests, s.Totals.Errors)
+	if s.Totals.Requests != 4 || s.Totals.Errors != 1 {
+		t.Fatalf("requests/errors = %d/%d, want 4/1", s.Totals.Requests, s.Totals.Errors)
 	}
 	if s.Totals.PromptTokens != 110 || s.Totals.CompletionTok != 55 {
 		t.Fatalf("pt/ct = %d/%d, want 110/55", s.Totals.PromptTokens, s.Totals.CompletionTok)
 	}
 	if s.Totals.TotalTokens != 165 {
 		t.Fatalf("tt = %d, want 165（无 total 时按 pt+ct 兜底）", s.Totals.TotalTokens)
+	}
+	if s.Totals.CacheHitTok != 8960 || s.Totals.CacheMissTok != 197 {
+		t.Fatalf("cache = %d/%d, want 8960/197", s.Totals.CacheHitTok, s.Totals.CacheMissTok)
 	}
 	if s.Totals.AvgLatencyMs != 200 {
 		t.Fatalf("avg latency = %v, want 200", s.Totals.AvgLatencyMs)

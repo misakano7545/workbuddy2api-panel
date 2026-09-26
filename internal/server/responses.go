@@ -43,6 +43,8 @@ func responsesToChat(src []byte) ([]byte, error) {
 		"model", "stream", "tool_choice", "max_tokens", "max_output_tokens",
 		"max_completion_tokens", "temperature", "top_p", "user", "n", "stop",
 		"metadata", "stream_options", "parallel_tool_calls",
+		// ponytail: Codex 客户端按会话发 prompt_cache_key；丢掉就只能靠内容派生会话键。
+		"prompt_cache_key",
 	} {
 		if v, ok := obj[k]; ok {
 			out[k] = v
@@ -324,6 +326,13 @@ func convertUsage(u map[string]any) map[string]any {
 	}
 	if v, ok := u["total_tokens"]; ok {
 		out["total_tokens"] = v
+	}
+	// ponytail: Responses 客户端的缓存读数在 input_tokens_details.cached_tokens
+	// （Codex 据此显示 cached），上游已在 prompt_tokens_details.cached_tokens 给出。
+	if d, ok := u["prompt_tokens_details"].(map[string]any); ok {
+		if c, ok := d["cached_tokens"]; ok {
+			out["input_tokens_details"] = map[string]any{"cached_tokens": c}
+		}
 	}
 	return out
 }

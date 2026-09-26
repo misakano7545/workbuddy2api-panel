@@ -57,6 +57,10 @@ type TokenUsageDelta struct {
 	LatencyMs           int64
 	HasTokensPerSecond  bool
 	TokensPerSecond     float64
+	// 上游 usage 的 prompt 缓存命中/未命中 token（日志与用量视图展示用）。
+	HasCacheTokens  bool
+	CacheHitTokens  int64
+	CacheMissTokens int64
 }
 
 // Status 单个账号对外暴露的状态（脱敏）。

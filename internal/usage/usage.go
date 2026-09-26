@@ -53,6 +53,8 @@ type bucket struct {
 	PT    int64   `json:"p"`  // prompt tokens
 	CT    int64   `json:"c"`  // completion tokens
 	TT    int64   `json:"t"`  // total tokens（上游给什么用什么的合计）
+	CH    int64   `json:"ch"` // prompt 缓存命中 token
+	CM    int64   `json:"cm"` // prompt 缓存未命中 token
 	LatMs int64   `json:"l"`  // 延迟累计（ms）
 	LatN  int64   `json:"ln"` // 延迟样本数
 	TPS   float64 `json:"v"`  // 吐字速率累计
@@ -138,6 +140,10 @@ type Delta struct {
 	HasLatency       bool
 	TokensPerSecond  float64
 	HasTPS           bool
+	// 上游 usage 的 prompt 缓存命中/未命中 token。
+	CacheHitTokens  int64
+	CacheMissTokens int64
+	HasCache        bool
 }
 
 // Add 记录一次请求尝试。
@@ -189,6 +195,10 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 		b.TPS += d.TokensPerSecond
 		b.TPSN++
 	}
+	if d.HasCache {
+		b.CH += d.CacheHitTokens
+		b.CM += d.CacheMissTokens
+	}
 	r.dirty = true
 }
 
@@ -233,6 +243,8 @@ func (r *Recorder) Rollup(now time.Time) {
 			dst.PT += src.PT
 			dst.CT += src.CT
 			dst.TT += src.TT
+			dst.CH += src.CH
+			dst.CM += src.CM
 			dst.LatMs += src.LatMs
 			dst.LatN += src.LatN
 			dst.TPS += src.TPS
@@ -315,6 +327,8 @@ type Agg struct {
 	PromptTokens  int64   `json:"prompt_tokens"`
 	CompletionTok int64   `json:"completion_tokens"`
 	TotalTokens   int64   `json:"total_tokens"`
+	CacheHitTok   int64   `json:"cache_hit_tokens"`
+	CacheMissTok  int64   `json:"cache_miss_tokens"`
 	AvgLatencyMs  float64 `json:"avg_latency_ms"`
 	AvgTPS        float64 `json:"avg_tokens_per_second"`
 }
@@ -335,6 +349,8 @@ func (g *aggAcc) add(b *bucket) {
 	g.PromptTokens += b.PT
 	g.CompletionTok += b.CT
 	g.TotalTokens += b.TT
+	g.CacheHitTok += b.CH
+	g.CacheMissTok += b.CM
 	g.latSum += b.LatMs
 	g.latSamples += b.LatN
 	g.tpsSum += b.TPS

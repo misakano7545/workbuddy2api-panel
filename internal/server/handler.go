@@ -625,6 +625,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				HasLatency:       delta.HasLatencyMs,
 				TokensPerSecond:  delta.TokensPerSecond,
 				HasTPS:           delta.HasTokensPerSecond,
+				CacheHitTokens:   delta.CacheHitTokens,
+				CacheMissTokens:  delta.CacheMissTokens,
+				HasCache:         delta.HasCacheTokens,
 			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
 		}
 	}
@@ -894,6 +897,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if toks, hasUsage := stats.Tokens(); hasUsage {
 				st.toks = toks
 			}
+			st.cacheHit, st.cacheMiss, st.hasCache = stats.Cache()
 			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
 			// 供下次选号把免费/便宜的号排在前面。
 			if credit, ok := stats.Credit(); ok {
@@ -914,10 +918,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = http.StatusBadGateway
 			return
 		}
-		recordAttempt(acct.UID, usageDeltaFromResponse(resp), attemptStarted)
+		ud := usageDeltaFromResponse(resp)
+		recordAttempt(acct.UID, ud, attemptStarted)
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
 		st.toks = completionTokens(resp)
+		if ud.HasCacheTokens {
+			st.cacheHit, st.cacheMiss, st.hasCache = int(ud.CacheHitTokens), int(ud.CacheMissTokens), true
+		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if credit, total, ok := usageCreditTotal(resp); ok {
 			st.credit, st.hasCredit = credit, true

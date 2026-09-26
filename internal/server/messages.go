@@ -525,6 +525,15 @@ func anthropicUsage(v any) map[string]any {
 	if n, ok := u["completion_tokens"]; ok {
 		out["output_tokens"] = n
 	}
+	// ponytail: 上游的 cache_read_/cache_creation_input_tokens 恒 0，真实命中数在
+	// prompt_cache_hit_tokens（prompt_tokens_details.cached_tokens 同值）。不映射
+	// 的话 Claude 系客户端一律显示缓存读取 0。
+	if n, ok := u["prompt_cache_hit_tokens"]; ok {
+		out["cache_read_input_tokens"] = n
+	}
+	if n, ok := u["prompt_cache_write_tokens"]; ok {
+		out["cache_creation_input_tokens"] = n
+	}
 	return out
 }
 
@@ -896,18 +905,9 @@ func (w *messagesWriter) closeAndStop() error {
 			acc.closed = true
 		}
 	}
-	inTok, outTok := any(0), any(0)
-	if w.x.usage != nil {
-		if v, ok := w.x.usage["prompt_tokens"]; ok {
-			inTok = v
-		}
-		if v, ok := w.x.usage["completion_tokens"]; ok {
-			outTok = v
-		}
-	}
 	if err := w.emit("message_delta", map[string]any{
 		"delta": map[string]any{"stop_reason": anthropicStop(w.x.stop), "stop_sequence": nil},
-		"usage": map[string]any{"input_tokens": inTok, "output_tokens": outTok},
+		"usage": anthropicUsage(w.x.usage),
 	}); err != nil {
 		return err
 	}
