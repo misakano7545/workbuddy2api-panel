@@ -55,6 +55,9 @@ type Config struct {
 		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
 		BlackcatEnabled  bool `json:"blackcat_enabled"`  // 缺省 true；false = 关夜猫子
 		GrowthEnabled    bool `json:"growth_enabled"`    // 缺省 true；false = 关成长任务队列
+		// GrowthConcurrency 排程轮次的账号间并发（缺省 1，上限 4）：与面板手动
+		// 「执行队列」同一个并发语义；调高更快的代价是上游风控暴露面。
+		GrowthConcurrency int `json:"growth_concurrency"`
 		// JitterMinutes 0 = 精确整点。正值把触发时刻摊在该窗口内，同一小时偏移固定。
 		JitterMinutes int `json:"jitter_minutes"`
 
@@ -564,6 +567,13 @@ func (c *Config) normalize() error {
 	}
 	if len(c.Schedule.GrowthHours) == 0 {
 		c.Schedule.GrowthHours = []int{11}
+	}
+	// 排程轮次账号间并发：缺省/0 → 1（老 config 无此键，不能当非法值报错）。
+	if c.Schedule.GrowthConcurrency <= 0 {
+		c.Schedule.GrowthConcurrency = 1
+	}
+	if c.Schedule.GrowthConcurrency > 4 {
+		return fmt.Errorf("schedule.growth_concurrency: %d 非法（1-4，手动入口同为 4 上限）", c.Schedule.GrowthConcurrency)
 	}
 	if c.Schedule.JitterMinutes < 0 || c.Schedule.JitterMinutes > 1440 {
 		return fmt.Errorf("schedule.jitter_minutes: %d 非法（0 = 关闭，上限 1440）", c.Schedule.JitterMinutes)

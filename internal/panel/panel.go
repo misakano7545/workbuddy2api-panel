@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
@@ -86,7 +87,22 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// growthConc 排程轮次的账号间并发（config schedule.growth_concurrency，热生效）。
+	// 0 = 未配置 → 1。
+	growthConc atomic.Int64
+	// notifier 排程轮次结束后的汇总通知出口（main 装配期注入 alerting webhook；
+	// nil = 只落面板日志）。装配期设定、运行期只读，不需要锁。
+	notifier func(string)
 }
+
+// SetGrowthConcurrency 设置排程轮次的账号间并发（1-4；<=0 视为默认 1）。面板保存配置时热改。
+func (p *Panel) SetGrowthConcurrency(n int) {
+	p.growthConc.Store(int64(n))
+}
+
+// SetNotifier 注入汇总通知出口（nil = 关闭推送，只写日志）。装配期调用。
+func (p *Panel) SetNotifier(fn func(string)) { p.notifier = fn }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
 func (p *Panel) tryLockAccount(uid string) bool {

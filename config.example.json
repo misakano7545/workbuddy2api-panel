@@ -20,6 +20,7 @@
     "keepalive_enabled": true,
     "blackcat_enabled": true,
     "growth_enabled": true,
+    "growth_concurrency": 1,
     "jitter_minutes": 0,
     "balance_refresh_enabled": true,
     "balance_refresh_minutes": 5

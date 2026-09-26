@@ -311,18 +311,35 @@ func (m *Monitor) snapshot() Snapshot {
 }
 
 func (m *Monitor) send(eventName string, r *rule, now time.Time, value, threshold float64, msg string) {
-	body, err := json.Marshal(Payload{
+	m.post(Payload{
 		Version: 1, Event: eventName, Service: m.cfg.ServiceName, Rule: r.id, Severity: r.severity,
 		Realm: r.realm, Value: value, Threshold: threshold, Message: msg, Since: r.since, FiredAt: now,
 		Snapshot: m.snapshot(),
-	})
+	}, r.id)
+}
+
+// Notify 推送一条通知（无阈值语义的事件型消息，如排程轮次结果汇总）。
+// 未启用或无 webhook 时静默——通知是旁路，不该影响调用方主流程。
+func (m *Monitor) Notify(message string) {
+	if !m.cfg.Enabled || m.cfg.WebhookURL == "" {
+		return
+	}
+	m.post(Payload{
+		Version: 1, Event: "notify", Service: m.cfg.ServiceName, Severity: "info",
+		Message: message, FiredAt: time.Now(), Snapshot: m.snapshot(),
+	}, "notify")
+}
+
+// post 发 payload 到 webhook（HMAC 签名同规则事件；失败只记日志，不重试）。
+func (m *Monitor) post(p Payload, tag string) {
+	body, err := json.Marshal(p)
 	if err != nil {
-		log.Printf("WARN: [alert] marshal payload rule=%s: %v", r.id, err)
+		log.Printf("WARN: [alert] marshal payload rule=%s: %v", tag, err)
 		return
 	}
 	req, err := http.NewRequest(http.MethodPost, m.cfg.WebhookURL, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("WARN: [alert] build request rule=%s: %v", r.id, err)
+		log.Printf("WARN: [alert] build request rule=%s: %v", tag, err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -334,12 +351,12 @@ func (m *Monitor) send(eventName string, r *rule, now time.Time, value, threshol
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		log.Printf("WARN: [alert] webhook post failed rule=%s: %v", r.id, err)
+		log.Printf("WARN: [alert] webhook post failed rule=%s: %v", tag, err)
 		return
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		log.Printf("WARN: [alert] webhook returned %d rule=%s", resp.StatusCode, r.id)
+		log.Printf("WARN: [alert] webhook returned %d rule=%s", resp.StatusCode, tag)
 	}
 }

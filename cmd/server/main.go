@@ -215,7 +215,8 @@ func main() {
 	case !cfg.Schedule.GrowthEnabled:
 		log.Printf("成长任务队列已禁用（schedule.growth_enabled=false）")
 	default:
-		log.Printf("成长任务队列已启用：%v 点（每日自动跑一遍任务中心待办）", cfg.Schedule.GrowthHours)
+		log.Printf("成长任务队列已启用：%v 点（每日自动跑一遍任务中心待办，账号间并发 %d）",
+			cfg.Schedule.GrowthHours, cfg.Schedule.GrowthConcurrency)
 	}
 	if cfg.Schedule.JitterMinutes > 0 {
 		log.Printf("排程抖动：各任务在名义整点后 0-%d 分钟（schedule.jitter_minutes）", cfg.Schedule.JitterMinutes)
@@ -244,7 +245,9 @@ func main() {
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
 
 	var gw *server.Handler
-	pn := panel.New(panel.Config{
+	// pn 先声明再赋值：SaveConfig 闭包要在同一条语句里捕获它（:= 的作用域从语句结束才开始）。
+	var pn *panel.Panel
+	pn = panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
 		Upstream:    up,
@@ -263,13 +266,14 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch, gw)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, gw, pn)
 		},
 	})
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 	// 成长任务队列排程的执行体在面板（队列逻辑唯一实现）：注入回调，避免 scheduler → panel 循环依赖。
 	sch.SetGrowthRunner(pn.RunGrowthQueueNow)
+	pn.SetGrowthConcurrency(cfg.Schedule.GrowthConcurrency)
 
 	var auditLog *server.AuditLog
 	if cfg.Admin.AuditEnabled {
@@ -323,6 +327,8 @@ func main() {
 			SendResolve:      cfg.Alerting.SendResolve,
 		}, alertSource{pool: p, h: gw})
 		go mon.Run(ctx)
+		// 排程轮次结果汇总的推送出口（告警 webhook 同一条管道；未启用则只落面板日志）。
+		pn.SetNotifier(mon.Notify)
 		log.Printf("alerting: webhook on, every %ds", cfg.Alerting.IntervalSeconds)
 	}
 
@@ -378,7 +384,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, gw *server.Handler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, gw *server.Handler, pn *panel.Panel) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -470,6 +476,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		JitterMinutes: newCfg.Schedule.JitterMinutes,
 	})
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
+	if pn != nil {
+		pn.SetGrowthConcurrency(newCfg.Schedule.GrowthConcurrency) // 排程轮次并发热生效
+	}
 	if gw != nil {
 		gw.SetBudgetLimit(newCfg.Budget.DailyCreditLimit)
 	}

@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,7 +110,7 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 // 执行队列
 // ---------------------------------------------------------------------------
 
-// queueItem 队列执行单元。
+// queueItem 队列里的一个条目。Credit/Energy 只在执行时领到奖励才有值（汇总通知用）。
 type queueItem struct {
 	UID      string `json:"uid"`
 	Nickname string `json:"nickname"`
@@ -118,6 +119,8 @@ type queueItem struct {
 	Title    string `json:"title,omitempty"` // 上游中文名；队列轮询不经过扫描，不带这个名字列只能退回代号
 	Status   string `json:"status"`          // pending | running | done | skipped | error
 	Message  string `json:"message,omitempty"`
+	Credit   int64  `json:"credit,omitempty"` // 本条领到的积分（汇总通知用）
+	Energy   int64  `json:"energy,omitempty"` // 本条领到的能量
 }
 
 // queueState 队列运行状态。Seq 每次启动 +1——前端只渲染"自己启动的那一轮"，
@@ -138,9 +141,18 @@ func (p *Panel) queue() *queueState {
 	return p.q
 }
 
-// growthQueueConcurrency 排程轮次的账号间并发：固定 1。
-// ponytail: 手动入口可 1-4，排程取最保守一档（上游风控敏感）；要更快再加配置项。
-const growthQueueConcurrency = 1
+// growthQueueConcurrency 排程轮次的账号间并发：config schedule.growth_concurrency（热生效），
+// 未配置回落 1（最保守：上游风控敏感）。上限与手动入口相同（4）。
+func (p *Panel) growthQueueConcurrency() int {
+	n := int(p.growthConc.Load())
+	if n < 1 {
+		return 1
+	}
+	if n > 4 {
+		return 4
+	}
+	return n
+}
 
 // tasksRunQueue 面板入口：启动执行队列（{concurrency:1-4}）。
 func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
@@ -152,7 +164,7 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "队列正在执行中（可在任务中心查看进度）")
 		return
 	}
-	total, seq, msg := p.startGrowthQueue(body.Concurrency)
+	total, seq, msg := p.startGrowthQueue(body.Concurrency, false)
 	if total == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": msg})
 		return
@@ -160,17 +172,19 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": total, "seq": seq})
 }
 
-// RunGrowthQueueNow 无 HTTP 入口（growth 排程调用）：扫描成长待办并启动一轮队列。
-// 返回启动项数与提示文案（0 项时文案说明原因）。装配期注入 scheduler（SetGrowthRunner）。
+// RunGrowthQueueNow 无 HTTP 入口（growth 排程调用）：扫描成长待办并启动一轮队列，
+// 并发取 schedule.growth_concurrency，轮次结束发结果汇总。返回启动项数与提示文案
+// （0 项时文案说明原因）。装配期注入 scheduler（SetGrowthRunner）。
 func (p *Panel) RunGrowthQueueNow() (int, string) {
-	total, _, msg := p.startGrowthQueue(growthQueueConcurrency)
+	total, _, msg := p.startGrowthQueue(p.growthQueueConcurrency(), true)
 	return total, msg
 }
 
 // startGrowthQueue 扫描成长待办并启动执行队列，返回 (启动项数, 队列轮次号, 提示文案)。
 // 面板「执行队列」按钮与 growth 排程共用这一条路径：同一队列状态、同一把 per-account 锁。
 // 先扫描，把成长待办按账号内 autoActions 顺序排队。账号内串行，账号间受并发限制。
-func (p *Panel) startGrowthQueue(concurrency int) (total int, seq int, msg string) {
+// notify=true 时（排程轮次）执行结束发结果汇总。
+func (p *Panel) startGrowthQueue(concurrency int, notify bool) (total int, seq int, msg string) {
 	if p.cfg.Pool == nil || p.cfg.Upstream == nil {
 		return 0, 0, "账号池未接线"
 	}
@@ -260,7 +274,7 @@ func (p *Panel) startGrowthQueue(concurrency int) (total int, seq int, msg strin
 	seq = q.seq
 	q.mu.Unlock()
 
-	go p.runQueueItems(accts, items, concurrency)
+	go p.runQueueItems(accts, items, concurrency, notify)
 	log.Printf("panel: 队列启动：%d 项（并发 %d）", len(items), concurrency)
 	return len(items), seq, ""
 }
@@ -272,15 +286,57 @@ func (q *queueState) isRunning() bool {
 	return q.running
 }
 
+// summaryLocked 本轮结果摘要（须持 q.mu）：状态计数 + 领奖合计 + 耗时 + 失败项代号。
+func (q *queueState) summaryLocked(dur time.Duration) string {
+	var done, skipped, failed int
+	var credit, energy int64
+	var bad []string
+	for _, it := range q.items {
+		switch it.Status {
+		case "done":
+			done++
+		case "skipped":
+			skipped++
+		case "error":
+			failed++
+			if len(bad) < 3 {
+				bad = append(bad, it.Code)
+			}
+		}
+		credit += it.Credit
+		energy += it.Energy
+	}
+	s := fmt.Sprintf("第 %d 轮 %d 项：完成 %d / 跳过 %d / 失败 %d · 领奖 %d 分 +%d 能 · 耗时 %s",
+		q.seq, len(q.items), done, skipped, failed, credit, energy, dur.Round(time.Second))
+	if len(bad) > 0 {
+		s += " · 失败项 " + strings.Join(bad, ",")
+	}
+	return s
+}
+
+// notifyQueueSummary 推送本轮汇总（日志已由调用方记，这里只管注入的通知出口）。
+func (p *Panel) notifyQueueSummary(sum string) {
+	if p.notifier == nil {
+		return
+	}
+	p.notifier("growth 队列 " + sum)
+}
+
 // runQueueItems 队列执行主体：按账号分组，账号内串行（per-account 锁），
-// 账号间并发（信号量）。每项结果写回队列状态。
-func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurrency int) {
+// 账号间并发（信号量）。每项结果写回队列状态。notify=true 时（排程轮次）
+// 结束后发一轮结果汇总（面板日志 + 注入的通知出口）。
+func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurrency int, notify bool) {
 	q := p.queue()
+	startedAt := time.Now()
 	defer func() {
 		q.mu.Lock()
 		q.running = false
+		sum := q.summaryLocked(time.Since(startedAt)) // 锁内取：避免下一轮启动后误统计新 items
 		q.mu.Unlock()
-		log.Printf("panel: 队列执行结束（共 %d 项）", len(items))
+		log.Printf("panel: 队列执行结束：%s", sum)
+		if notify {
+			p.notifyQueueSummary(sum)
+		}
 	}()
 
 	sem := make(chan struct{}, concurrency)
@@ -312,15 +368,17 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				}
 				p.queueMarkAt(i, "running", "")
 				var msg string
+				var credit, energy int64
 				var err error
 				if kind == "growth" {
-					msg, err = p.runGrowthQueued(one.a, code)
+					msg, credit, energy, err = p.runGrowthQueued(one.a, code)
 				}
 				if err != nil {
 					p.queueMarkAt(i, "error", err.Error())
 				} else {
 					p.queueMarkAt(i, "done", msg)
 				}
+				p.queueRewardAt(i, credit, energy)
 				time.Sleep(reportGap) // 项间节流
 			}
 		}(one)
@@ -346,6 +404,17 @@ func (p *Panel) queueMarkAt(i int, status, msg string) {
 	q := p.queue()
 	q.mu.Lock()
 	q.items[i].Status, q.items[i].Message = status, msg
+	q.mu.Unlock()
+}
+
+// queueRewardAt 按索引回填本条领到的奖励（汇总通知用）。
+func (p *Panel) queueRewardAt(i int, credit, energy int64) {
+	if credit == 0 && energy == 0 {
+		return
+	}
+	q := p.queue()
+	q.mu.Lock()
+	q.items[i].Credit, q.items[i].Energy = credit, energy
 	q.mu.Unlock()
 }
 
@@ -384,27 +453,27 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 }
 
 // runGrowthQueued 执行单个成长任务（动作 + 回读 + 自动领奖；与
-// accountTaskAuto 同语义，结果以文字返回）。
-func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
+// accountTaskAuto 同语义，结果以文字返回）。credit/energy 为本条实领奖励（汇总用）。
+func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (msg string, credit, energy int64, err error) {
 	act := autoActionFor(code)
 	if act == nil {
-		return "", fmt.Errorf("任务 %s 无自动动作", code)
+		return "", 0, 0, fmt.Errorf("任务 %s 无自动动作", code)
 	}
 	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
 	before, err := p.taskByCode(a, code)
 	if err != nil {
-		return "", err
+		return "", 0, 0, err
 	}
 	if before == nil {
-		return "该账号无此任务", nil
+		return "该账号无此任务", 0, 0, nil
 	}
 	isMP := isMPTaskCode(code)
 	if before.Claimed {
-		return "已完成（已领取）", nil
+		return "已完成（已领取）", 0, 0, nil
 	}
-	msg, err := act.run(p, a)
+	msg, err = act.run(p, a)
 	if err != nil {
-		return "", err
+		return "", 0, 0, err
 	}
 	var after *upstream.Task
 	if isMP {
@@ -413,7 +482,6 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 		after, _ = p.taskByCodeWaiting(a, code)
 	}
 	if after != nil && after.Claimable {
-		var credit, energy int64
 		var cerr error
 		if isMP {
 			credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, code)
@@ -428,7 +496,7 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 		msg += "（进度 " + taskProgressText(after) + "）"
 	}
 	log.Printf("panel: 队列 growth uid=%s code=%s: %s", a.UID, code, msg)
-	return msg, nil
+	return msg, credit, energy, nil
 }
 
 // tasksQueueStatus 队列状态（轮询用）。

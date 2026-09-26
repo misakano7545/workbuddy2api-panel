@@ -368,6 +368,7 @@ curl -s http://localhost:7863/v1/responses \
 | `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活 |
 | `schedule.blackcat_hours` | `[23]` | 每日本地时区整点夜猫子补足（23:00–08:00 计数窗口） |
 | `schedule.growth_hours` | `[11]` | 每日本地时区整点自动跑一遍**成长任务队列**（任务中心待办：扫描 → accept → 动作 → 达标领奖） |
+| `schedule.growth_concurrency` | `1` | 排程轮次的账号间并发（1-4，>4 启动报错）；越高越快，上游风控暴露面越大 |
 | `schedule.checkin_enabled` | `true` | 签到总开关；`false` 真正关闭 |
 | `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
 | `schedule.activity_enabled` | `true` | 活跃上报总开关 |
@@ -491,7 +492,7 @@ curl -s http://localhost:7863/v1/responses \
 | 猫猫旅行 | `schedule.travel_enabled` | `travel_hours` `[9, 21]` 整点 | 独立排程：无猫领养 / `idle` 派出 / `arrived` 领奖 |
 | 保活 | `schedule.keepalive_enabled` | `keepalive_hours` `[22]` 整点 | 全账号刷新 token；session 失效**连续 3 次**才自动禁用 |
 | 夜猫子 | `schedule.blackcat_enabled` | `blackcat_hours` `[23]` 整点 | **先查任务进度再决定**：`black_cat` 未达标才在 23:00–08:00 计数窗口内补足 glm-5.2 短对话（每天 1 次累计 3 天，漏跑次日窗口自动补） |
-| 成长任务队列 | `schedule.growth_enabled` | `growth_hours` `[11]` 整点 | 自动跑一遍任务中心的成长待办（见下）；排程轮次账号间固定串行 |
+| 成长任务队列 | `schedule.growth_enabled` | `growth_hours` `[11]` 整点 | 自动跑一遍任务中心的成长待办（见下）；账号间并发 `growth_concurrency`（默认 1，上限 4） |
 
 #### 成长任务队列（独立排程）
 
@@ -505,7 +506,9 @@ curl -s http://localhost:7863/v1/responses \
 
 - **幂等**：全部账号都没待办时只发了几个只读列表请求，日志一行 `growth 队列：全部账号没有待办任务`
 - **不打架**：与手动「执行队列 / 一键完成」共用队列状态与账号锁——排程在跑时手动点击会被 409 / 该账号跳过，不会同账号并发两轮动作
+- **账号间并发**：`schedule.growth_concurrency`（默认 1，上限 4，面板可改、热生效）。1 = 账号逐个跑（最保守，上游风控敏感），调高更快的代价是并发面对上游更大
 - **默认 11 点**：排在签到（9 点）与活跃上报（10 点）之后，当天新解锁的任务已被点亮，扫得到
+- **结果汇总**：排程轮次跑完写一行面板日志（`第 N 轮 X 项：完成 a / 跳过 b / 失败 c · 领奖 p 分 +q 能 · 耗时 t · 失败项 CODE`），并在 `alerting.enabled` 打开时**推同一条到告警 webhook**（`event=notify`）；未配 alerting 就只落日志。手动轮次不推送（界面在看，别刷通知）
 - 手动补跑：面板任务中心的「执行队列」按钮，或 `POST /admin/tasks/growth/run`（需 `admin.enabled`）
 - 关闭：`schedule.growth_enabled: false`（只关排程，任务中心手动入口照旧可用）
 
