@@ -765,6 +765,8 @@ async function loadTasks() {
         : t.accept_status === 'accepted' ? '<span class="tag mute">进行中</span>'
         : '<span class="tag mute">未接受</span>';
       const acted = t.claimed || t.locked ? ''
+        : t.task_code === 'first_buddy'
+          ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(AUTO_TASKS[t.task_code] || '') + '">一键完成</button>'
         : t.claimable ? '<button class="xs primary" data-t="claim" data-c="' + esc(t.task_code) + '">领取</button>'
         : AUTO_TASKS[t.task_code] ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(AUTO_TASKS[t.task_code]) + '">一键完成</button>'
         : t.accept_status === 'accepted' ? ''

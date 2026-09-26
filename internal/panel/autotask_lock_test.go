@@ -26,6 +26,21 @@ func TestTaskAccountLockSameAccountExclusive(t *testing.T) {
 	p.unlockAccount(uid)
 }
 
+func TestFirstBuddyNotSkippedWhenProgressFull(t *testing.T) {
+	open := &upstream.Task{TaskCode: "first_buddy", Current: 1, Target: 1, AcceptStatus: "completed"}
+	if growthActionSkipped(open) {
+		t.Fatal("进度满但未领取，不能跳过")
+	}
+	open.Claimed = true
+	if !growthActionSkipped(open) {
+		t.Fatal("已领取应跳过")
+	}
+	other := &upstream.Task{TaskCode: "chat_5", Current: 5, Target: 5}
+	if !growthActionSkipped(other) {
+		t.Fatal("其它任务进度满仍跳过")
+	}
+}
+
 // TestTaskAccountLockDifferentAccountsIndependent 不同账号的锁互不影响（并行照旧）。
 func TestTaskAccountLockDifferentAccountsIndependent(t *testing.T) {
 	p := &Panel{}

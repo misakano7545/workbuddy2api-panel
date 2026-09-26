@@ -1083,6 +1083,18 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 // 全量自动完成
 // ---------------------------------------------------------------------------
 
+// growthActionSkipped 一键全量是否跳过。
+// ponytail: first_buddy 进度满只说明对话做过，奖励在 agreement + buddy/first。按进度跳过就永远领不到。
+func growthActionSkipped(t *upstream.Task) bool {
+	if t.Claimed {
+		return true
+	}
+	if t.TaskCode == "first_buddy" {
+		return false
+	}
+	return t.Target > 0 && t.Current >= t.Target
+}
+
 // runAutoAll 对单账号依次执行所有可自动化任务，返回逐项结果。
 // 供「一键完成全部可自动任务」使用；单项失败不影响后续项。
 //
@@ -1154,7 +1166,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			out = append(out, item)
 			continue
 		}
-		if before.Claimed || before.Current >= before.Target && before.Target > 0 {
+		if growthActionSkipped(before) {
 			item["status"] = "skipped"
 			item["message"] = "已完成（" + taskProgressText(before) + "）"
 			out = append(out, item)
