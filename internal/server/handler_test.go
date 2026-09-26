@@ -702,11 +702,20 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 }
 
 func TestChatAllUnavailableReturns503(t *testing.T) {
+	// 池里同时有余额耗尽号与软冷却号：兜底轮换打到软冷却号也失败（500）——收口仍是
+	// 笼统 503 no_healthy_account。「重试有救」（软冷却会到期）时不越权声称积分耗尽
+	//（那是 429 insufficient_quota 的语义，见 TestChatCreditExhaustedPoolReturnsQuotaError）。
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		return 402, `{"code":1,"msg":"余额不足"}`, false
+		return 500, `{"code":500,"msg":"boom"}`, false
 	})
+	p := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
+	)
+	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	p.CooldownSoftRate("u2", time.Minute, time.Time{}, "429")
 	h := NewHandler(Config{
-		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Pool:     p,
 		Upstream: up,
 	})
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
@@ -719,6 +728,9 @@ func TestChatAllUnavailableReturns503(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &e)
 	if e["error"] == nil {
 		t.Errorf("want error envelope: %s", rec.Body)
+	}
+	if errObj, _ := e["error"].(map[string]any); errObj["code"] != "no_healthy_account" {
+		t.Errorf("code=%v want no_healthy_account", errObj["code"])
 	}
 }
 
@@ -1523,5 +1535,74 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	}
 	if systemCount != 1 {
 		t.Errorf("want exactly 1 system message, got %d (all=%v)", systemCount, msgs)
+	}
+}
+
+// TestChatCreditExhaustedPoolReturnsQuotaError 账号积分耗尽（14018/402 → CoolHard）
+// 后池内无可试号时，客户端错误必须是 429 + insufficient_quota（OpenAI 自己的 quota
+// 错误口径）——笼统 503 no_healthy_account 既看不出真实原因，又会让客户端对着必然
+// 失败的请求徒劳重试。同时带上「等签到/购买加量包」的 gateway_hint。
+func TestChatCreditExhaustedPoolReturnsQuotaError(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "only", AccessToken: "at-only", ExpiresAt: 9999999999})
+	p.CooldownUntilTomorrow4AM("only", "余额不足")
+	h := NewHandler(Config{Pool: p, Upstream: &upstream.Client{}, SoftCooldown: time.Minute})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d want 429 body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Hint    string `json:"gateway_hint"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Error.Type != "insufficient_quota" || got.Error.Code != "insufficient_quota" {
+		t.Fatalf("want insufficient_quota 口径, got %+v", got.Error)
+	}
+	if !strings.Contains(got.Error.Message, "credits") {
+		t.Fatalf("message 应说明积分耗尽: %q", got.Error.Message)
+	}
+	if got.Error.Hint == "" {
+		t.Fatal("积分耗尽响应应带 gateway_hint")
+	}
+}
+
+// TestChat14018SingleAccountReturnsQuotaError 单号池撞 14018：该号被硬冷却后无可轮转，
+// 客户端必须拿到 429 insufficient_quota + 上游原文（含购买加量包链接）——而不是
+// 503「暂时不可用」，原文里的恢复途径不能丢。
+func TestChat14018SingleAccountReturnsQuotaError(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 429, `{"code":14018,"msg":"Credits exhausted. Please visit the link below to purchase add-on packs"}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "only", AccessToken: "at-only", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d want 429 body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Hint    string `json:"gateway_hint"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Error.Code != "insufficient_quota" {
+		t.Fatalf("code=%q want insufficient_quota", got.Error.Code)
+	}
+	if !strings.Contains(got.Error.Message, "Credits exhausted") {
+		t.Fatalf("上游原文应透传, got %q", got.Error.Message)
 	}
 }

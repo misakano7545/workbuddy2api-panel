@@ -1738,3 +1738,36 @@ func TestTokenUsagePersistsAcrossReload(t *testing.T) {
 		t.Fatalf("state.json contains credential field: %s", raw)
 	}
 }
+
+// TestAllHardCreditForRealm 只有「挡路的全是余额耗尽冷却」才判积分耗尽：
+// 健康号/软冷却/禁用号在场，或空池，都必须 false（不越权声称积分耗尽）。
+func TestAllHardCreditForRealm(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "hc"})
+	p.CooldownUntilTomorrow4AM("hc", "余额不足")
+	if !p.AllHardCreditForRealm("") {
+		t.Fatal("全池余额耗尽冷却应判 true")
+	}
+	p.Add(&auth.Auth{UID: "healthy"})
+	if p.AllHardCreditForRealm("") {
+		t.Fatal("场内出现健康号应判 false")
+	}
+
+	soft := New("")
+	soft.Add(&auth.Auth{UID: "s"})
+	soft.CooldownSoftRate("s", time.Minute, time.Time{}, "429")
+	if soft.AllHardCreditForRealm("") {
+		t.Fatal("软冷却不是积分耗尽，应判 false")
+	}
+
+	dis := New("")
+	dis.Add(&auth.Auth{UID: "d"})
+	dis.Disable("d", "manual")
+	if dis.AllHardCreditForRealm("") {
+		t.Fatal("有禁用号应判 false")
+	}
+
+	if New("").AllHardCreditForRealm("") {
+		t.Fatal("空池应判 false")
+	}
+}

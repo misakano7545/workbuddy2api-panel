@@ -942,6 +942,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"
+	// quota：积分耗尽专用形态（429 + type/code 同为 insufficient_quota，OpenAI
+	// 自己的 quota 错误口径；客户端据此不重试）。
+	quota := false
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
@@ -953,6 +956,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrHardCredit:
+			// 14018/402：积分耗尽。429 + insufficient_quota，message 优先上游
+			// 原文（含购买链接；下方统一覆盖）。
+			status, quota = http.StatusTooManyRequests, true
+			msg = hardCreditMessage
 		case upstream.ErrWafBlock:
 			if h.wafIP.active() {
 				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
@@ -966,10 +974,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
 			msg = s
 		}
+	} else if h.cfg.Pool != nil && h.cfg.Pool.AllHardCreditForRealm(realm) {
+		// 池里一个可试的号都没有，且挡路的全是余额耗尽冷却：把笼统的「无可用账号」
+		// 细化成积分耗尽语义——客户端对着必然失败的请求重试只是白等。
+		status, quota = http.StatusTooManyRequests, true
+		msg = hardCreditMessage
+		hint = upstream.GatewayHint(upstream.ErrHardCredit, "", upstream.HintContext{})
 	}
-	writeOpenAIErrorHint(w, status, code, msg, hint)
+	if quota {
+		writeOpenAIQuotaError(w, msg, hint)
+	} else {
+		writeOpenAIErrorHint(w, status, code, msg, hint)
+	}
 	st.status = status
 }
+
+// hardCreditMessage 池内无号可试、原因全是积分耗尽时的自有文案（无上游原文可
+// 透传的场合；与 gateway_hint 并列，不重复 hint 的「等签到恢复」指向）。
+const hardCreditMessage = "all accounts have exhausted upstream credits; retry after credits are restored (daily check-in or add-on packs)"
 
 // promptTooLongMessage 11115 透传 message：上游 body 原文（含真实 token 数/
 // 上限值/requestId，客户端自行排查）；空 body 兜底为可读分类短文案（不编造原文）。
@@ -1178,6 +1200,21 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 			"gateway_hint": hint,
 		},
 	})
+}
+
+// writeOpenAIQuotaError 积分耗尽专用响应：429 + type/code 同为 insufficient_quota
+// （OpenAI 自身 quota 错误的字段口径，客户端按 type 或 code 任一即可识别「不是限流、
+// 重试无意义」）。message 照旧装上游原文或自有文案。
+func writeOpenAIQuotaError(w http.ResponseWriter, msg, hint string) {
+	e := map[string]any{
+		"message": msg,
+		"type":    "insufficient_quota",
+		"code":    "insufficient_quota",
+	}
+	if hint != "" {
+		e["gateway_hint"] = hint
+	}
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": e})
 }
 
 // hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态

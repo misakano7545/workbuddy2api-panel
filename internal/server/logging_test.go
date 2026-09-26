@@ -260,11 +260,12 @@ func TestChatLogsErrorRow(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
 		h.ServeHTTP(rec, req)
-		if rec.Code != 503 {
+		// 402 余额不足 → 硬冷却后无号轮转 → 积分耗尽语义（429 + insufficient_quota）。
+		if rec.Code != 429 {
 			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 		}
 	})
-	for _, want := range []string{"| u1 ", "| 503 |", "tok=-"} {
+	for _, want := range []string{"| u1 ", "| 429 |", "tok=-"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("error row missing %q:\n%s", want, out)
 		}

@@ -443,6 +443,29 @@ func (p *Pool) RealmHealth(realm string) RealmHealth {
 	return h
 }
 
+// AllHardCreditForRealm 报告「该域一个可用号都没有，且挡路的全是余额耗尽冷却」
+// （CoolHard）。realm=="" 统计全池。
+//
+// 用于把「无可用账号」细化成语义化的积分耗尽错误（429 + insufficient_quota，
+// 客户端据此不再徒劳重试）。保守判定：有任一健康号/软冷却号/禁用号即 false——
+// 只有唯一原因是积分耗尽时才成立；调用点本就只在池不可服务时才会问。
+func (p *Pool) AllHardCreditForRealm(realm string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	n := 0
+	for _, e := range p.byUID {
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if e.disabled || e.healthy(now) || e.coolKind != CoolHard {
+			return false
+		}
+		n++
+	}
+	return n > 0
+}
+
 // ServableNow 报告池当前是否可服务：存在至少一个 healthy 且未占满在途名额的账号。
 // 与 CountsDetailed 的 healthy 口径不同：healthy 只看 disabled/until/breakerUntil（状态机权威判定），
 // 不看 inFlight；ServableNow 额外叠加在途维度，与 chat 的真实可达性（Pick 会跳过 inFlightFull 账号）对齐。
