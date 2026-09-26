@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,8 @@ type Config struct {
 	KeepaliveDisabled bool
 	// BlackcatDisabled 显式关闭夜猫子排程（schedule.blackcat_enabled=false）。
 	BlackcatDisabled bool
+	// JitterMinutes 名义整点之后的确定性偏移窗口。0 = 精确整点。
+	JitterMinutes int
 }
 
 // Scheduler 调度器。
@@ -98,7 +101,7 @@ func New(cfg Config) *Scheduler {
 // Reconfigure 热更新排程参数（面板保存配置后调用）：改时点/开关并通知运行中的循环重算。
 // 空 hours 视为「未配置」保留原值（与 config.normalize 的回落语义一致）。
 func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepaliveHours, blackcatHours []int,
-	checkinDisabled, travelDisabled, activityDisabled, keepaliveDisabled, blackcatDisabled bool) {
+	checkinDisabled, travelDisabled, activityDisabled, keepaliveDisabled, blackcatDisabled bool, jitterMinutes int) {
 	s.schedMu.Lock()
 	if len(checkinHours) > 0 {
 		s.cfg.CheckinHours = checkinHours
@@ -120,6 +123,7 @@ func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepal
 	s.cfg.ActivityDisabled = activityDisabled
 	s.cfg.KeepaliveDisabled = keepaliveDisabled
 	s.cfg.BlackcatDisabled = blackcatDisabled
+	s.cfg.JitterMinutes = jitterMinutes
 	s.schedMu.Unlock()
 	poke(s.rearmSchedule)
 	poke(s.rearmBalance)
@@ -133,16 +137,53 @@ func poke(ch chan struct{}) {
 	}
 }
 
-// nextFire 返回 now 之后最近的一个整点触发时间；hours 为本地小时（0-23）。
+// nextFire 零抖动，供旧测试。正式排程走 nextFireKind。
 func nextFire(now time.Time, hours []int) time.Time {
+	return nextFireKind(now, hours, taskCheckin, 0)
+}
+
+func (k taskKind) String() string {
+	switch k {
+	case taskCheckin:
+		return "checkin"
+	case taskTravel:
+		return "travel"
+	case taskActivity:
+		return "activity"
+	case taskKeepalive:
+		return "keepalive"
+	case taskBlackcat:
+		return "blackcat"
+	default:
+		return "task"
+	}
+}
+
+// jitterOffset 同一任务、同一天、同一小时永远同一偏移。
+// ponytail: FNV, not math/rand. nextWake recomputes every loop; a fresh random would refire the hour.
+func jitterOffset(kind taskKind, nominal time.Time, jitterMinutes int) time.Duration {
+	if jitterMinutes <= 0 {
+		return 0
+	}
+	secs := int64(jitterMinutes) * 60
+	h := fnv.New32a()
+	_, _ = fmt.Fprintf(h, "%s|%s", kind, nominal.Format("2006-01-02T15"))
+	return time.Duration(int64(h.Sum32())%secs) * time.Second
+}
+
+func nextFireKind(now time.Time, hours []int, kind taskKind, jitterMinutes int) time.Time {
 	var earliest time.Time
-	for _, h := range hours {
-		t := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, now.Location())
-		if !t.After(now) {
-			t = t.Add(24 * time.Hour)
-		}
-		if earliest.IsZero() || t.Before(earliest) {
-			earliest = t
+	for _, hour := range hours {
+		for d := 0; d < 2; d++ {
+			nominal := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, now.Location()).AddDate(0, 0, d)
+			t := nominal.Add(jitterOffset(kind, nominal, jitterMinutes))
+			if !t.After(now) {
+				continue
+			}
+			if earliest.IsZero() || t.Before(earliest) {
+				earliest = t
+			}
+			break
 		}
 	}
 	return earliest
@@ -169,6 +210,7 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	travelHours, activityHours := s.cfg.TravelHours, s.cfg.ActivityHours
 	checkinOff, keepaliveOff, blackcatOff := s.cfg.CheckinDisabled, s.cfg.KeepaliveDisabled, s.cfg.BlackcatDisabled
 	travelOff, activityOff := s.cfg.TravelDisabled, s.cfg.ActivityDisabled
+	jitter := s.cfg.JitterMinutes
 	s.schedMu.Unlock()
 
 	type slot struct {
@@ -177,19 +219,19 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	var slots []slot
 	if !checkinOff {
-		slots = append(slots, slot{nextFire(now, checkinHours), taskCheckin})
+		slots = append(slots, slot{nextFireKind(now, checkinHours, taskCheckin, jitter), taskCheckin})
 	}
 	if !travelOff {
-		slots = append(slots, slot{nextFire(now, travelHours), taskTravel})
+		slots = append(slots, slot{nextFireKind(now, travelHours, taskTravel, jitter), taskTravel})
 	}
 	if !activityOff {
-		slots = append(slots, slot{nextFire(now, activityHours), taskActivity})
+		slots = append(slots, slot{nextFireKind(now, activityHours, taskActivity, jitter), taskActivity})
 	}
 	if !keepaliveOff {
-		slots = append(slots, slot{nextFire(now, keepaliveHours), taskKeepalive})
+		slots = append(slots, slot{nextFireKind(now, keepaliveHours, taskKeepalive, jitter), taskKeepalive})
 	}
 	if !blackcatOff {
-		slots = append(slots, slot{nextFire(now, blackcatHours), taskBlackcat})
+		slots = append(slots, slot{nextFireKind(now, blackcatHours, taskBlackcat, jitter), taskBlackcat})
 	}
 	var earliest time.Time
 	for _, sl := range slots {

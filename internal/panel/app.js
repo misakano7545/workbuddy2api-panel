@@ -859,7 +859,7 @@ function groupItems(d) {
     const rows = [];
     for (const t of (a.growth || [])) {
       GROWTH_TITLES[t.task_code] = t.title || t.task_code;
-      rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan' });
+      rows.push({ kind: 'growth', code: t.task_code, title: t.title || '', prog: t.target ? t.current + '/' + t.target : '—', status: 'scan' });
     }
     if (rows.length) groups.push({ uid: a.uid, nick: a.nickname, rows });
   }
@@ -867,7 +867,7 @@ function groupItems(d) {
 }
 const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行' };
 function qrowHTML(it) {
-  const title = GROWTH_TITLES[it.code] || it.code;
+  const title = it.title || GROWTH_TITLES[it.code] || it.code;
   const dotCls = it.status === 'scan' ? 'wait' : it.status === 'running' ? 'run' : it.status === 'error' ? 'err' : it.status === 'skipped' ? 'skip' : it.status === 'done' ? 'done' : 'wait';
   const stWord = it.status === 'scan' ? '待执行' : (ST_WORDS[it.status] || it.status);
   return '<div class="qrow" title="' + esc(it.message || '') + '">' +
@@ -913,7 +913,7 @@ function groupsFromQueue(items) {
   for (const it of items) {
     if (!by.has(it.uid)) by.set(it.uid, { uid: it.uid, nick: it.nickname, rows: [] });
     by.get(it.uid).rows.push({
-      kind: it.kind, code: it.code,
+      kind: it.kind, code: it.code, title: it.title || '',
       prog: '',
       status: it.status, message: it.message,
     });

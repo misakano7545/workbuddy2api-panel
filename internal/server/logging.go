@@ -32,25 +32,28 @@ func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
-	start  time.Time
-	model  string
-	mode   string // "stream" | "sync"
-	uid    string // 完整 uid，展示时只取前 8 位
-	nick   string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
-	ttfb   time.Duration
-	toks   int // <0 表示 usage 缺失 → 显示 "-"
-	status int
+	start     time.Time
+	model     string
+	mode      string // "stream" | "sync"
+	uid       string // 完整 uid，展示时只取前 8 位
+	nick      string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
+	ttfb      time.Duration
+	toks      int // <0 表示 usage 缺失 → 显示 "-"
+	status    int
+	credit    float64
+	hasCredit bool
+	budget    *dailyBudget
 
 	logged bool
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
-func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
+func newChatStat(now time.Time, body []byte, stream bool, budget *dailyBudget) *chatStat {
 	mode := "sync"
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1, budget: budget}
 }
 
 // done 幂等落一行表格日志。
@@ -59,7 +62,10 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
-	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks)
+	total := time.Since(s.start)
+	logChatRow(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks)
+	s.budget.add(s.credit, s.hasCredit)
+	noteProm(s, total)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，

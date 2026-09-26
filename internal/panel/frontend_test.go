@@ -123,3 +123,67 @@ try {
 		}
 	}
 }
+
+// TestQrowShowsCodeAndTitle 任务中心行必须同时画出内部代号和上游中文名。
+// 队列轮询不经过扫描，名字只能来自条目自己的 title；退回代号会让两列都是 Sequential_Tasks_*。
+func TestQrowShowsCodeAndTitle(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available")
+	}
+	harness := `const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+function extractFn(name) {
+  const sig = 'function ' + name + '(';
+  const start = src.indexOf(sig);
+  if (start < 0) throw new Error('missing ' + name);
+  let i = src.indexOf('{', start);
+  let depth = 0, inStr = '';
+  for (; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) {
+      if (c === '\\') { i++; continue; }
+      if (c === inStr) inStr = '';
+      continue;
+    }
+    if (c === '"' || c === "'" || c === String.fromCharCode(96)) { inStr = c; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) return src.slice(start, i + 1); }
+  }
+  throw new Error('unclosed ' + name);
+}
+const GROWTH_TITLES = {};
+const ST_WORDS = { done: '完成', scan: '待执行' };
+function esc(s) { return String(s == null ? '' : s); }
+eval(extractFn('qrowHTML'));
+eval(extractFn('groupsFromQueue'));
+const groups = groupsFromQueue([{ uid: 'u', nickname: 'n', kind: 'growth', code: 'Sequential_Tasks_4', title: '创建 1 个定时任务', status: 'done', message: 'm' }]);
+const html = qrowHTML(groups[0].rows[0]);
+const name = html.split('class="t">')[1].split('<')[0];
+if (!html.includes('>Sequential_Tasks_4<') || name !== '创建 1 个定时任务') {
+  console.log('FAIL', name, html);
+  process.exit(1);
+}
+const bare = qrowHTML({ code: 'black_cat', status: 'done' });
+const bareName = bare.split('class="t">')[1].split('<')[0];
+if (bareName !== 'black_cat') {
+  console.log('FAIL fallback', bareName);
+  process.exit(1);
+}
+console.log('OK');
+`
+	hf, err := os.CreateTemp(t.TempDir(), "qrow-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hf.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	hf.Close()
+	cmd := exec.Command(node, hf.Name(), "app.js")
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("qrow title check: %v\n%s", err, out)
+	}
+}

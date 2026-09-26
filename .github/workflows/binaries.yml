@@ -18,6 +18,13 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: test
+        run: go test ./...
+
+      # ponytail: 上海时间，月日时不补零、分两位、不带秒。同一分钟再发才会撞号。
+      - name: version
+        run: echo "VERSION=$(TZ=Asia/Shanghai date +%Y.%-m.%-d.%-H%M)" >> "$GITHUB_ENV"
+
       - name: build
         run: |
           set -euo pipefail
@@ -29,14 +36,14 @@ jobs:
             cp "$3" "$dir/"
             cp config.example.json README.md "$dir/"
             python3 -c 'import os,sys,zipfile; n,d=sys.argv[1:]; z=zipfile.ZipFile(n,"w",zipfile.ZIP_DEFLATED); [z.write(os.path.join(d,f), f) for f in os.listdir(d)]; z.close()' \
-              "dist/wb2api-panel-${GITHUB_REF_NAME}-$1-$2.zip" "$dir"
+              "dist/wb2api-panel-${VERSION}-$1-$2.zip" "$dir"
           }
           for os in windows linux; do
             bin=wb2api
             [ "$os" = windows ] && bin=wb2api.exe
             for arch in amd64 arm64; do
               CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-                go build -trimpath -ldflags="-s -w" -o "$bin" ./cmd/server
+                go build -trimpath -ldflags="-s -w -X main.appVersion=${VERSION}" -o "$bin" ./cmd/server
               pack "$os" "$arch" "$bin"
             done
           done
@@ -44,27 +51,27 @@ jobs:
       # ponytail: 四个 upload，每个系统架构一个 artifact。matrix 等构建时间不够再用。
       - uses: actions/upload-artifact@v4
         with:
-          name: wb2api-panel-${{ github.ref_name }}-windows-amd64
+          name: wb2api-panel-${{ env.VERSION }}-windows-amd64
           path: dist/windows-amd64
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: wb2api-panel-${{ github.ref_name }}-windows-arm64
+          name: wb2api-panel-${{ env.VERSION }}-windows-arm64
           path: dist/windows-arm64
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: wb2api-panel-${{ github.ref_name }}-linux-amd64
+          name: wb2api-panel-${{ env.VERSION }}-linux-amd64
           path: dist/linux-amd64
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: wb2api-panel-${{ github.ref_name }}-linux-arm64
+          name: wb2api-panel-${{ env.VERSION }}-linux-arm64
           path: dist/linux-arm64
           if-no-files-found: error
 
       - name: release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.zip --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "v${VERSION}" dist/*.zip --title "v${VERSION}" --generate-notes

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -59,9 +60,18 @@ type Config struct {
 	GlobalEnabled bool
 
 	// Usage 逐请求用量记录器（可选；nil = 不记录）。
-	// 在 recordAttempt 这一唯一汇聚点调用，因此流式/非流式、成功/失败都会计入，
-	// 且与 pool 的每账号累计器同源，两条口径不会漂移。
 	Usage *usage.Recorder
+
+	// AdminEnabled 为 true 才注册 POST /admin/tasks/{name}/run。缺省关闭。
+	AdminEnabled bool
+	// MetricsEnabled 为 true 才注册 GET /metrics。缺省关闭。
+	MetricsEnabled bool
+	// Tasks 手动补跑。nil 时开了 admin 也回 503。
+	Tasks TaskRunner
+	// Audit 非 nil 时 /admin 操作追加 JSONL。
+	Audit *AuditLog
+	// BudgetLimit <=0 不拦。按 CST 日累计观测到的 credit。
+	BudgetLimit float64
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -104,7 +114,10 @@ type Handler struct {
 	degrade degradeGate
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
-	wafIP wafIPGate
+	wafIP       wafIPGate
+	taskMu      sync.Mutex
+	taskRunning map[string]bool
+	budget      *dailyBudget
 }
 
 // NewHandler 构建 handler。
@@ -121,7 +134,12 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{
+		cfg:         cfg,
+		mux:         http.NewServeMux(),
+		taskRunning: map[string]bool{},
+		budget:      newDailyBudget(cfg.BudgetLimit),
+	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))
@@ -131,6 +149,13 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
+	}
+	if cfg.AdminEnabled {
+		h.mux.HandleFunc("POST /admin/tasks/{name}/run",
+			h.withAuth(h.audit("task.run", auditPathValue("name"), h.adminTaskRun)))
+	}
+	if cfg.MetricsEnabled {
+		h.mux.HandleFunc("GET /metrics", h.withAuth(h.promMetrics))
 	}
 	return h
 }
@@ -187,6 +212,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
+	budgetUsed, budgetLimit, budgetRejected := h.budget.snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":       h.cfg.Pool.List(),
 		"total":          total,
@@ -206,6 +232,12 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,
 			"per_model":    exploreLast,
+		},
+		"daily_budget": map[string]any{
+			"used":     budgetUsed,
+			"limit":    budgetLimit,
+			"rejected": budgetRejected,
+			"day":      cstDay(time.Now()),
 		},
 	})
 }
@@ -470,6 +502,12 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	if !h.budget.admit() {
+		used, limit, _ := h.budget.snapshot()
+		writeOpenAIError(w, http.StatusTooManyRequests, "daily_budget_exceeded",
+			fmt.Sprintf("daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit))
+		return
+	}
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
@@ -494,7 +532,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	realm, bareModel := resolveModel(peek.Model)
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
-	st := newChatStat(time.Now(), body, peek.Stream)
+	st := newChatStat(time.Now(), body, peek.Stream, h.budget)
 	defer st.done()
 
 	tried := map[string]bool{}
@@ -818,6 +856,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		// 成功才带头。uid 是十六进制，昵称可能非 ASCII，不入头。
+		w.Header().Set("X-Wb-Account", acct.UID)
 		// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 		// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
@@ -857,6 +897,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
 			// 供下次选号把免费/便宜的号排在前面。
 			if credit, ok := stats.Credit(); ok {
+				st.credit, st.hasCredit = credit, true
 				if total, tok := stats.TotalTokens(); tok && total > 0 {
 					h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
 				}
@@ -879,6 +920,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.toks = completionTokens(resp)
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if credit, total, ok := usageCreditTotal(resp); ok {
+			st.credit, st.hasCredit = credit, true
 			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
 		}
 		return

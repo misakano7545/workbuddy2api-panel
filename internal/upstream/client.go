@@ -1737,9 +1737,12 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 					CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
 					CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
 					CycleCapacitySize   int64  `json:"CycleCapacitySize"`
-					// 到期时间字段名在上游同时存在两种口径，都读，谁有值用谁。
+					// 到期时间字段名在上游存在三种口径：ExpiredTime / PackageEndTime
+					// 在 CN/global 实测字段全集里均恒 miss（见 UserResourceDetailed
+					// 处注释），真实下发的是 CycleEndTime——三者都读，谁有值用谁。
 					ExpiredTime    string `json:"ExpiredTime"`
 					PackageEndTime string `json:"PackageEndTime"`
+					CycleEndTime   string `json:"CycleEndTime"`
 					// 发放时刻（epoch 毫秒）。
 					CreateTime     int64  `json:"CreateTime"`
 					PackageCode    string `json:"PackageCode"`
@@ -1762,10 +1765,13 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 			SubProductCode: p.SubProductCode,
 			SubProductName: p.SubProductName,
 		}
-		if p.ExpiredTime != "" {
+		switch {
+		case p.ExpiredTime != "":
 			cp.EndTime = p.ExpiredTime
-		} else {
+		case p.PackageEndTime != "":
 			cp.EndTime = p.PackageEndTime
+		default:
+			cp.EndTime = p.CycleEndTime
 		}
 		// CreateTime 是 epoch 毫秒；0 表示上游没给，留空而不是伪造 1970。
 		if p.CreateTime > 0 {

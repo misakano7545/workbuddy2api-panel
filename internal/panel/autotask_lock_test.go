@@ -2,6 +2,8 @@ package panel
 
 import (
 	"testing"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // TestTaskAccountLockSameAccountExclusive 同一账号的任务锁互斥：第二次 tryLock 必须失败，
@@ -49,4 +51,30 @@ func TestTaskAccountLockCrossEntryShared(t *testing.T) {
 		t.Fatal("同 uid 跨入口加锁应失败（共用锁）")
 	}
 	p.unlockAccount("u1")
+}
+
+func TestGrowthPendingKeepsUnclaimed(t *testing.T) {
+	met := upstream.Task{TaskCode: "Sequential_Tasks_3", Target: 5, Current: 5}
+	if !growthPending(met) {
+		t.Fatal("达标未领应入队")
+	}
+	met.Claimed = true
+	if growthPending(met) {
+		t.Fatal("已领不应入队")
+	}
+	if growthPending(upstream.Task{TaskCode: "Sequential_Tasks_4", Locked: true}) {
+		t.Fatal("锁定不应入队")
+	}
+}
+
+func TestMPChatTarget(t *testing.T) {
+	if mpChatTarget("Sequential_Tasks_3", 0) != 5 {
+		t.Fatal("空进度 Tasks_3 应为 5")
+	}
+	if mpChatTarget("Sequential_Tasks_3", 5) != 5 || mpChatTarget("Sequential_Tasks_1", 0) != 1 {
+		t.Fatal("已下发 target 优先，Tasks_1 空进度为 1")
+	}
+	if mpChatTarget("Sequential_Tasks_6", 0) != 10 {
+		t.Fatal("空进度 Tasks_6 应为 10")
+	}
 }

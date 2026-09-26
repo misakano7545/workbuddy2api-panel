@@ -21,6 +21,8 @@
 > **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支**（fork）。
 > 在上游基础上重构了可视化运维层，并同步了上游全部功能更新。
 > 差异概览见 [与上游的差异](#-与上游的差异)；上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文与上游 README。
+>
+> 感谢 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel/)，以及原仓库删库后的延续 [HanawaBanana/workbuddy2api](https://github.com/HanawaBanana/workbuddy2api)。
 
 ## 项目简介
 
@@ -179,6 +181,30 @@ flowchart LR
 - **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows 单文件运行」）
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
 - 宿主机 Go ≥ 1.22（仅从源码构建时需要）
+
+### 方式〇：GHCR 镜像（免克隆免构建）
+
+CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR：
+
+```bash
+# 1. 准备配置与数据目录
+mkdir -p auths data && cp config.example.json config.json
+#    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
+
+# 2. 拉取并运行
+docker run -d --name workbuddy2api \
+  -p 7863:7863 -e TZ=Asia/Shanghai \
+  -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
+  ghcr.io/misakano7545/workbuddy2api-panel:latest
+
+# 3. 健康检查（无可用账号时返回 503）
+curl -s http://localhost:7863/healthz
+```
+
+> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `workbuddy2api-panel` →
+> Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
+>
+> 镜像 tag：`main` 推 `latest` / `main` / `sha-xxxxxx`。日期版 `v2026.9.26.711` 不是语义化版本，不会额外打 `1.2.3` 这种 tag。PR 只构建、不推送。
 
 ### 方式一：Docker Compose（推荐服务器部署）
 
@@ -502,7 +528,7 @@ http://127.0.0.1:7863/panel/
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
 `pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
-涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
+涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`、`admin`、`metrics`、`alerting`）
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。
 
@@ -526,6 +552,10 @@ http://127.0.0.1:7863/panel/
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
+| `GET /metrics` | Bearer（`metrics.enabled` 时才存在） | Prometheus 文本。缺省不注册 |
+| `POST /admin/tasks/{name}/run` | Bearer（`admin.enabled` 时才存在） | 立刻补跑 `checkin` / `activity` / `keepalive` / `travel` / `blackcat`，202，同名在跑则 409 |
+
+成功的 chat 响应带 `X-Wb-Account`（实际应答账号的 uid）。`budget.daily_credit_limit` 大于 0 时，当日已观测扣费到顶后 chat 回 429 `daily_budget_exceeded`。`schedule.jitter_minutes` 把排程从整点摊开，0 仍是整点。`admin.audit_enabled` 把 /admin 操作追加到 `admin.audit_file`。`alerting.enabled` 在健康账号数、熔断数或 WAF 拦截越界时 POST webhook。这四项改完要重启；`budget.daily_credit_limit` 和 `jitter_minutes` 保存后即生效。
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
 

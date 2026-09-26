@@ -18,6 +18,7 @@
     "activity_enabled": true,
     "keepalive_enabled": true,
     "blackcat_enabled": true,
+    "jitter_minutes": 0,
     "balance_refresh_enabled": true,
     "balance_refresh_minutes": 5
   },
@@ -67,5 +68,18 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "admin": {
+    "enabled": false,
+    "audit_enabled": false,
+    "audit_file": "./data/admin_audit.log"
+  },
+  "metrics": { "enabled": false },
+  "budget": { "daily_credit_limit": 0 },
+  "alerting": {
+    "enabled": false,
+    "webhook_url": "",
+    "min_healthy_cn": 1,
+    "min_healthy_global": 0
   }
 }

@@ -45,9 +45,7 @@ func growthPending(t upstream.Task) bool {
 	if t.Locked {
 		return false
 	}
-	if t.Target > 0 && t.Current >= t.Target {
-		return false // 达标未领：也入队（队列执行后会自动领）
-	}
+	// 达标未领也入队。执行路径看到 current>=target 会直接领，不再做动作。
 	return autoActionFor(t.TaskCode) != nil
 }
 
@@ -117,7 +115,8 @@ type queueItem struct {
 	Nickname string `json:"nickname"`
 	Kind     string `json:"kind"` // growth
 	Code     string `json:"code"`
-	Status   string `json:"status"` // pending | running | done | skipped | error
+	Title    string `json:"title,omitempty"` // 上游中文名；队列轮询不经过扫描，不带这个名字列只能退回代号
+	Status   string `json:"status"`          // pending | running | done | skipped | error
 	Message  string `json:"message,omitempty"`
 }
 
@@ -219,7 +218,7 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	var items []queueItem
 	for _, one := range accts {
 		for _, t := range one.grow {
-			items = append(items, queueItem{UID: one.a.UID, Nickname: one.a.Nickname, Kind: "growth", Code: t.TaskCode, Status: "pending"})
+			items = append(items, queueItem{UID: one.a.UID, Nickname: one.a.Nickname, Kind: "growth", Code: t.TaskCode, Title: t.Title, Status: "pending"})
 		}
 	}
 	if len(items) == 0 {

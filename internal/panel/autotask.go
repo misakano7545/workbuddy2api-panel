@@ -310,6 +310,22 @@ func acceptStatusOr(t *upstream.Task) string {
 // mpActionGap mp 任务写动作间隔（accept/上报/领奖之间，防频控）。
 var mpActionGap = 2 * time.Second
 
+// mpChatTarget 未 accept 的小程序任务 progress 为空，上报的 target 是 0。
+// 上游 task_runner 用任务表兜底；否则 Sequential_Tasks_3 只会上报 1 次就去领。
+func mpChatTarget(code string, reported int64) int64 {
+	if reported > 0 {
+		return reported
+	}
+	switch code {
+	case "Sequential_Tasks_3":
+		return 5
+	case "Sequential_Tasks_6":
+		return 10
+	default:
+		return 1
+	}
+}
+
 // runMPMiniChatTask growth 域小程序限定任务通用闭环：
 // mp 查询 → accept（带登记回读验证）→ mini chat 事件上报 → 回读 → 达标即领奖。
 func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string) (string, error) {
@@ -329,10 +345,7 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string) (string, error) {
 		}
 	}
 	// 已达标（含 completed 未领）：直接领奖。
-	target := t.Target
-	if target <= 0 {
-		target = 1
-	}
+	target := mpChatTarget(code, t.Target)
 	if t.Current >= target || t.AcceptStatus == "completed" {
 		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 		if err != nil {

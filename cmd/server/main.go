@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
@@ -29,8 +30,9 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.11.6-panel"
+// appVersion 面板版本，透出到 /panel/api/overview。
+// 本地构建保持 dev。发布构建由 CI 用 -X 注入上海时间（2026.9.26.711），不跟上游 1.x。
+var appVersion = "dev"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -175,6 +177,7 @@ func main() {
 		ActivityDisabled:   !cfg.Schedule.ActivityEnabled,
 		KeepaliveDisabled:  !cfg.Schedule.KeepaliveEnabled,
 		BlackcatDisabled:   !cfg.Schedule.BlackcatEnabled,
+		JitterMinutes:      cfg.Schedule.JitterMinutes,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -205,6 +208,9 @@ func main() {
 	default:
 		log.Printf("夜猫子已启用：%v 点（23:00–08:00 窗口 glm-5.2 对话补足）", cfg.Schedule.BlackcatHours)
 	}
+	if cfg.Schedule.JitterMinutes > 0 {
+		log.Printf("排程抖动：各任务在名义整点后 0-%d 分钟（schedule.jitter_minutes）", cfg.Schedule.JitterMinutes)
+	}
 	switch {
 	case !cfg.Schedule.BalanceRefreshEnabled:
 		log.Printf("余额后台刷新已禁用（schedule.balance_refresh_enabled=false）")
@@ -228,6 +234,7 @@ func main() {
 	defer rec.Stop()
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
 
+	var gw *server.Handler
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -247,13 +254,22 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, gw)
 		},
 	})
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
-	h := server.NewHandler(server.Config{
+	var auditLog *server.AuditLog
+	if cfg.Admin.AuditEnabled {
+		al, aerr := server.NewAuditLog(cfg.Admin.AuditFile, cfg.APIKey)
+		if aerr != nil {
+			log.Fatalf("admin audit: %v", aerr)
+		}
+		auditLog = al
+		log.Printf("admin audit: %s", al.Path())
+	}
+	gw = server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
@@ -267,17 +283,41 @@ func main() {
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
-		GlobalEnabled: cfg.Global.Enabled,
+		GlobalEnabled:  cfg.Global.Enabled,
+		AdminEnabled:   cfg.Admin.Enabled,
+		MetricsEnabled: cfg.Metrics.Enabled,
+		Tasks:          sch,
+		Audit:          auditLog,
+		BudgetLimit:    cfg.Budget.DailyCreditLimit,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
+	if cfg.Alerting.Enabled {
+		mon := alert.New(alert.Config{
+			Enabled:          true,
+			WebhookURL:       cfg.Alerting.WebhookURL,
+			Secret:           cfg.Alerting.Secret,
+			Interval:         time.Duration(cfg.Alerting.IntervalSeconds) * time.Second,
+			Timeout:          time.Duration(cfg.Alerting.TimeoutSeconds) * time.Second,
+			StartupGrace:     time.Duration(cfg.Alerting.StartupGraceSeconds) * time.Second,
+			MinHealthyCN:     cfg.Alerting.MinHealthyCN,
+			MinHealthyGlobal: cfg.Alerting.MinHealthyGlobal,
+			RecoverHealthy:   cfg.Alerting.RecoverHealthy,
+			BreakerThreshold: cfg.Alerting.BreakerThreshold,
+			ForTicks:         cfg.Alerting.ForTicks,
+			ClearTicks:       cfg.Alerting.ClearTicks,
+			SendResolve:      cfg.Alerting.SendResolve,
+		}, alertSource{pool: p, h: gw})
+		go mon.Run(ctx)
+		log.Printf("alerting: webhook on, every %ds", cfg.Alerting.IntervalSeconds)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           h,
+		Handler:           gw,
 		ReadHeaderTimeout: 30 * time.Second,
 		// ReadTimeout 覆盖整个请求读取（含 body）：防慢速 body 拖死连接。
 		// 请求体已无网关侧上限（max_body_mb 移除），60s 按常规带宽的数十 MB
@@ -327,7 +367,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, gw *server.Handler) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -404,8 +444,12 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
 		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours, newCfg.Schedule.BlackcatHours,
 		!newCfg.Schedule.CheckinEnabled, !newCfg.Schedule.TravelEnabled,
-		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled)
+		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled,
+		newCfg.Schedule.JitterMinutes)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
+	if gw != nil {
+		gw.SetBudgetLimit(newCfg.Budget.DailyCreditLimit)
+	}
 
 	return restartRequiredFields(newCfg), nil
 }
@@ -429,6 +473,7 @@ func restartRequiredFields(c *Config) []string {
 		out = append(out, "upstash")
 	}
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
+	out = append(out, "admin", "metrics", "alerting")
 	return out
 }
 

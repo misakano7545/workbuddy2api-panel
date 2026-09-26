@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -52,6 +53,8 @@ type Config struct {
 		ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停活跃上报
 		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
 		BlackcatEnabled  bool `json:"blackcat_enabled"`  // 缺省 true；false = 关夜猫子
+		// JitterMinutes 0 = 精确整点。正值把触发时刻摊在该窗口内，同一小时偏移固定。
+		JitterMinutes int `json:"jitter_minutes"`
 
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
@@ -153,6 +156,34 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	// Jitter 在 schedule 里。下面几段缺省关闭，旧配置行为不变。
+	Admin struct {
+		Enabled      bool   `json:"enabled"`
+		AuditEnabled bool   `json:"audit_enabled"`
+		AuditFile    string `json:"audit_file"`
+	} `json:"admin"`
+	Metrics struct {
+		Enabled bool `json:"enabled"`
+	} `json:"metrics"`
+	Alerting struct {
+		Enabled             bool   `json:"enabled"`
+		WebhookURL          string `json:"webhook_url"`
+		Secret              string `json:"secret"`
+		IntervalSeconds     int    `json:"interval_seconds"`
+		TimeoutSeconds      int    `json:"timeout_seconds"`
+		StartupGraceSeconds int    `json:"startup_grace_seconds"`
+		MinHealthyCN        int    `json:"min_healthy_cn"`
+		MinHealthyGlobal    int    `json:"min_healthy_global"`
+		RecoverHealthy      int    `json:"recover_healthy"`
+		BreakerThreshold    int    `json:"breaker_threshold"`
+		ForTicks            int    `json:"for_ticks"`
+		ClearTicks          int    `json:"clear_ticks"`
+		SendResolve         bool   `json:"send_resolve"`
+	} `json:"alerting"`
+	Budget struct {
+		DailyCreditLimit float64 `json:"daily_credit_limit"` // 0 = 不限
+	} `json:"budget"`
+
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`
@@ -220,6 +251,14 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	c.Admin.AuditFile = "./data/admin_audit.log"
+	c.Alerting.IntervalSeconds = 30
+	c.Alerting.TimeoutSeconds = 5
+	c.Alerting.StartupGraceSeconds = 30
+	c.Alerting.MinHealthyCN = 1
+	c.Alerting.RecoverHealthy = 1
+	c.Alerting.ForTicks = 2
+	c.Alerting.ClearTicks = 2
 	return c
 }
 
@@ -371,6 +410,42 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_EXPIRING_SOON"); v != "" {
 		c.Pool.ExpiringSoon = v
 	}
+	if v := os.Getenv("WB2A_SCHEDULE_JITTER_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Schedule.JitterMinutes = n
+		}
+	}
+	if v := os.Getenv("WB2A_ADMIN_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Admin.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_ADMIN_AUDIT_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Admin.AuditEnabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_ADMIN_AUDIT_FILE"); v != "" {
+		c.Admin.AuditFile = v
+	}
+	if v := os.Getenv("WB2A_METRICS_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Metrics.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_BUDGET_DAILY_CREDIT_LIMIT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.Budget.DailyCreditLimit = f
+		}
+	}
+	if v := os.Getenv("WB2A_ALERTING_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Alerting.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_ALERTING_WEBHOOK_URL"); v != "" {
+		c.Alerting.WebhookURL = v
+	}
 }
 
 func (c *Config) normalize() error {
@@ -475,6 +550,26 @@ func (c *Config) normalize() error {
 	if len(c.Schedule.BlackcatHours) == 0 {
 		c.Schedule.BlackcatHours = []int{23}
 	}
+	if c.Schedule.JitterMinutes < 0 || c.Schedule.JitterMinutes > 1440 {
+		return fmt.Errorf("schedule.jitter_minutes: %d 非法（0 = 关闭，上限 1440）", c.Schedule.JitterMinutes)
+	}
+	if c.Budget.DailyCreditLimit < 0 {
+		return fmt.Errorf("budget.daily_credit_limit: %v 不得为负；0 = 不限", c.Budget.DailyCreditLimit)
+	}
+	if c.Admin.Enabled && strings.TrimSpace(c.APIKey) == "" {
+		return fmt.Errorf("admin.enabled=true 但 api_key 为空")
+	}
+	if c.Admin.AuditEnabled {
+		if !c.Admin.Enabled {
+			return fmt.Errorf("admin.audit_enabled=true 但 admin.enabled=false")
+		}
+		if strings.TrimSpace(c.Admin.AuditFile) == "" {
+			c.Admin.AuditFile = "./data/admin_audit.log"
+		}
+	}
+	if err := c.normalizeAlerting(); err != nil {
+		return err
+	}
 	// 余额后台刷新：启用时 minutes<=0 回落默认 5；关闭时 interval 保持 0（不启动）。
 	if c.Schedule.BalanceRefreshEnabled {
 		if c.Schedule.BalanceRefreshMinutes <= 0 {
@@ -541,6 +636,48 @@ func checkHourRange(field, switchKey string, hours []int) error {
 		if h < 0 || h > 23 {
 			return fmt.Errorf("%s: %d 不是合法小时（0-23）；如要关闭该任务请设 schedule.%s=false", field, h, switchKey)
 		}
+	}
+	return nil
+}
+
+func (c *Config) normalizeAlerting() error {
+	a := &c.Alerting
+	if a.IntervalSeconds < 0 || a.TimeoutSeconds < 0 || a.StartupGraceSeconds < 0 ||
+		a.MinHealthyCN < 0 || a.MinHealthyGlobal < 0 || a.RecoverHealthy < 0 ||
+		a.BreakerThreshold < 0 || a.ForTicks < 0 || a.ClearTicks < 0 {
+		return fmt.Errorf("alerting: 数值不得为负")
+	}
+	if a.IntervalSeconds == 0 {
+		a.IntervalSeconds = 30
+	}
+	if a.TimeoutSeconds == 0 {
+		a.TimeoutSeconds = 5
+	}
+	if a.StartupGraceSeconds == 0 {
+		a.StartupGraceSeconds = 30
+	}
+	if a.ForTicks == 0 {
+		a.ForTicks = 2
+	}
+	if a.ClearTicks == 0 {
+		a.ClearTicks = 2
+	}
+	if a.RecoverHealthy == 0 {
+		a.RecoverHealthy = 1
+	}
+	if !a.Enabled {
+		return nil
+	}
+	raw := strings.TrimSpace(a.WebhookURL)
+	if raw == "" {
+		return fmt.Errorf("alerting.enabled=true 但 alerting.webhook_url 为空")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("alerting.webhook_url: %w", err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("alerting.webhook_url: 需要 http(s) 地址")
 	}
 	return nil
 }

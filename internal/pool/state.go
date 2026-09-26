@@ -384,29 +384,63 @@ func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, di
 	return p.countsDetailedForRealm(realm)
 }
 
-// countsDetailedForRealm 是两函数共用的遍历实现；realm=="" 不加谓词。
+// countsDetailedForRealm 委托 RealmHealth，避免 /status 与 /metrics 各算一套。
 func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, disabled, inFlightFull int) {
+	h := p.RealmHealth(realm)
+	return h.Total, h.Healthy, h.Cooling, h.Disabled, h.InFlightFull
+}
+
+// RealmHealth 现算，不另存计数器。
+// Breaker/Degraded 与 Cooling 有交集。ManualDisabled 本面板没有单独标志，恒 0。
+type RealmHealth struct {
+	Total          int
+	Healthy        int
+	Cooling        int
+	Disabled       int
+	InFlightFull   int
+	Breaker        int
+	Degraded       int
+	ManualDisabled int
+	ModelCooled    int
+	InFlight       int
+}
+
+func (p *Pool) RealmHealth(realm string) RealmHealth {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
+	var h RealmHealth
 	for _, e := range p.byUID {
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		total++
+		h.Total++
 		switch {
 		case e.disabled:
-			disabled++
+			h.Disabled++
 		case !e.healthy(now):
-			cooling++
+			h.Cooling++
 		default:
-			healthy++
+			h.Healthy++
 			if p.inFlightFull(e) {
-				inFlightFull++
+				h.InFlightFull++
 			}
 		}
+		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
+			h.Breaker++
+		}
+		if !e.degradeUntil.IsZero() && now.Before(e.degradeUntil) {
+			h.Degraded++
+		}
+		for _, mc := range e.modelCooldowns {
+			if !mc.Until.IsZero() && now.Before(mc.Until) {
+				h.ModelCooled++
+				break
+			}
+		}
+		h.InFlight += int(e.inFlight.Load())
 	}
-	return total, healthy, cooling, disabled, inFlightFull
+	return h
 }
 
 // ServableNow 报告池当前是否可服务：存在至少一个 healthy 且未占满在途名额的账号。

@@ -93,6 +93,9 @@ func TestAppScriptServed(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "'use strict'") {
 		t.Error("app.js body looks wrong")
 	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("Cache-Control=%q want no-store", rec.Header().Get("Cache-Control"))
+	}
 }
 
 // UID 白名单：拒绝路径穿越与异常字符，放行真实 UUID 形态。
