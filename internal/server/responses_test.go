@@ -360,3 +360,59 @@ func TestUsageCacheFields(t *testing.T) {
 		t.Fatalf("prompt_cache_key 未透传: %v", obj["prompt_cache_key"])
 	}
 }
+
+// commitTrackingWriter 模拟 net/http 的响应提交语义：Write/Flush 在未提交时
+// 隐式 WriteHeader(200)；提交后的重复 WriteHeader 计数（= 线上那条
+// "superfluous response.WriteHeader call" 警告的来源）。
+type commitTrackingWriter struct {
+	hdr         http.Header
+	body        bytes.Buffer
+	status      int
+	committed   bool
+	superfluous int
+}
+
+func newCommitTrackingWriter() *commitTrackingWriter {
+	return &commitTrackingWriter{hdr: http.Header{}}
+}
+
+func (c *commitTrackingWriter) Header() http.Header { return c.hdr }
+func (c *commitTrackingWriter) WriteHeader(code int) {
+	if c.committed {
+		c.superfluous++
+		return
+	}
+	c.committed, c.status = true, code
+}
+func (c *commitTrackingWriter) Write(p []byte) (int, error) {
+	if !c.committed {
+		c.WriteHeader(http.StatusOK)
+	}
+	return c.body.Write(p)
+}
+func (c *commitTrackingWriter) Flush() {
+	if !c.committed {
+		c.WriteHeader(http.StatusOK)
+	}
+}
+
+// TestResponsesEmitAfterFlushNoSuperfluousWriteHeader 流式路径先 Flush（上游逐帧
+// flush 已隐式提交 200）再 emit：不得出现第二次 WriteHeader（net/http 会打
+// superfluous 警告，线上实测噪音）。
+func TestResponsesEmitAfterFlushNoSuperfluousWriteHeader(t *testing.T) {
+	fw := newCommitTrackingWriter()
+	w := &responsesWriter{ResponseWriter: fw, stream: true}
+	w.Flush() // 模拟 StreamHint 在无输出帧后的 flush：提交 200
+	if err := w.emit("response.created", map[string]any{"response": map[string]any{"id": "resp_1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if fw.superfluous != 0 {
+		t.Fatalf("emit 二次 WriteHeader 次数=%d want 0", fw.superfluous)
+	}
+	if fw.status != http.StatusOK {
+		t.Fatalf("status=%d want 200", fw.status)
+	}
+	if !strings.Contains(fw.body.String(), "event: response.created") {
+		t.Fatalf("body=%q", fw.body.String())
+	}
+}

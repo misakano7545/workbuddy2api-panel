@@ -939,7 +939,8 @@ func (w *messagesWriter) emit(event string, payload map[string]any) error {
 		h.Set("Content-Type", "text/event-stream")
 		h.Set("Cache-Control", "no-cache")
 		h.Set("Connection", "keep-alive")
-		w.ResponseWriter.WriteHeader(http.StatusOK)
+		// ponytail: 不显式 WriteHeader——下面的 io.WriteString 会隐式提交 200
+		//（Flush 先提交时显式调用会变成 superfluous 警告，同 responses.go emit）。
 		w.hdrSent = true
 		w.status = http.StatusOK
 	}

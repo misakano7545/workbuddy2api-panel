@@ -859,7 +859,9 @@ func (w *responsesWriter) emit(typ string, payload map[string]any) error {
 		h.Set("Content-Type", "text/event-stream")
 		h.Set("Cache-Control", "no-cache")
 		h.Set("Connection", "keep-alive")
-		w.ResponseWriter.WriteHeader(http.StatusOK)
+		// ponytail: 不显式 WriteHeader——下面的 io.WriteString 会隐式提交 200。
+		// 流式路径的 Flush（StreamHint 逐帧 flush）可能已先提交，再显式调用就是
+		// net/http 的 "superfluous response.WriteHeader call" 噪音。
 		w.hdrSent = true
 		w.status = http.StatusOK
 	}
