@@ -247,6 +247,10 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		// credit_floor 生效的积分保底值（0 = 关闭）。与 accounts[].credits +
+		// model_costs 对照即可判定「某号为何对某模型不出票」。零值也显式写出
+		// （运维口径：缺失会让人误以为没记录）。
+		"credit_floor": h.cfg.Pool.CreditFloor(),
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,

@@ -77,6 +77,7 @@
     "account_priority": {},
     "account_share": {},
     "cost_explore_interval": "30m",
+    "credit_floor": 100,
     "reserve_credits": 10
   },
   "session_sticky": {

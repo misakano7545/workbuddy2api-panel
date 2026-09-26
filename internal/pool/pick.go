@@ -49,6 +49,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// 不健康 / 在途占满 / 保留积分停牌：都不接单（判据统一在 Pool.selectable；
 	// reqModel 非空时用 healthyForModel 口径）。
 	selectableOf := func(e *entry) bool { return realmOK(e) && p.selectable(e, now, reqModel) }
+	// floorBlocked 积分保底拦截判定（实现在 floorBlockedForModel，与粘性路径共用）：
+	// 触底 + 实测收费（tier 2 有效观测）即拦；tier 0/1 不受限。
+	floorBlocked := func(e *entry) bool { return p.floorBlockedForModel(e, reqModel, now) }
 	var cands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -60,6 +63,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		e.pruneExpiredModelCosts(now)
 		if !selectableOf(e) {
 			continue
+		}
+		if floorBlocked(e) {
+			continue // 积分保底：触底号不接实测收费模型（tier 0/1 不受限）
 		}
 		cands = append(cands, e)
 	}
@@ -238,6 +244,27 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	p.pickSeq++
 	e.usedSeq = p.pickSeq // 单调序号：保证 usedSeq 严格全序（防惊群/LRU 的权威依据）
 	return e.a
+}
+
+// floorBlockedForModel 积分保底拦截判定（pick 普通轮换与 PickByUIDForModel 粘性
+// 路径的单一事实来源）：floor>0 且账号触底（credits < floor）且该模型在此账号上
+// **实测收费**（tier 2 有效观测）时为真。
+//
+//   - tier 0（免费）不拦：保底的目的恰是「留余额给免费模型用」，免费请求
+//     credit=0 不再扣减余额（NoteModelCost）。
+//   - tier 1（无观测/观测过期）不拦：第一笔成功即入账毕业；若拦了，账本过期
+//     （modelCostTTL 6h）或重启清零后触底号会被永久锁死在「学不回来」的死锁里。
+//   - model 为空（无模型上下文）不拦：无成本维度，floor 无从判收费。
+//
+// 余额用本地插值口径（签到权威值 - 每笔 usage.credit 实扣，见 NoteModelCost）：
+// 只会偏低不会偏高（官方对账延迟方向安全），正是保底需要的安全方向。
+// 调用方必须已持有 p.mu（读 e.credits / e.modelCost）。
+func (p *Pool) floorBlockedForModel(e *entry, model string, now time.Time) bool {
+	if p.creditFloor <= 0 || model == "" || e.credits >= p.creditFloor {
+		return false
+	}
+	mc, ok := e.modelCostOf(model, now)
+	return ok && mc.CostPer1k > 0
 }
 
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
