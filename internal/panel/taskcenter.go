@@ -138,27 +138,52 @@ func (p *Panel) queue() *queueState {
 	return p.q
 }
 
-// tasksRunQueue 启动执行队列：{concurrency:1-4}。
-// 先扫描，把成长待办按账号内 autoActions 顺序排队。账号内串行，账号间受并发限制。
+// growthQueueConcurrency 排程轮次的账号间并发：固定 1。
+// ponytail: 手动入口可 1-4，排程取最保守一档（上游风控敏感）；要更快再加配置项。
+const growthQueueConcurrency = 1
+
+// tasksRunQueue 面板入口：启动执行队列（{concurrency:1-4}）。
 func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Concurrency int `json:"concurrency"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	if body.Concurrency < 1 {
-		body.Concurrency = 1
-	}
-	if body.Concurrency > 4 {
-		body.Concurrency = 4
-	}
-	q := p.queue()
-	q.mu.Lock()
-	if q.running {
-		q.mu.Unlock()
+	if p.queue().isRunning() {
 		writeErr(w, http.StatusConflict, "队列正在执行中（可在任务中心查看进度）")
 		return
 	}
-	q.mu.Unlock()
+	total, seq, msg := p.startGrowthQueue(body.Concurrency)
+	if total == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": msg})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": total, "seq": seq})
+}
+
+// RunGrowthQueueNow 无 HTTP 入口（growth 排程调用）：扫描成长待办并启动一轮队列。
+// 返回启动项数与提示文案（0 项时文案说明原因）。装配期注入 scheduler（SetGrowthRunner）。
+func (p *Panel) RunGrowthQueueNow() (int, string) {
+	total, _, msg := p.startGrowthQueue(growthQueueConcurrency)
+	return total, msg
+}
+
+// startGrowthQueue 扫描成长待办并启动执行队列，返回 (启动项数, 队列轮次号, 提示文案)。
+// 面板「执行队列」按钮与 growth 排程共用这一条路径：同一队列状态、同一把 per-account 锁。
+// 先扫描，把成长待办按账号内 autoActions 顺序排队。账号内串行，账号间受并发限制。
+func (p *Panel) startGrowthQueue(concurrency int) (total int, seq int, msg string) {
+	if p.cfg.Pool == nil || p.cfg.Upstream == nil {
+		return 0, 0, "账号池未接线"
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > 4 {
+		concurrency = 4
+	}
+	q := p.queue()
+	if q.isRunning() {
+		return 0, 0, "队列正在执行中"
+	}
 
 	// 扫描待办（复用扫描逻辑的拉取部分）。
 	states := p.cfg.Pool.List()
@@ -223,22 +248,28 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(items) == 0 {
 		log.Printf("panel: 队列启动：无可执行待办（全部账号任务已完成）")
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": "全部账号没有待办任务"})
-		return
+		return 0, 0, "全部账号没有待办任务"
 	}
 
 	q.mu.Lock()
 	q.running = true
 	q.startedAt = time.Now()
 	q.items = items
-	q.conc = body.Concurrency
+	q.conc = concurrency
 	q.seq++
-	seq := q.seq
+	seq = q.seq
 	q.mu.Unlock()
 
-	go p.runQueueItems(accts, items, body.Concurrency)
-	log.Printf("panel: 队列启动：%d 项（并发 %d）", len(items), body.Concurrency)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": len(items), "seq": seq})
+	go p.runQueueItems(accts, items, concurrency)
+	log.Printf("panel: 队列启动：%d 项（并发 %d）", len(items), concurrency)
+	return len(items), seq, ""
+}
+
+// isRunning 队列是否正在跑（锁内读）。
+func (q *queueState) isRunning() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.running
 }
 
 // runQueueItems 队列执行主体：按账号分组，账号内串行（per-account 锁），

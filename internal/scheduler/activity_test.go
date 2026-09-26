@@ -332,6 +332,7 @@ func TestNextWakeActivityDisabled(t *testing.T) {
 		ActivityHours:    []int{10},
 		ActivityDisabled: true,
 		KeepaliveHours:   []int{22},
+		GrowthDisabled:   true, // 成长队列 11:00 会插在 9:30 与 21:00 之间，本用例只看活跃时点
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
@@ -371,6 +372,7 @@ func TestAllFourDisabledNoSpin(t *testing.T) {
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
 		BlackcatDisabled:  true,
+		GrowthDisabled:    true,
 		CheckinHours:      []int{9, 21},
 		TravelHours:       []int{9},
 		ActivityHours:     []int{10},
@@ -378,7 +380,7 @@ func TestAllFourDisabledNoSpin(t *testing.T) {
 	})
 	at, kinds := s.nextWake(time.Now())
 	if !at.IsZero() || len(kinds) != 0 {
-		t.Errorf("at=%v kinds=%v want zero/nil（五类全禁用）", at, kinds)
+		t.Errorf("at=%v kinds=%v want zero/nil（六类全禁用）", at, kinds)
 	}
 }
 

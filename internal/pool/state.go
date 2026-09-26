@@ -339,10 +339,7 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 		return nil
 	}
 	now := time.Now()
-	if !e.healthyForModel(now, model) {
-		return nil
-	}
-	if p.inFlightFull(e) {
+	if !p.selectable(e, now, model) {
 		return nil
 	}
 	e.lastUsed = now
@@ -359,10 +356,7 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 		return nil
 	}
 	now := time.Now()
-	if !e.healthy(now) {
-		return nil
-	}
-	if p.inFlightFull(e) {
+	if !p.selectable(e, now, "") {
 		return nil
 	}
 	e.lastUsed = now
@@ -466,6 +460,25 @@ func (p *Pool) AllHardCreditForRealm(realm string) bool {
 	return n > 0
 }
 
+// reserveBlocked 报告账号是否因「保留积分」停牌（不再接单）。调用方须持锁。
+// 阈值 0 = 关闭；只拦**已知**余额（creditsTotal > 0，与 Status.CreditsTotal 的
+// 「0 = 未知」同口径）——从未查过余额的账号不受影响，否则全新装机看起来整池不可用。
+func (p *Pool) reserveBlocked(e *entry) bool {
+	return p.reserveCredits > 0 && e.creditsTotal > 0 && e.credits <= p.reserveCredits
+}
+
+// selectable 选号判据（调用方须持锁）：健康（model 非空走 6004 模型豁免口径）+
+// 未占满在途 + 未因保留积分停牌。选号入口统一走这里，「不可选」的 policy 只此一处。
+func (p *Pool) selectable(e *entry, now time.Time, model string) bool {
+	if p.inFlightFull(e) || p.reserveBlocked(e) {
+		return false
+	}
+	if model != "" {
+		return e.healthyForModel(now, model)
+	}
+	return e.healthy(now)
+}
+
 // ServableNow 报告池当前是否可服务：存在至少一个 healthy 且未占满在途名额的账号。
 // 与 CountsDetailed 的 healthy 口径不同：healthy 只看 disabled/until/breakerUntil（状态机权威判定），
 // 不看 inFlight；ServableNow 额外叠加在途维度，与 chat 的真实可达性（Pick 会跳过 inFlightFull 账号）对齐。
@@ -487,6 +500,9 @@ func (p *Pool) ServableForRealm(realm string) bool {
 		}
 		if p.inFlightFull(e) {
 			continue
+		}
+		if p.reserveBlocked(e) {
+			continue // 保留积分停牌号不接单 → 不算可服务（同 inFlightFull 口径）
 		}
 		// 存在性语义：账号级 healthy，或处于模型级豁免形态（6004 单模型软冷却——
 		// 对触发模型不可用，对其他模型仍可选）。探活无请求模型上下文，取"存在可服务
@@ -526,6 +542,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Nickname:          e.a.Nickname,
 		Credits:           e.credits,
 		CreditsTotal:      e.creditsTotal,
+		ReserveBlocked:    p.reserveBlocked(e),
 		Cooling:           now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:            e.reason,
 		Disabled:          e.disabled,

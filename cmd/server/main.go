@@ -102,6 +102,7 @@ func main() {
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)                 // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
+	p.SetReserveCredits(cfg.Pool.ReserveCredits) // 保留积分：余额低于阈值停止接单（0 = 关闭）
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -170,6 +171,7 @@ func main() {
 		ActivityHours:  cfg.Schedule.ActivityHours,
 		KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		BlackcatHours:  cfg.Schedule.BlackcatHours,
+		GrowthHours:    cfg.Schedule.GrowthHours,
 		// 快过期积分优先消耗：签到/余额刷新按此窗口分桶（issue:积分过期）。
 		ExpiringSoonWindow: cfg.ExpiringSoonDur,
 		CheckinDisabled:    !cfg.Schedule.CheckinEnabled,
@@ -177,6 +179,7 @@ func main() {
 		ActivityDisabled:   !cfg.Schedule.ActivityEnabled,
 		KeepaliveDisabled:  !cfg.Schedule.KeepaliveEnabled,
 		BlackcatDisabled:   !cfg.Schedule.BlackcatEnabled,
+		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
 		JitterMinutes:      cfg.Schedule.JitterMinutes,
 	})
 	switch {
@@ -207,6 +210,12 @@ func main() {
 		log.Printf("夜猫子已禁用（schedule.blackcat_enabled=false）")
 	default:
 		log.Printf("夜猫子已启用：%v 点（23:00–08:00 窗口 glm-5.2 对话补足）", cfg.Schedule.BlackcatHours)
+	}
+	switch {
+	case !cfg.Schedule.GrowthEnabled:
+		log.Printf("成长任务队列已禁用（schedule.growth_enabled=false）")
+	default:
+		log.Printf("成长任务队列已启用：%v 点（每日自动跑一遍任务中心待办）", cfg.Schedule.GrowthHours)
 	}
 	if cfg.Schedule.JitterMinutes > 0 {
 		log.Printf("排程抖动：各任务在名义整点后 0-%d 分钟（schedule.jitter_minutes）", cfg.Schedule.JitterMinutes)
@@ -259,6 +268,8 @@ func main() {
 	})
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
+	// 成长任务队列排程的执行体在面板（队列逻辑唯一实现）：注入回调，避免 scheduler → panel 循环依赖。
+	sch.SetGrowthRunner(pn.RunGrowthQueueNow)
 
 	var auditLog *server.AuditLog
 	if cfg.Admin.AuditEnabled {
@@ -440,12 +451,24 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
-	sch.Reconfigure(
-		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
-		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours, newCfg.Schedule.BlackcatHours,
-		!newCfg.Schedule.CheckinEnabled, !newCfg.Schedule.TravelEnabled,
-		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled,
-		newCfg.Schedule.JitterMinutes)
+	p.SetReserveCredits(newCfg.Pool.ReserveCredits) // 保留积分热生效（0 = 关闭）
+	sch.Reconfigure(scheduler.ScheduleParams{
+		CheckinHours:   newCfg.Schedule.CheckinHours,
+		TravelHours:    newCfg.Schedule.TravelHours,
+		ActivityHours:  newCfg.Schedule.ActivityHours,
+		KeepaliveHours: newCfg.Schedule.KeepaliveHours,
+		BlackcatHours:  newCfg.Schedule.BlackcatHours,
+		GrowthHours:    newCfg.Schedule.GrowthHours,
+
+		CheckinDisabled:   !newCfg.Schedule.CheckinEnabled,
+		TravelDisabled:    !newCfg.Schedule.TravelEnabled,
+		ActivityDisabled:  !newCfg.Schedule.ActivityEnabled,
+		KeepaliveDisabled: !newCfg.Schedule.KeepaliveEnabled,
+		BlackcatDisabled:  !newCfg.Schedule.BlackcatEnabled,
+		GrowthDisabled:    !newCfg.Schedule.GrowthEnabled,
+
+		JitterMinutes: newCfg.Schedule.JitterMinutes,
+	})
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	if gw != nil {
 		gw.SetBudgetLimit(newCfg.Budget.DailyCreditLimit)

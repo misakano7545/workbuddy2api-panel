@@ -1,5 +1,5 @@
 // admin_tasks.go 手动补跑排程。POST /admin/tasks/{name}/run，立刻 202，后台执行。
-// 本面板的排程是 checkin/activity/keepalive/travel/blackcat（开学季已移除）。
+// 本面板的排程是 checkin/activity/keepalive/travel/blackcat/growth。
 package server
 
 import (
@@ -7,16 +7,17 @@ import (
 	"strings"
 )
 
-// TaskRunner 六个 Run*Now 里本面板实际有的五个。*scheduler.Scheduler 满足它。
+// TaskRunner 各 Run*Now 里本面板实际有的六个。*scheduler.Scheduler 满足它。
 type TaskRunner interface {
 	RunCheckinNow()
 	RunActivityNow()
 	RunKeepaliveNow()
 	RunTravelNow()
 	RunBlackcatNow()
+	RunGrowthNow()
 }
 
-var adminTaskNames = []string{"checkin", "activity", "keepalive", "travel", "blackcat"}
+var adminTaskNames = []string{"checkin", "activity", "keepalive", "travel", "blackcat", "growth"}
 
 func (h *Handler) taskRunners() map[string]func() {
 	t := h.cfg.Tasks
@@ -29,6 +30,7 @@ func (h *Handler) taskRunners() map[string]func() {
 		"keepalive": t.RunKeepaliveNow,
 		"travel":    t.RunTravelNow,
 		"blackcat":  t.RunBlackcatNow,
+		"growth":    t.RunGrowthNow,
 	}
 }
 

@@ -16,6 +16,7 @@ func (f *fakeTasks) RunActivityNow()  {}
 func (f *fakeTasks) RunKeepaliveNow() {}
 func (f *fakeTasks) RunTravelNow()    {}
 func (f *fakeTasks) RunBlackcatNow()  {}
+func (f *fakeTasks) RunGrowthNow()    {}
 
 func TestAdminTaskRunOnce(t *testing.T) {
 	dir := t.TempDir()

@@ -20,7 +20,7 @@ import (
 
 // Config 调度器依赖。
 //
-// 任务开关用「禁用」命名而非「启用」：零值 Config 即四类任务都启用（hours 回落默认），
+// 任务开关用「禁用」命名而非「启用」：零值 Config 即各类任务都启用（hours 回落默认），
 // 与引入开关前的行为逐字一致（老调用方/老测试无需改动）。
 type Config struct {
 	Pool           *pool.Pool
@@ -30,6 +30,7 @@ type Config struct {
 	ActivityHours  []int // 默认 [10]
 	KeepaliveHours []int // 默认 [22]
 	BlackcatHours  []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
+	GrowthHours    []int // 默认 [11]：成长任务队列（任务中心待办）每日自动跑一遍
 
 	// ExpiringSoonWindow 快过期积分窗口：签到/余额刷新查余额时，把到期时间
 	// <= now+window 的套餐余额标记为"快过期"（pool 据此优先消耗，见
@@ -48,6 +49,12 @@ type Config struct {
 	KeepaliveDisabled bool
 	// BlackcatDisabled 显式关闭夜猫子排程（schedule.blackcat_enabled=false）。
 	BlackcatDisabled bool
+	// GrowthDisabled 显式关闭成长任务队列排程（schedule.growth_enabled=false）。
+	GrowthDisabled bool
+	// GrowthRunner 成长任务队列执行器：main 注入 panel 的实现（panel 已依赖本包，
+	// 反向 import 成环）。返回启动的待办项数与提示文案（0 项 = 无可执行待办）。
+	// 未注入（nil）时 growth 排程静默跳过——测试/未装配面板的部署不需额外判断。
+	GrowthRunner func() (int, string)
 	// JitterMinutes 名义整点之后的确定性偏移窗口。0 = 精确整点。
 	JitterMinutes int
 }
@@ -90,6 +97,9 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.BlackcatHours) == 0 {
 		cfg.BlackcatHours = []int{23}
 	}
+	if len(cfg.GrowthHours) == 0 {
+		cfg.GrowthHours = []int{11}
+	}
 	return &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
@@ -98,35 +108,56 @@ func New(cfg Config) *Scheduler {
 	}
 }
 
+// ScheduleParams 排程热更新参数（面板保存配置后 Reconfigure 一次性传全量）。
+// ponytail: 位置参数已到 11 个（再加 growth 就是 13 个相邻 bool，传错不自知），
+// 改结构体按字段名传，语义自解释。
+type ScheduleParams struct {
+	CheckinHours   []int
+	TravelHours    []int
+	ActivityHours  []int
+	KeepaliveHours []int
+	BlackcatHours  []int
+	GrowthHours    []int
+
+	CheckinDisabled   bool
+	TravelDisabled    bool
+	ActivityDisabled  bool
+	KeepaliveDisabled bool
+	BlackcatDisabled  bool
+	GrowthDisabled    bool
+
+	JitterMinutes int
+}
+
 // Reconfigure 热更新排程参数（面板保存配置后调用）：改时点/开关并通知运行中的循环重算。
 // 空 hours 视为「未配置」保留原值（与 config.normalize 的回落语义一致）。
-func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepaliveHours, blackcatHours []int,
-	checkinDisabled, travelDisabled, activityDisabled, keepaliveDisabled, blackcatDisabled bool, jitterMinutes int) {
+func (s *Scheduler) Reconfigure(p ScheduleParams) {
+	hours := [][]int{p.CheckinHours, p.TravelHours, p.ActivityHours, p.KeepaliveHours, p.BlackcatHours, p.GrowthHours}
 	s.schedMu.Lock()
-	if len(checkinHours) > 0 {
-		s.cfg.CheckinHours = checkinHours
+	dst := []*[]int{&s.cfg.CheckinHours, &s.cfg.TravelHours, &s.cfg.ActivityHours,
+		&s.cfg.KeepaliveHours, &s.cfg.BlackcatHours, &s.cfg.GrowthHours}
+	for i, h := range hours {
+		if len(h) > 0 {
+			*dst[i] = h
+		}
 	}
-	if len(travelHours) > 0 {
-		s.cfg.TravelHours = travelHours
-	}
-	if len(activityHours) > 0 {
-		s.cfg.ActivityHours = activityHours
-	}
-	if len(keepaliveHours) > 0 {
-		s.cfg.KeepaliveHours = keepaliveHours
-	}
-	if len(blackcatHours) > 0 {
-		s.cfg.BlackcatHours = blackcatHours
-	}
-	s.cfg.CheckinDisabled = checkinDisabled
-	s.cfg.TravelDisabled = travelDisabled
-	s.cfg.ActivityDisabled = activityDisabled
-	s.cfg.KeepaliveDisabled = keepaliveDisabled
-	s.cfg.BlackcatDisabled = blackcatDisabled
-	s.cfg.JitterMinutes = jitterMinutes
+	s.cfg.CheckinDisabled = p.CheckinDisabled
+	s.cfg.TravelDisabled = p.TravelDisabled
+	s.cfg.ActivityDisabled = p.ActivityDisabled
+	s.cfg.KeepaliveDisabled = p.KeepaliveDisabled
+	s.cfg.BlackcatDisabled = p.BlackcatDisabled
+	s.cfg.GrowthDisabled = p.GrowthDisabled
+	s.cfg.JitterMinutes = p.JitterMinutes
 	s.schedMu.Unlock()
 	poke(s.rearmSchedule)
 	poke(s.rearmBalance)
+}
+
+// SetGrowthRunner 注入成长任务队列执行器（装配期调用一次；见 Config.GrowthRunner）。
+func (s *Scheduler) SetGrowthRunner(fn func() (int, string)) {
+	s.schedMu.Lock()
+	s.cfg.GrowthRunner = fn
+	s.schedMu.Unlock()
 }
 
 // poke 非阻塞发一次唤醒信号（已有待处理信号则忽略，语义等价）。
@@ -154,6 +185,8 @@ func (k taskKind) String() string {
 		return "keepalive"
 	case taskBlackcat:
 		return "blackcat"
+	case taskGrowth:
+		return "growth"
 	default:
 		return "task"
 	}
@@ -198,6 +231,7 @@ const (
 	taskActivity
 	taskKeepalive
 	taskBlackcat
+	taskGrowth
 )
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
@@ -207,9 +241,9 @@ const (
 func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	s.schedMu.Lock()
 	checkinHours, keepaliveHours, blackcatHours := s.cfg.CheckinHours, s.cfg.KeepaliveHours, s.cfg.BlackcatHours
-	travelHours, activityHours := s.cfg.TravelHours, s.cfg.ActivityHours
+	travelHours, activityHours, growthHours := s.cfg.TravelHours, s.cfg.ActivityHours, s.cfg.GrowthHours
 	checkinOff, keepaliveOff, blackcatOff := s.cfg.CheckinDisabled, s.cfg.KeepaliveDisabled, s.cfg.BlackcatDisabled
-	travelOff, activityOff := s.cfg.TravelDisabled, s.cfg.ActivityDisabled
+	travelOff, activityOff, growthOff := s.cfg.TravelDisabled, s.cfg.ActivityDisabled, s.cfg.GrowthDisabled
 	jitter := s.cfg.JitterMinutes
 	s.schedMu.Unlock()
 
@@ -232,6 +266,9 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	if !blackcatOff {
 		slots = append(slots, slot{nextFireKind(now, blackcatHours, taskBlackcat, jitter), taskBlackcat})
+	}
+	if !growthOff {
+		slots = append(slots, slot{nextFireKind(now, growthHours, taskGrowth, jitter), taskGrowth})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -334,6 +371,8 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 				s.RunKeepaliveNow()
 			case taskBlackcat:
 				s.RunBlackcatNow()
+			case taskGrowth:
+				s.RunGrowthNow()
 			}
 		}(k)
 	}

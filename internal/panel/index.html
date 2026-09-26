@@ -645,6 +645,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             </div>
             <div class="hr"></div>
             <div class="grid2">
+              <div>
+                <div class="switch"><span class="lb">成长任务队列</span>
+                  <input type="checkbox" name="growth_enabled"></div>
+                <label class="fld"><span class="lb">执行时点（小时，逗号分隔）</span>
+                  <input name="growth_hours" placeholder="11">
+                  <span class="hint">每日自动跑一遍任务中心待办（扫描 → 动作 → 达标领奖）</span></label>
+              </div>
+            </div>
+            <div class="hr"></div>
+            <div class="grid2">
               <div class="switch"><span class="lb">后台刷新余额</span>
                 <input type="checkbox" name="balance_refresh_enabled"></div>
               <label class="fld"><span class="lb">刷新间隔（分钟）</span>
@@ -698,6 +708,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">会话粘性 TTL</span>
                 <input name="ttl" placeholder="30m">
                 <span class="hint">改动需重启进程</span></label>
+              <label class="fld"><span class="lb">保留积分</span>
+                <input name="reserve_credits" type="number" min="0" placeholder="0">
+                <span class="hint">余额低于该值的账号停止接单（0 = 关闭）</span></label>
             </div>
           </div>
         </div>

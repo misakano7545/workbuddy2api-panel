@@ -50,6 +50,11 @@ type Pool struct {
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
 	// WAF 风控更紧，压低并发）；0 = 未设置，回落 maxInFlight（不分档，零回归）。
 	maxInFlightGlobal int
+	// reserveCredits 保留积分阈值（SetReserveCredits 注入；0 = 关闭）。余额已知
+	// （creditsTotal > 0）且 credits <= 阈值 的账号停止接单——仍在池中、照常跑定时
+	// 任务（签到/猫猫旅行本身赚积分），充值后自动恢复。上游余额耗尽会发提醒短信，
+	// 设阈值即避免被用到 0。
+	reserveCredits int64
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -168,6 +173,18 @@ func (p *Pool) SetWeights(idlePerHour, idleMax float64) {
 	if idleMax > 0 {
 		p.idleWeightMax = idleMax
 	}
+}
+
+// SetReserveCredits 注入「保留积分」阈值（main 从 config 注入；0 = 关闭）。
+// 与 SetCostExploreInterval 同风格：0 是合法值（关闭默认），负值非法保留现值。
+// 不落 state.json——config 是事实源，重启由 main 重新注入。
+func (p *Pool) SetReserveCredits(v int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if v < 0 {
+		return
+	}
+	p.reserveCredits = v
 }
 
 // SetDegrade 注入连败降权参数（main 从 config 解析后调用，issue #114）。

@@ -1771,3 +1771,58 @@ func TestAllHardCreditForRealm(t *testing.T) {
 		t.Fatal("空池应判 false")
 	}
 }
+
+// TestReserveCreditsParksAccount 保留积分：余额**已知**且 <= 阈值 → 停牌（不接单，
+// 含全冷却兜底路径）；阈值 0 / 余额未知 → 不受影响（新装不能看起来整池不可用）。
+func TestReserveCreditsParksAccount(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "a"})
+	p.Add(&auth.Auth{UID: "b"})
+	p.SetCredits("a", 10, 100) // 已知余额 10
+	p.SetCredits("b", 100, 100)
+
+	if p.Pick() == nil {
+		t.Fatal("阈值 0（默认关闭）时应有账号可接单")
+	}
+
+	p.SetReserveCredits(10)
+	st, _ := p.Status("a")
+	if !st.ReserveBlocked {
+		t.Fatalf("余额 == 阈值 应停牌: %+v", st)
+	}
+	if stB, _ := p.Status("b"); stB.ReserveBlocked {
+		t.Fatal("余额高于阈值不该停牌")
+	}
+	for i := 0; i < 20; i++ {
+		if got := p.Pick(); got == nil || got.UID != "b" {
+			t.Fatalf("停牌号被选中（第 %d 次）: %+v", i, got)
+		}
+	}
+
+	// 全池停牌：主路径与全冷却兜底都不能再交出账号。
+	p.SetCredits("b", 5, 100)
+	if got := p.Pick(); got != nil {
+		t.Fatalf("全池停牌时不该再选出账号: %+v", got)
+	}
+	if stB, _ := p.Status("b"); !stB.ReserveBlocked {
+		t.Fatal("余额 5 <= 阈值 10 应停牌")
+	}
+
+	// 充值恢复（> 阈值）→ 立刻可接单。
+	p.SetCredits("b", 500, 500)
+	if p.Pick() == nil {
+		t.Fatal("充值后应恢复接单")
+	}
+
+	// 余额从未查过（creditsTotal == 0）：阈值再高也不拦。
+	q := New("")
+	q.Add(&auth.Auth{UID: "unknown"})
+	q.SetReserveCredits(1000)
+	if stU, _ := q.Status("unknown"); stU.ReserveBlocked {
+		t.Fatal("余额未知的账号不该停牌")
+	}
+	if q.Pick() == nil {
+		t.Fatal("余额未知的账号仍应可接单")
+	}
+}

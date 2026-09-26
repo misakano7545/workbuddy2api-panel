@@ -46,10 +46,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	defer p.mu.Unlock()
 	now := time.Now()
 	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }
-	healthyOf := func(e *entry) bool { return realmOK(e) && e.healthy(now) }
-	if reqModel != "" {
-		healthyOf = func(e *entry) bool { return realmOK(e) && e.healthyForModel(now, reqModel) }
-	}
+	selectableOf := func(e *entry) bool { return realmOK(e) && p.selectable(e, now, reqModel) }
 	var cands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -59,11 +56,8 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		// status 只读遍历天然跳过过期项，但内存条目必须在此真正删除）。
 		e.pruneExpiredModelCooldowns(now)
 		e.pruneExpiredModelCosts(now)
-		if !healthyOf(e) {
-			continue
-		}
-		if p.inFlightFull(e) {
-			continue // 在途占满：跳过（max=0 不限时不触发）
+		if !selectableOf(e) {
+			continue // 不健康 / 在途占满 / 保留积分停牌：都不接单（判据在 Pool.selectable）
 		}
 		cands = append(cands, e)
 	}
@@ -245,6 +239,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
+		}
+		if p.reserveBlocked(e) {
+			continue // 保留积分停牌号不接单（与 disabled / CoolHard 同待遇）
 		}
 		if p.inFlightFull(e) {
 			continue

@@ -128,6 +128,7 @@ func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
 		BlackcatDisabled:  true,
+		GrowthDisabled:    true,
 		CheckinHours:      []int{9, 21},
 		KeepaliveHours:    []int{22},
 	})
