@@ -94,11 +94,11 @@ func (p *Pool) Revive(uid string) bool {
 	return true
 }
 
-// reviveCoolingLocked 只清冷却（until/coolKind/reason/softStreak）并更新 credits，不动熔断器
-// （fails/retryCount/breakerUntil）。签到解冻走这里：签到成功只证明余额恢复与
-// billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx 信号）不应被签到覆盖。
-// softStreak 属**冷却域**（与 until/coolKind 同域），故随冷却一并清零——与"解冻只清冷却
-// 不清熔断"的既有 C5 语义一致；硬冷却（CoolHard）本就不参与 streak，这里清的是历史软冷却累积。
+// reviveCoolingLocked 只解冻余额耗尽冷却（CoolHard 的 until/coolKind/reason）并更新
+// credits，不动熔断器（fails/retryCount/breakerUntil）、软限流退避（CoolSoft/softStreak）
+// 与模型级台账（modelCooldowns）——限流冷却的恢复证据是重置墙钟到期，不是余额恢复。
+// 签到/余额刷新解冻走这里：余额恢复只证明 billing 通道健康，不证明 chat 通道健康，
+// 熔断（连续 5xx 信号）与限流冷却均不应被余额刷新覆盖。
 // 调用方必须已持有 p.mu。
 func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 	p.mu.Lock()
