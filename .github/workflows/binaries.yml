@@ -21,9 +21,14 @@ jobs:
       - name: test
         run: go test ./...
 
-      # ponytail: 上海时间，月日时不补零、分两位、不带秒。同一分钟再发才会撞号。
+      # ponytail: 标签发版用标签名，避免 CI 时钟和标签差一分钟变成两个号。
       - name: version
-        run: echo "VERSION=$(TZ=Asia/Shanghai date +%Y.%-m.%-d.%-H%M)" >> "$GITHUB_ENV"
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=$(TZ=Asia/Shanghai date +%Y.%-m.%-d.%-H%M)" >> "$GITHUB_ENV"
+          fi
 
       - name: build
         run: |
@@ -71,7 +76,7 @@ jobs:
           if-no-files-found: error
 
       - name: release
-        if: github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "v${VERSION}" dist/*.zip --title "v${VERSION}" --generate-notes
