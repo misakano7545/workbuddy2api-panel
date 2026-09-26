@@ -125,7 +125,9 @@ body {
 .topbar .sep { color: var(--ink-3); }
 .topbar .meta { color: var(--ink-3); font-size: 12px; font-family: var(--mono); }
 .topbar .grow { flex: 1; }
-.view { padding: 22px 24px 60px; max-width: 1180px; width: 100%; }
+/* 视图铺满可用宽度：此前 max-width:1180px 在 1920 屏上右侧留 ~530px 空白。
+   .main 是 flex 列，子项默认 stretch，去掉上限即自适应。 */
+.view { padding: 22px 24px 60px; width: 100%; }
 .view[hidden] { display: none; }
 
 /* ── 控件 ─────────────────────────────────────────────────────────── */
