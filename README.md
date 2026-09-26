@@ -182,6 +182,33 @@ flowchart LR
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
 - 宿主机 Go ≥ 1.22（仅从源码构建时需要）
 
+### 🤖 给 AI Agent 的安装声明
+
+> 面向读到本文档后**代为部署**的 AI Agent。人类用户可直接前往下方任一方式。
+
+**Agent 可自动完成**：克隆 / 拉镜像 → `cp config.example.json config.json` → 启动 → 轮询 `GET /healthz`。
+
+**只有人类能做**（Agent 到此必须停下并交接，不得自行"想办法"）：
+
+- OAuth 设备授权（面板 `http://127.0.0.1:7863/panel/` 或 `./login.sh`）——需要浏览器与账号持有人本人；
+- `api_key` 的取值与保管。
+
+**硬性禁止**：
+
+- 不把 `auths/`、`data/`、`config.json`、`API_KEY.txt` 提交到 git 或任何公开位置；`.gitignore` 已排除，**不得用 `-f` 绕过**；
+- 不在 `api_key` 为空时把 `7863` 暴露到 `0.0.0.0` / 公网，默认只听 `127.0.0.1`；
+- 不替他人登录非本人授权账号，不共享凭证、不转售；
+- 不伪造 `auths/*.json` 或改上游域名来"跑通"。
+
+**验收标准（缺一不算成功）**：人类添加 ≥1 个账号后，
+
+```bash
+curl -s http://127.0.0.1:7863/healthz                 # 200 且 healthy ≥ 1
+curl -s -H "Authorization: Bearer <api_key>" http://127.0.0.1:7863/v1/models
+```
+
+**未就绪时如实上报阻塞点**（缺账号 / 挂载目录权限 / 端口占用），`/healthz` 返回 503 且 `total:0` 是**预期中间态**，不要重复重启刷状态。
+
 ### 方式〇：GHCR 镜像（免克隆免构建）
 
 CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR：
