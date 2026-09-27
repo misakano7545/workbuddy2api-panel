@@ -719,3 +719,33 @@ func TestLoadConfigPathIsDirectory(t *testing.T) {
 		t.Errorf("error should suggest the fix (cp config.example.json): %v", err)
 	}
 }
+
+// TestReserveCreditsDefaultAndOff 保留积分默认值语义：
+// 键缺席 → 10（默认留一线）；显式 0 → 关闭；显式值 → 原样。
+func TestReserveCreditsDefaultAndOff(t *testing.T) {
+	dir := t.TempDir()
+	load := func(t *testing.T, body string) *int64 {
+		t.Helper()
+		fp := filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "_")+".json")
+		if err := os.WriteFile(fp, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(fp)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		return c.Pool.ReserveCredits
+	}
+	if v := load(t, `{}`); v == nil || *v != 10 {
+		t.Errorf("键缺席 reserve_credits=%v want 10（默认）", v)
+	}
+	if v := load(t, `{"pool":{"reserve_credits":0}}`); v == nil || *v != 0 {
+		t.Errorf("显式 0 reserve_credits=%v want 0（关闭）", v)
+	}
+	if v := load(t, `{"pool":{"reserve_credits":5000}}`); v == nil || *v != 5000 {
+		t.Errorf("显式值 reserve_credits=%v want 5000", v)
+	}
+	if v := load(t, `{"pool":{"reserve_credits":-5}}`); v == nil || *v != 0 {
+		t.Errorf("负值 reserve_credits=%v want 0（归零）", v)
+	}
+}

@@ -155,8 +155,9 @@ type Config struct {
 		CostExploreInterval string `json:"cost_explore_interval"`
 		// ReserveCredits 保留积分阈值：余额已知且 <= 该值的账号停止接单（仍在池中、
 		// 照常跑定时任务，充值后自动恢复）。上游余额耗尽会发提醒短信，设阈值即避免
-		// 被用到 0。0 = 关闭（默认）；从未查到余额的账号不受影响。
-		ReserveCredits int64 `json:"reserve_credits"`
+		// 被用到 0。未配置（键缺席）→ 默认 10；显式写 0 = 关闭；从未查到余额的账号不受影响。
+		// 指针类型用于区分「未配置」（nil → 默认 10）与「显式 0」（关闭）。
+		ReserveCredits *int64 `json:"reserve_credits"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -531,8 +532,13 @@ func (c *Config) normalize() error {
 		c.Pool.IdleWeightMax = 5.0
 	}
 	// 保留积分：负值非法归零（0 = 关闭，是合法值，不能像 idle_weight 那样回落默认）。
-	if c.Pool.ReserveCredits < 0 {
-		c.Pool.ReserveCredits = 0
+	// ponytail: nil → 默认 10；显式 0 = 关闭；负值归零。
+	switch {
+	case c.Pool.ReserveCredits == nil:
+		v := int64(10)
+		c.Pool.ReserveCredits = &v
+	case *c.Pool.ReserveCredits < 0:
+		*c.Pool.ReserveCredits = 0
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120

@@ -66,7 +66,7 @@
     "idle_weight_max": 5.0,
     "expiring_soon": "168h",
     "cost_explore_interval": "30m",
-    "reserve_credits": 0
+    "reserve_credits": 10
   },
   "session_sticky": {
     "enabled": true,
