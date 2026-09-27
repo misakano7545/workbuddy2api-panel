@@ -274,3 +274,60 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("expiry summary=%s want %s", out, want)
 	}
 }
+
+// TestAppJSDetailGroups 验证单账号明细默认按最早到期截断，无到期时间末尾，
+// 同到期时间按面额降序；其余未用完包与零/负余额包分别聚合。
+func TestAppJSDetailGroups(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; detail groups test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const PK_DEFAULT_DETAIL_LIMIT');
+const end = src.indexOf('function renderPackages');
+if (start < 0 || end < 0) throw new Error('detail group functions not found');
+const ctx = { Date, Math, Number, String, Map, Array, Object, isFinite };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.pkDetailGroups = pkDetailGroups; this.pkDetailLimit = pkDetailLimit;', ctx);
+const input = [
+  { id: 'small-late', size: 100, remain: 1, expires_at: 400 },
+  { id: 'zero-early-b', size: 200, remain: 0, expires_at: 200 },
+  { id: 'small-early', size: 100, remain: 2, expires_at: 200 },
+  { id: 'large-unknown', size: 300, remain: 3, end_time: '' },
+  { id: 'zero-early-a', size: 200, remain: -1, expires_at: 200 },
+  { id: 'small-unknown', size: 100, remain: 1, end_time: '' },
+  { id: 'large-early', size: 300, remain: 4, expires_at: 200 },
+  { id: 'zero-late', size: 300, remain: 0, expires_at: 300 },
+];
+const before = input.map(p => p.id).join(',');
+const out = ctx.pkDetailGroups(input, 2);
+process.stdout.write(JSON.stringify({
+  visible: out.visible.map(p => p.id),
+  rest: out.rest.map(p => p.id),
+  used: out.used.map(p => p.id),
+  restSize: out.restSize,
+  restRemain: out.restRemain,
+  usedSize: out.usedSize,
+  defaultLimit: ctx.pkDetailLimit({}),
+  configuredLimit: ctx.pkDetailLimit({ panel: { package_detail_limit: 7 } }),
+  unchanged: input.map(p => p.id).join(',') === before,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "detail-groups-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("detail groups node test failed: %v\n%s", err, out)
+	}
+	const want = `{"visible":["large-early","small-early"],"rest":["small-late","large-unknown","small-unknown"],"used":["zero-early-b","zero-early-a","zero-late"],"restSize":500,"restRemain":5,"usedSize":700,"defaultLimit":5,"configuredLimit":7,"unchanged":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("detail groups=%s want %s", out, want)
+	}
+}

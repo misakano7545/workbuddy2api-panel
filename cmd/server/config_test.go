@@ -22,6 +22,32 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+func TestPanelPackageDetailLimit(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Panel.PackageDetailLimit != 5 {
+		t.Fatalf("default package_detail_limit=%d want 5", c.Panel.PackageDetailLimit)
+	}
+
+	configured, err := ParseConfig([]byte(`{"panel":{"package_detail_limit":8}}`))
+	if err != nil {
+		t.Fatalf("parse configured limit: %v", err)
+	}
+	if configured.Panel.PackageDetailLimit != 8 {
+		t.Fatalf("configured package_detail_limit=%d want 8", configured.Panel.PackageDetailLimit)
+	}
+
+	fallback, err := ParseConfig([]byte(`{"panel":{"package_detail_limit":0}}`))
+	if err != nil {
+		t.Fatalf("parse fallback limit: %v", err)
+	}
+	if fallback.Panel.PackageDetailLimit != 5 {
+		t.Fatalf("fallback package_detail_limit=%d want 5", fallback.Panel.PackageDetailLimit)
+	}
+}
+
 func TestLoadFile(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
