@@ -1247,8 +1247,22 @@ if ($('usWindow')) $('usWindow').onchange = loadUsage;
 
 const PK_COLORS = ['#4f8cff', '#25b08b', '#e8a33d', '#c96bd6', '#e2607a',
                    '#5aa9e6', '#8fbf3f', '#b58b5a', '#7d8fa8', '#d4785c'];
+const PK_ACCOUNT_COLORS = ['#4f8cff', '#25b08b', '#e8a33d', '#c96bd6',
+                           '#e2607a', '#20a4a4', '#8fbf3f', '#d4785c',
+                           '#7c83db', '#c48a2f', '#b45f8c', '#5aa9e6'];
 
 function pkColor(i) { return PK_COLORS[i % PK_COLORS.length]; }
+
+// pkAccountColorMap 按 UID 稳定分配颜色：排序后分配，账号刷新/重排不会换色。
+function pkAccountColorMap(list) {
+  const uids = (list || [])
+    .filter(a => a && !a.error && a.uid)
+    .map(a => String(a.uid))
+    .sort();
+  const colors = new Map();
+  uids.forEach((uid, i) => colors.set(uid, PK_ACCOUNT_COLORS[i % PK_ACCOUNT_COLORS.length]));
+  return colors;
+}
 
 /* pkBySource 把包按名称归并，得到「来源 → 面额/余额/个数」。这是对比的关键视图：
    两个号的差异一定体现在某几个来源的面额上。 */
@@ -1277,8 +1291,137 @@ function pkBySource(packs) {
   return [...m.values()].sort((a, b) => b.size - a.size);
 }
 
+const PK_DAY_MS = 24 * 3600 * 1000;
+
+function pkExpiryMs(p) {
+  const raw = Number(p && p.expires_at);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  const text = String((p && p.end_time) || '').trim();
+  if (!text) return null;
+  let iso = text.includes('T') ? text : text.replace(' ', 'T');
+  if (!/(?:Z|[+-]\d\d:\d\d)$/.test(iso)) iso += '+08:00';
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function pkCreditOpacity(days) {
+  if (days == null || !Number.isFinite(Number(days))) return 1;
+  return 0.25 + 0.75 * Math.max(0, Math.min(29, Number(days) - 1)) / 29;
+}
+
+function pkExpiryText(expiresAt) {
+  if (!expiresAt) return '无到期时间';
+  const diff = expiresAt - Date.now();
+  if (diff <= 0) return '已到期';
+  const minutes = Math.max(1, Math.ceil(diff / 60000));
+  if (minutes < 60) return '剩余 ' + minutes + ' 分钟';
+  const hours = Math.ceil(diff / 3600000);
+  if (hours < 24) return '剩余 ' + hours + ' 小时';
+  return '剩余 ' + Math.ceil(diff / PK_DAY_MS) + ' 天';
+}
+
+function pkExpiryDateTime(expiresAt) {
+  if (!expiresAt) return '—';
+  return new Date(expiresAt).toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+}
+
+function pkAccountSegments(a, now) {
+  let balance = Math.max(0, Number(a.remain || 0));
+  const out = [];
+  for (const p of a.packages || []) {
+    const remain = Number(p.remain || 0);
+    if (!Number.isFinite(remain) || remain <= 0 || balance <= 0) continue;
+    const amount = Math.min(balance, remain);
+    const expiresAt = pkExpiryMs(p);
+    out.push({
+      amount,
+      expiresAt,
+      days: expiresAt == null ? null : Math.max(0, Math.ceil((expiresAt - now) / PK_DAY_MS)),
+      source: p.name || '积分',
+      uid: String(a.uid || ''),
+      accountName: a.nickname || String(a.uid || '').slice(0, 8) || '未命名账号',
+    });
+    balance -= amount;
+  }
+  return out.sort((x, y) => {
+    if (x.expiresAt == null && y.expiresAt != null) return 1;
+    if (x.expiresAt != null && y.expiresAt == null) return -1;
+    return (x.expiresAt || 0) - (y.expiresAt || 0);
+  });
+}
+
+// summarizeCreditDays 对齐 WorkDaddy：按精确剩余天数逐行聚合，无有效到期时间的余额
+// 不进入图表，也不猜测到期日。账号内先按总余额约束逐包金额，避免上游重复记录膨胀。
+function summarizeCreditDays(list, now) {
+  const buckets = new Map();
+  let unavailable = 0;
+  for (const a of list || []) {
+    if (a.error || !Number.isFinite(Number(a.remain))) {
+      unavailable++;
+      continue;
+    }
+    for (const segment of pkAccountSegments(a, now)) {
+      if (segment.days == null) continue;
+      let row = buckets.get(segment.days);
+      if (!row) {
+        row = { days: segment.days, credits: 0, segments: [] };
+        buckets.set(segment.days, row);
+      }
+      row.credits += segment.amount;
+      row.segments.push(segment);
+    }
+  }
+  const rows = [...buckets.values()].sort((a, b) => a.days - b.days);
+  for (const row of rows) {
+    row.segments.sort((a, b) =>
+      (a.expiresAt || Infinity) - (b.expiresAt || Infinity) ||
+      a.accountName.localeCompare(b.accountName) ||
+      a.source.localeCompare(b.source));
+  }
+  return { rows, accountCount: (list || []).length, unavailable };
+}
+
+function renderExpiryDistribution(list, now) {
+  const summary = summarizeCreditDays(list, now);
+  const colors = pkAccountColorMap(list);
+  const rows = summary.rows.map(row => {
+    const total = row.credits || 1;
+    const nodes = row.segments.map(segment => {
+      const color = colors.get(segment.uid) || 'var(--accent)';
+      const title = segment.source + '\n' + fmtTok(segment.amount) + ' 积分\n到期时间 ' +
+        pkExpiryDateTime(segment.expiresAt) + '（' + pkExpiryText(segment.expiresAt) + '）\n' +
+        segment.accountName;
+      return '<span class="pk-expiry-seg" style="--seg-color:' + color +
+        ';opacity:' + pkCreditOpacity(segment.days).toFixed(5) +
+        ';flex:' + Math.max(0.008, segment.amount / total).toFixed(4) +
+        ' 1 0" title="' + esc(title) + '" aria-label="' + esc(title) + '"></span>';
+    }).join('');
+    return '<div class="pk-expiry-row"><span>' + esc(row.days === 0 ? '已到期' : row.days + ' 天') +
+      '</span><div class="pk-expiry-track">' + nodes + '</div><b>' + esc(fmtTok(row.credits)) +
+      '</b></div>';
+  }).join('');
+  const foot = summary.accountCount + ' 个账号' +
+    (summary.unavailable ? ' · ' + summary.unavailable + ' 个未获取余额' : '');
+  const legend = (list || []).filter(a =>
+    a && !a.error && a.uid && pkAccountSegments(a, now).some(s => s.days != null)
+  ).map(a => '<span><i style="background:' + (colors.get(String(a.uid)) || 'var(--accent)') +
+    '"></i>' + esc(a.nickname || String(a.uid).slice(0, 8)) + '</span>').join('');
+  $('pkExpiry').innerHTML = (rows
+    ? '<div class="pk-expiry-chart">' + rows + '</div>'
+    : '<div class="pk-expiry-empty">暂无可汇总积分</div>') +
+    (legend ? '<div class="pk-expiry-legend">' + legend + '</div>' : '') +
+    '<div class="pk-expiry-foot">' + esc(foot) + '</div>';
+}
+
 function renderPackages(d) {
   const list = (d.accounts || []);
+  const now = Date.now();
+  const expiryColors = pkAccountColorMap(list);
+  renderExpiryDistribution(list, now);
   if (!list.length) {
     $('pkSummary').innerHTML = '<div class="empty">没有账号</div>';
     return;
@@ -1321,6 +1464,18 @@ function renderPackages(d) {
       esc(s.name.replace(/^CodeBuddy/, '')) + ' x' + s.n + ' · ' + fmtTok(s.size) +
       (s.minCreated ? ' · 首发 ' + esc(s.minCreated.slice(5)) : '') + '</span>'
     ).join('');
+    const expiry = pkAccountSegments(a, now);
+    const expiryTotal = Math.max(1, expiry.reduce((sum, s) => sum + s.amount, 0));
+    const expiryColor = expiryColors.get(String(a.uid)) || 'var(--accent)';
+    const expiryBar = expiry.length ? '<div class="expirybar" role="img" aria-label="积分到期分布">' +
+      expiry.map(s => {
+        const title = s.source + '\n' + fmtTok(s.amount) + ' 积分\n到期时间 ' +
+          pkExpiryDateTime(s.expiresAt) + '（' + pkExpiryText(s.expiresAt) + '）';
+        return '<i style="background:' + expiryColor +
+          ';opacity:' + pkCreditOpacity(s.days).toFixed(5) +
+          ';flex:' + Math.max(0.008, s.amount / expiryTotal).toFixed(4) +
+          ' 1 0" title="' + esc(title) + '"></i>';
+      }).join('') + '</div>' : '';
     return '<div class="pk-card">' +
       '<div class="who"><span class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
       '<span class="realm">' + esc(a.realm || '') + '</span></div>' +
@@ -1328,6 +1483,7 @@ function renderPackages(d) {
       '<div class="sub">共 ' + fmtTok(a.size) + ' · ' + (a.packages || []).length +
       ' 个包 · 占最高 ' + (Number(a.remain || 0) / maxRemain * 100).toFixed(0) + '%</div>' +
       '<div class="mixbar">' + bar + '</div>' +
+      expiryBar +
       '<div class="pk-legend">' + legend + '</div>' +
       '</div>';
   }).join('');
@@ -1368,11 +1524,13 @@ function renderPackages(d) {
 async function loadPackages() {
   $('pkSummary').innerHTML = '<div class="empty">查询中…（逐账号向上游实时查询）</div>';
   $('pkDetail').innerHTML = '';
+  $('pkExpiry').innerHTML = '<div class="pk-expiry-empty">查询中…</div>';
   try {
     const d = await api('packages');
     renderPackages(d);
   } catch (e) {
     $('pkSummary').innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
+    $('pkExpiry').innerHTML = '<div class="pk-expiry-empty">读取失败：' + esc(e.message) + '</div>';
   }
 }
 

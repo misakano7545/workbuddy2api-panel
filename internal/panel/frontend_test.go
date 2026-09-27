@@ -221,3 +221,56 @@ func TestIndexHTMLConfigInputsUnique(t *testing.T) {
 		}
 	}
 }
+
+// TestAppJSExpirySummary 验证前端到期分布与 WorkDaddy 同口径：
+// 精确剩余天数聚合、账号内按总余额钳制、无到期批次不进入图表。
+func TestAppJSExpirySummary(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry summary test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const PK_ACCOUNT_COLORS');
+const end = src.indexOf('function renderExpiryDistribution');
+if (start < 0 || end < 0) throw new Error('expiry summary functions not found');
+const ctx = { Date, Math, Number, String, Map, Array, Object, isFinite };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.summarizeCreditDays = summarizeCreditDays; this.pkAccountColorMap = pkAccountColorMap;', ctx);
+const day = 86400000, now = 100000;
+const out = ctx.summarizeCreditDays([
+  { uid: 'a', remain: 100, packages: [
+    { name: 'soon-a', remain: 30, expires_at: now + day },
+    { name: 'later', remain: 70, expires_at: now + 7 * day },
+  ] },
+  { uid: 'b', remain: 55, packages: [
+    { name: 'soon-b', remain: 20, expires_at: now + day },
+    { name: 'unknown', remain: 5, end_time: '' },
+  ] },
+  { uid: 'err', error: 'offline' },
+], now);
+process.stdout.write(JSON.stringify({
+  rows: out.rows.map(row => ({ days: row.days, credits: row.credits })),
+  accountCount: out.accountCount,
+  unavailable: out.unavailable,
+  colorA: ctx.pkAccountColorMap([{ uid: 'b' }, { uid: 'a' }]).get('a'),
+  colorB: ctx.pkAccountColorMap([{ uid: 'a' }, { uid: 'b' }]).get('b'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expiry-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry summary node test failed: %v\n%s", err, out)
+	}
+	const want = `{"rows":[{"days":1,"credits":50},{"days":7,"credits":70}],"accountCount":3,"unavailable":1,"colorA":"#4f8cff","colorB":"#25b08b"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("expiry summary=%s want %s", out, want)
+	}
+}
