@@ -136,3 +136,36 @@ func TestLifecycleFlush(t *testing.T) {
 		t.Fatalf("Stop 后应有落盘文件: %v", err)
 	}
 }
+
+// 积分历史：扣费积分按桶累计、进聚合（卡片与按小时表的来源），
+// 且小时桶折叠成日桶时不能把积分丢掉（丢了就是"看历史漏掉大半"）。
+// 没观测到 credit 的请求（HasCredit=false）不参与——"没测到"≠"没花钱"。
+func TestCreditsAggregateAndSurviveRollup(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	old := now.AddDate(0, 0, -100) // 超出 90 天小时保留 → 会被折叠成日桶
+
+	r.Add(now, "cn", "u", "m", Delta{TotalTokens: 100, HasTotal: true, Credit: 1.5, HasCredit: true}, true)
+	r.Add(now, "cn", "u", "m", Delta{TotalTokens: 100, HasTotal: true, Credit: 0.5, HasCredit: true}, true)
+	r.Add(now, "cn", "u", "m", Delta{TotalTokens: 100, HasTotal: true}, true) // 没观测到 credit：不计
+	r.Add(old, "cn", "u", "m", Delta{TotalTokens: 200, HasTotal: true, Credit: 4, HasCredit: true}, true)
+
+	win := r.Snapshot(24, nil)
+	if win.Totals.Credits != 2 {
+		t.Fatalf("窗口内积分 = %v, want 2（未观测到的不计）", win.Totals.Credits)
+	}
+	if len(win.Series) != 1 || win.Series[0].Credits != 2 {
+		t.Fatalf("窗口内小时点积分 = %+v, want 2", win.Series)
+	}
+
+	r.Rollup(now)
+	all := r.Snapshot(0, nil)
+	if all.Totals.Credits != 6 {
+		t.Fatalf("折叠后全历史积分 = %v, want 6（4 分来自日桶）", all.Totals.Credits)
+	}
+	for _, p := range all.Series {
+		if p.Scope == "day" && p.Credits != 4 {
+			t.Fatalf("日点积分 = %v, want 4", p.Credits)
+		}
+	}
+}

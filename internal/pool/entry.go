@@ -61,6 +61,9 @@ type TokenUsageDelta struct {
 	HasCacheTokens  bool
 	CacheHitTokens  int64
 	CacheMissTokens int64
+	// 上游末帧 usage.credit：本次请求的真实扣费积分（用量视图的积分历史用）。
+	HasCredit bool
+	Credit    float64
 }
 
 // Status 单个账号对外暴露的状态（脱敏）。

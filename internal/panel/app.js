@@ -989,6 +989,41 @@ function usStat(v, k, cls) {
          '</div><div class="k">' + esc(k) + '</div></div>';
 }
 
+/* fmtCredit 积分显示：整数不带小数（上游 credit 可能是小数，保留一位）。 */
+function fmtCredit(v) {
+  const n = Number(v || 0);
+  if (!n) return '0';
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+/* fmtUnitCredit 每千 token 的积分单价。token 为 0 留 '—'：没得算，不拿 0 顶替。 */
+function fmtUnitCredit(credits, tokens) {
+  const t = Number(tokens || 0);
+  if (!t) return '—';
+  const v = Number(credits || 0) / t * 1000;
+  return v ? v.toFixed(2) : '0';
+}
+
+/* renderUsageHours 时序明细表（积分历史的落地形态）。
+ * 按时间倒序——最近一小时在最上面，这就是"本次一小时扣了多少"要看的那一行。
+ * 时序里既有小时点（窗口内）也有日点（90 天前折叠出的），label 里标出来。 */
+function renderUsageHours(series) {
+  const rows = (series || []).map(p => {
+    const day = p.scope === 'day';
+    const label = esc(day ? p.t : p.t.replace('T', ' ') + ':00') +
+                  ' <span class="note">' + (day ? '日' : '时') + '</span>';
+    return '<tr><td class="mark" aria-hidden="true"></td><td>' + label + '</td>' +
+      '<td class="num">' + fmtTok(p.requests) + '</td>' +
+      '<td class="num">' + fmtTok(p.prompt_tokens) + '</td>' +
+      '<td class="num">' + fmtTok(p.completion_tokens) + '</td>' +
+      '<td class="num">' + fmtTok(p.total_tokens) + '</td>' +
+      '<td class="num">' + fmtCredit(p.credits) + '</td>' +
+      '<td class="num">' + fmtUnitCredit(p.credits, p.total_tokens) + '</td></tr>';
+  }).reverse();
+  $('usHourBody').innerHTML = rows.join('') ||
+    '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
+}
+
 function usBar(prompt, completion, total) {
   const t = Number(total || 0);
   if (!t) return '';
@@ -1030,7 +1065,9 @@ function renderUsage(d) {
     usStat(fmtTok(t.prompt_tokens), 'prompt') +
     usStat(fmtTok(t.completion_tokens), 'completion') +
     usStat(t.errors ? String(t.errors) : '0', '失败尝试', t.errors ? 'warn' : '') +
-    usStat(fmtMs(t.avg_latency_ms), '平均延迟');
+    usStat(fmtMs(t.avg_latency_ms), '平均延迟') +
+    usStat(fmtCredit(t.credits), '积分（窗口内）') +
+    usStat(fmtUnitCredit(t.credits, t.total_tokens), '积分/千token');
 
   // 卡片、三张表与时序图全部按所选窗口统计（切窗口数字随之变化）；
   // 「全部历史」含 90 天前折叠出的日桶。这里标注当前口径与数据起点。
@@ -1054,6 +1091,7 @@ function renderUsage(d) {
     usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
 
   renderUsageChart(d.series || []);
+  renderUsageHours(d.series || []);
 }
 
 /* renderUsageChart 画堆叠柱状图。

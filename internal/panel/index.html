@@ -585,6 +585,21 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
 
       <div class="box">
+        <header><h3>积分与 token 按小时</h3><span class="grow"></span>
+          <span class="note">积分取上游 usage.credit（没观测到的请求不计）；单价 = 积分 ÷ 千 token</span></header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th class="mark" aria-hidden="true"></th><th>时段</th>
+              <th class="num">请求</th><th class="num">Prompt</th><th class="num">Completion</th>
+              <th class="num">合计</th><th class="num">积分</th><th class="num">积分/千token</th>
+            </tr></thead>
+            <tbody id="usHourBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
         <header><h3>按账号</h3><span class="grow"></span>
           <span class="note">请求数含失败尝试</span></header>
         <div class="tbl-wrap">

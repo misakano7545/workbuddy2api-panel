@@ -59,6 +59,9 @@ type bucket struct {
 	LatN  int64   `json:"ln"` // 延迟样本数
 	TPS   float64 `json:"v"`  // 吐字速率累计
 	TPSN  int64   `json:"vn"` // 速率样本数
+	// CR 本片实测扣费积分（上游末帧 usage.credit 累计）。仅统计拿到 credit 的请求：
+	// 免费/限免请求记 0，没观测到 credit 的请求不参与，避免把"没测到"算成"没花钱"。
+	CR float64 `json:"cr"`
 }
 
 // file 落盘结构。
@@ -144,6 +147,10 @@ type Delta struct {
 	CacheHitTokens  int64
 	CacheMissTokens int64
 	HasCache        bool
+	// 上游末帧 usage.credit：本次请求的真实扣费积分。没观测到 → HasCredit=false，
+	// 该次不参与积分累计（与 token 的"有就给"同口径）。
+	Credit    float64
+	HasCredit bool
 }
 
 // Add 记录一次请求尝试。
@@ -199,6 +206,9 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 		b.CH += d.CacheHitTokens
 		b.CM += d.CacheMissTokens
 	}
+	if d.HasCredit {
+		b.CR += d.Credit
+	}
 	r.dirty = true
 }
 
@@ -245,6 +255,7 @@ func (r *Recorder) Rollup(now time.Time) {
 			dst.TT += src.TT
 			dst.CH += src.CH
 			dst.CM += src.CM
+			dst.CR += src.CR
 			dst.LatMs += src.LatMs
 			dst.LatN += src.LatN
 			dst.TPS += src.TPS
@@ -331,6 +342,8 @@ type Agg struct {
 	CacheMissTok  int64   `json:"cache_miss_tokens"`
 	AvgLatencyMs  float64 `json:"avg_latency_ms"`
 	AvgTPS        float64 `json:"avg_tokens_per_second"`
+	// Credits 窗口内实测扣费积分合计（上游 usage.credit；未观测到的请求不计）。
+	Credits float64 `json:"credits"`
 }
 
 // aggAcc 是聚合过程中的累加器：Agg 只放已算好的结果，均值需要样本数才能
@@ -351,6 +364,7 @@ func (g *aggAcc) add(b *bucket) {
 	g.TotalTokens += b.TT
 	g.CacheHitTok += b.CH
 	g.CacheMissTok += b.CM
+	g.Credits += b.CR
 	g.latSum += b.LatMs
 	g.latSamples += b.LatN
 	g.tpsSum += b.TPS

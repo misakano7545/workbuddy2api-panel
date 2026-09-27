@@ -123,6 +123,8 @@ func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
 		HasCacheTokens:      s.hasCache,
 		CacheHitTokens:      int64(s.cacheHit),
 		CacheMissTokens:     int64(s.cacheMiss),
+		HasCredit:           s.hasCredit,
+		Credit:              s.credit,
 	}
 }
 
@@ -276,6 +278,11 @@ func usageDeltaFromResponse(resp map[string]any) pool.TokenUsageDelta {
 	}
 	if n, ok := read("prompt_cache_miss_tokens"); ok {
 		delta.HasCacheTokens, delta.CacheMissTokens = true, n
+	}
+	// 扣费积分（用量视图与成本台账同源）。这里不要求 total_tokens>0——
+	// 历史口径要的是"这一笔花了多少"，拿不到 token 数不该把积分一起丢掉。
+	if c, ok := u["credit"].(float64); ok {
+		delta.HasCredit, delta.Credit = true, c
 	}
 	return delta
 }

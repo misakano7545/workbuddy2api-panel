@@ -628,6 +628,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				CacheHitTokens:   delta.CacheHitTokens,
 				CacheMissTokens:  delta.CacheMissTokens,
 				HasCache:         delta.HasCacheTokens,
+				Credit:           delta.Credit,
+				HasCredit:        delta.HasCredit,
 			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
 		}
 	}
