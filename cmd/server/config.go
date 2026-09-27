@@ -166,6 +166,16 @@ type Config struct {
 		// 被用到 0。未配置（键缺席）→ 默认 10；显式写 0 = 关闭；从未查到余额的账号不受影响。
 		// 指针类型用于区分「未配置」（nil → 默认 10）与「显式 0」（关闭）。
 		ReserveCredits *int64 `json:"reserve_credits"`
+		// AccountPriority / AccountShare 账号级路由偏好（issue #62）。键 = uid（面板账号
+		// 行的短 uid，悬停看完整值）。缺省/空表 = 全部未配置，选号行为与旧版完全一致。
+		//   account_priority: {"<uid>": 1} 小 = 先消耗。配了的号构成「先烧层」，层内号
+		//     可用时其余号不接单；层内号烧空/冷却/停牌后自动让位给下一层。
+		//   account_share: {"<uid>": 70, "<uid2>": 30} 同层内按归一化比例分流量
+		//     （70/30 与 7/3 同义，不必凑满 100）。**优先于 prefer_expiring**：配了占比
+		//     的号独占本层流量，到期优先只对没配占比的号生效。
+		// 非正值（priority ≤ 0 / share ≤ 0）由校验剔除，等价于未配置。
+		AccountPriority map[string]int     `json:"account_priority"`
+		AccountShare    map[string]float64 `json:"account_share"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -561,6 +571,19 @@ func (c *Config) normalize() error {
 		c.Pool.ReserveCredits = &v
 	case *c.Pool.ReserveCredits < 0:
 		*c.Pool.ReserveCredits = 0
+	}
+	// 账号优先级/占比（issue #62）：非正值视为「未配置」直接剔除——0 在这里不是有意义的
+	// 配置（不是"最低优先级"，也不是"零占比"），留着会让语义有两种解释。剔除后空表与
+	// 键缺席等价，选号行为不变。
+	for uid, pr := range c.Pool.AccountPriority {
+		if pr <= 0 {
+			delete(c.Pool.AccountPriority, uid)
+		}
+	}
+	for uid, sh := range c.Pool.AccountShare {
+		if sh <= 0 {
+			delete(c.Pool.AccountShare, uid)
+		}
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120

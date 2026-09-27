@@ -483,6 +483,44 @@ func (p *Pool) reserveBlocked(e *entry) bool {
 	return p.reserveCredits > 0 && e.creditsTotal > 0 && e.credits <= p.reserveCredits
 }
 
+// priorityOf / shareOf 读账号级路由偏好（issue #62），缺省 0 = 未配置。调用方须持锁。
+// nil map 取值为零值，无需判空。
+func (p *Pool) priorityOf(uid string) int  { return p.accountPriority[uid] }
+func (p *Pool) shareOf(uid string) float64 { return p.accountShare[uid] }
+
+// prioritizeLocked 按账号优先级收窄候选（issue #62）：取候选里最小的优先级值（>0），
+// 只留该层；无任何候选配置优先级时原样返回（零配置零影响）。调用方须持锁。
+// 收窄后候选必非空（best 来自某个候选本身）。
+func (p *Pool) prioritizeLocked(cands []*entry) []*entry {
+	best := 0
+	for _, e := range cands {
+		if pr := p.priorityOf(e.a.UID); pr > 0 && (best == 0 || pr < best) {
+			best = pr
+		}
+	}
+	if best == 0 {
+		return cands
+	}
+	out := make([]*entry, 0, len(cands))
+	for _, e := range cands {
+		if p.priorityOf(e.a.UID) == best {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// sharePoolLocked 返回候选里配了占比的账号（无 → nil）。调用方须持锁。
+func (p *Pool) sharePoolLocked(cands []*entry) []*entry {
+	var out []*entry
+	for _, e := range cands {
+		if p.shareOf(e.a.UID) > 0 {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // selectable 选号判据（调用方须持锁）：健康（model 非空走 6004 模型豁免口径）+
 // 未占满在途 + 未因保留积分停牌。选号入口统一走这里，「不可选」的 policy 只此一处。
 func (p *Pool) selectable(e *entry, now time.Time, model string) bool {
@@ -562,6 +600,8 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		CreditsExpiring:          e.creditsExpiring,
 		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 		CreditsEarliestRemaining: e.creditsEarliestRemaining,
+		Priority:                 p.priorityOf(uid),
+		Share:                    p.shareOf(uid),
 		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:                   e.reason,
 		Disabled:                 e.disabled,

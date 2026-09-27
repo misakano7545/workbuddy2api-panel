@@ -66,6 +66,12 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realm)
 	}
+	// 账号优先级（issue #62）：配了优先级的号构成「先烧层」，层内有号可用时其余号一律
+	// 不接单——「优先消耗某个账号的余额」是一条硬语义，加权排序做不到（排序只改抽签
+	// 次序，高优先级号仍会被抽到）。放在成本分层之前：人的显式配置压过自动启发式。
+	// 零配置时 prioritizeLocked 原样返回，本行无副作用。冷却/停牌/在途满的号已在上面的
+	// 候选循环里被 selectable 逐出，所以层内号烧空/冻结后本层自动让位给下一层。
+	cands = p.prioritizeLocked(cands)
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
 	// maxCredits 统一用**全集口径**（tier 过滤前的全部 healthy 候选）：截断排序与
@@ -184,10 +190,19 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		cands = cands[:5]
 	}
 	var e *entry
+	// 账号占比（issue #62）：本层内配了占比的号独占抽签，按 share 归一化分流量
+	// （70/30 与 7/3 同义）。两条次序要求：
+	//   1. 先于「最早到期优先」——后者是从 candsAll 硬选一个号，放它后面占比等于没配；
+	//   2. 不走 top5 截断——截断按权重取前 5，低占比号会永远进不了短名单，占比无从生效。
+	// 配了占比的号全不可用（冷却/在途满/停牌已被 selectable 逐出）时本分支自动让位，
+	// 回到既有到期优先/加权路由：占比是分配偏好，不是排他锁，不会把请求饿死。
+	if sp := p.sharePoolLocked(candsAll); len(sp) > 0 {
+		e = p.pickByShare(sp)
+	}
 	// 最早到期优先（WorkDaddy 口径）：只在成本层内、配置窗口内存在有效批次的账号中
 	// 排序；同到期时间按该批次剩余积分降序。防并发撞号仍优先过滤 minPickGap 内的账号，
 	// 优先级候选全部刚被用时才从中选最早者，避免把请求硬撞到同一账号。
-	if p.preferExpiring {
+	if e == nil && p.preferExpiring {
 		priority := make([]*entry, 0, len(candsAll))
 		for _, c := range candsAll {
 			if c.creditsExpiring <= 0 || c.creditsEarliestRemaining <= 0 ||
@@ -333,13 +348,39 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 			maxCredits = e.credits
 		}
 	}
-	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
 	weights := make([]int64, len(cands))
-	var total int64
 	for i, e := range cands {
-		w := p.weightOf(e, maxCredits, now)
-		weights[i] = int64(w * scale)
-		total += weights[i]
+		weights[i] = int64(p.weightOf(e, maxCredits, now) * weightScale)
+	}
+	return p.drawWeighted(cands, weights)
+}
+
+// weightScale 权重定点放大：int64 累加后抽签，保持随机源注入（randInt64N）语义不变。
+const weightScale = 1_000_000
+
+// pickByShare 在配了占比的账号里按 share 抽签（issue #62）：权重 = share，归一化后即比例。
+// 不套 minPickGap：占比的语义就是「流量按这个比例分给这几号」，硬压间隔会让比例失真；
+// 而在途上限/冷却/停牌已由 selectable 逐出候选，占满的号自动退出本次抽签，请求不会
+// 堆在单号上。share 极小（< 1/weightScale）时钳到最小权重，避免整轮权重归零退化成
+// 均匀随机——那会让"1% 的号"和"99% 的号"一样多。
+func (p *Pool) pickByShare(cands []*entry) *entry {
+	weights := make([]int64, len(cands))
+	for i, e := range cands {
+		w := int64(p.shareOf(e.a.UID) * weightScale)
+		if w <= 0 {
+			w = 1
+		}
+		weights[i] = w
+	}
+	return p.drawWeighted(cands, weights)
+}
+
+// drawWeighted 定点权重抽签（weights 与 cands 等长、同序）。权重和 <= 0 时退化为均匀随机。
+// 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
+func (p *Pool) drawWeighted(cands []*entry, weights []int64) *entry {
+	var total int64
+	for _, w := range weights {
+		total += w
 	}
 	rnd := rand.Int64N
 	if p.randInt64N != nil {

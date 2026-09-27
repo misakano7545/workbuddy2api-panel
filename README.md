@@ -398,6 +398,8 @@ curl -s http://localhost:7863/v1/responses \
 | `pool.idle_weight_max` | `5.0` | 闲置补偿权重封顶 |
 | `pool.prefer_expiring` | `true` | 最早到期优先：窗口内存在快过期积分时，按最近到期时间升序选择账号（同时间剩余积分多者优先） |
 | `pool.expiring_soon` | `168h` | 快过期路由窗口：仅此窗口内的批次参与最早到期优先；留空或 `0` 关闭 |
+| `pool.account_priority` | `{}` | 账号优先级（issue #62）：`{"<uid>": 1}`，**小 = 先消耗**。配了的号构成「先烧层」，层内还有可用号时其余号一律不接单；层内号烧空/冷却/停牌后自动让位下一层。空表 = 不启用，行为与旧版一致。键 = uid（面板账号行短 uid，悬停看完整值） |
+| `pool.account_share` | `{}` | 账号占比（issue #62）：`{"<uid>": 70, "<uid2>": 30}`，同一层内按归一化比例分流量（70/30 与 7/3 同义，不必凑满 100）。**优先于 `prefer_expiring`**：配了占比的号独占本层流量。配了占比的号全不可用时自动回落到既有路由。空表 = 不启用 |
 | `session_sticky.enabled` | `true` | 会话粘性路由开关 |
 | `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
 | `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |

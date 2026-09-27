@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,15 @@ type Pool struct {
 	// 任务（签到/猫猫旅行本身赚积分），充值后自动恢复。上游余额耗尽会发提醒短信，
 	// 设阈值即避免被用到 0。
 	reserveCredits int64
+	// accountPriority 账号优先级（uid → 正整数，小 = 先消耗；SetAccountPriority 注入）。
+	// issue #62：配了的账号构成「先烧层」——层内有号可用时未配置的号一律不接单，
+	// 等价于「先把这批号的余额烧完，再换下一批」。硬过滤而非排序：排序只改抽签次序，
+	// 做不到「优先消耗某个账号的余额」。缺省 nil = 全部未配置（选号行为与旧版一致）。
+	accountPriority map[string]int
+	// accountShare 账号占比（uid → 相对权重，正数；SetAccountShare 注入）。
+	// issue #62：同一层内配了占比的账号独占抽签，按 share 归一化分流量（70/30 与
+	// 7/3 同义，不必凑满 100）。缺省 nil = 全部未配置（行为与旧版一致）。
+	accountShare map[string]float64
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -196,6 +206,32 @@ func (p *Pool) SetPreferExpiring(enabled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.preferExpiring = enabled
+}
+
+// SetAccountPriority 注入账号优先级表（uid → 正整数，小 = 先消耗；issue #62）。
+// nil/空表 = 全部未配置，选号行为与未开此功能完全一致。非正值由 config 校验剔除。
+// 与 SetReserveCredits 同风格：不落 state.json——config 是事实源，重启由 main 重新注入。
+func (p *Pool) SetAccountPriority(m map[string]int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.accountPriority = m
+	// 静默失败是这类配置最坑的形态：uid 打错/字段名写错都不报错，只是"没生效"。
+	// 打一行键数，配合逐号状态里的 priority 字段（面板 /panel/api/accounts）即可
+	// 自证配置被读到且被匹配上。
+	if len(m) > 0 {
+		log.Printf("[pool] account_priority 已配置 %d 个账号（未配置的号在其后消费）", len(m))
+	}
+}
+
+// SetAccountShare 注入账号占比表（uid → 相对权重，正数；issue #62）。
+// nil/空表 = 全部未配置。占比在同一层内生效，先于「最早到期优先」（见 pick）。
+func (p *Pool) SetAccountShare(m map[string]float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.accountShare = m
+	if len(m) > 0 {
+		log.Printf("[pool] account_share 已配置 %d 个账号（同层内按归一化占比分流）", len(m))
+	}
 }
 
 // SetDegrade 注入连败降权参数（main 从 config 解析后调用，issue #114）。

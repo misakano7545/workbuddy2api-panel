@@ -69,6 +69,8 @@
     "idle_weight_max": 5.0,
     "prefer_expiring": true,
     "expiring_soon": "168h",
+    "account_priority": {},
+    "account_share": {},
     "cost_explore_interval": "30m",
     "reserve_credits": 10
   },

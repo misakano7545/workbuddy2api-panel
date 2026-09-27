@@ -81,12 +81,16 @@ type Status struct {
 	CreditsExpiring          int64     `json:"credits_expiring,omitempty"`
 	CreditsEarliestExpiry    time.Time `json:"credits_earliest_expiry,omitempty"`
 	CreditsEarliestRemaining int64     `json:"credits_earliest_remaining,omitempty"`
-	Cooling                  bool      `json:"cooling"`
-	CoolKind                 string    `json:"cool_kind,omitempty"`
-	CoolRemaining            int64     `json:"cool_remaining_sec,omitempty"`
-	Until                    time.Time `json:"until,omitempty"`
-	Reason                   string    `json:"reason,omitempty"`
-	SoftStreak               int       `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
+	// Priority / Share 账号级路由偏好（issue #62，config 里的 account_priority /
+	// account_share），0 = 未配置。透出来是为了让配置能自证生效：uid 打错时这里恒 0。
+	Priority      int       `json:"priority,omitempty"`
+	Share         float64   `json:"share,omitempty"`
+	Cooling       bool      `json:"cooling"`
+	CoolKind      string    `json:"cool_kind,omitempty"`
+	CoolRemaining int64     `json:"cool_remaining_sec,omitempty"`
+	Until         time.Time `json:"until,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	SoftStreak    int       `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
 	// RateLimitedModels 当前仍在限额的模型列表（issue #36 限额台账）。
 	// 仅「带解析时间 6004」触发的模型级独立冷却（modelCooldowns 未到期条目）时非空，
 	// 每模型一行；运维据此看到"账号 A 的模型 X 还在限额中，预计 Z 时间恢复"。到期即消失（零回归）。
