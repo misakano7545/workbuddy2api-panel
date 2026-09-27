@@ -652,6 +652,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                   <input name="growth_hours" placeholder="11">
                   <span class="hint">每日自动跑一遍任务中心待办（扫描 → 动作 → 达标领奖）</span></label>
               </div>
+              <div>
+                <div class="switch"><span class="lb">夜猫子</span>
+                  <input type="checkbox" name="blackcat_enabled"></div>
+                <label class="fld"><span class="lb">补足时点（小时，逗号分隔）</span>
+                  <input name="blackcat_hours" placeholder="23">
+                  <span class="hint">只在 23:00–08:00 计数窗口内生效，窗口外自动跳过</span></label>
+              </div>
             </div>
             <div class="hr"></div>
             <div class="grid2">
