@@ -125,6 +125,31 @@ try {
 	}
 }
 
+// TestLogoutWired 登出按钮必须「HTML 里有、JS 里绑了、且真的清密钥」。
+//
+// 为什么需要：id 靠两边字符串对齐，改一边就静默失效——按钮在、点了没反应，或者
+// 看着登出了但密钥还在本机（刷新即免密进入，等于没登出）。与
+// TestIndexHTMLConfigInputsUnique 同一类"看着在、实际没生效"的坑。
+func TestLogoutWired(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	if !strings.Contains(rec.Body.String(), `id="btnLogout"`) {
+		t.Error(`index.html 缺少登出按钮 id="btnLogout"`)
+	}
+	js, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(js)
+	if !strings.Contains(src, "$('btnLogout')") {
+		t.Error("app.js 未绑定 $('btnLogout')：按钮点了不会有反应")
+	}
+	if !strings.Contains(src, "localStorage.removeItem(LS_KEY)") {
+		t.Error("登出必须清掉本地密钥（LS_KEY），否则刷新后仍免密进入面板")
+	}
+}
+
 // TestQrowShowsCodeAndTitle 任务中心行必须同时画出内部代号和上游中文名。
 // 队列轮询不经过扫描，名字只能来自条目自己的 title；退回代号会让两列都是 Sequential_Tasks_*。
 func TestQrowShowsCodeAndTitle(t *testing.T) {
