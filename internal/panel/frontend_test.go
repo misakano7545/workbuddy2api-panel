@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -185,5 +186,38 @@ console.log('OK');
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("qrow title check: %v\n%s", err, out)
+	}
+}
+
+// TestIndexHTMLConfigInputsUnique 表单里每个 name 只能出现一次。
+//
+// 为什么需要：配置表单是「按 name 取值」的（collectConfig 遍历 CFG_MAP → elements[name]），
+// 同名输入框会静默互相覆盖（DOM 里靠后的赢），页面上看着像两个独立选项、实际只生效一个——
+// 本仓库已经犯过两次（成长任务队列整行被重复插入）。这里把它挡在 CI。
+func TestIndexHTMLConfigInputsUnique(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+
+	re := regexp.MustCompile(`<input[^>]*>`)
+	nameRe := regexp.MustCompile(`\sname="([^"]+)"`)
+	typeRe := regexp.MustCompile(`\stype="([^"]+)"`)
+	seen := map[string]int{}
+	for _, tag := range re.FindAllString(body, -1) {
+		nm, ty := nameRe.FindStringSubmatch(tag), typeRe.FindStringSubmatch(tag)
+		// radio 组靠同名互斥，重复是正确写法；其余同名会互相覆盖。
+		if nm == nil || (ty != nil && ty[1] == "radio") {
+			continue
+		}
+		seen[nm[1]]++
+	}
+	if len(seen) == 0 {
+		t.Fatal("no named inputs found in index.html")
+	}
+	for name, n := range seen {
+		if n > 1 {
+			t.Errorf("input name=%q 出现 %d 次（同名会互相覆盖，只保留一个）", name, n)
+		}
 	}
 }
