@@ -1475,8 +1475,9 @@ function renderExpiryDistribution(list, now) {
     a && !a.error && a.uid && pkAccountSegments(a, now).some(s => s.days != null)
   ).map(a => '<span><i style="background:' + (colors.get(String(a.uid)) || 'var(--accent)') +
     '"></i>' + esc(a.nickname || String(a.uid).slice(0, 8)) + '</span>').join('');
+  const hdr = '<div class="pk-expiry-hdr"><span>剩余天数</span><span style="text-align:center">各账号该批剩余</span><b>剩余积分</b></div>';
   $('pkExpiry').innerHTML = (rows
-    ? '<div class="pk-expiry-chart">' + rows + '</div>'
+    ? hdr + '<div class="pk-expiry-chart">' + rows + '</div>'
     : '<div class="pk-expiry-empty">暂无可汇总积分</div>') +
     (legend ? '<div class="pk-expiry-legend">' + legend + '</div>' : '') +
     '<div class="pk-expiry-foot">' + esc(foot) + '</div>';
