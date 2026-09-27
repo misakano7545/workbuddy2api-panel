@@ -1525,7 +1525,6 @@ function pkDetailGroups(packs, limit) {
 function renderPackages(d, detailLimit) {
   const list = (d.accounts || []);
   const now = Date.now();
-  const expiryColors = pkAccountColorMap(list);
   renderExpiryDistribution(list, now);
   if (!list.length) {
     $('pkSummary').innerHTML = '<div class="empty">没有账号</div>';
@@ -1569,18 +1568,6 @@ function renderPackages(d, detailLimit) {
       esc(s.name.replace(/^CodeBuddy/, '')) + ' x' + s.n + ' · ' + fmtTok(s.size) +
       (s.minCreated ? ' · 首发 ' + esc(s.minCreated.slice(5)) : '') + '</span>'
     ).join('');
-    const expiry = pkAccountSegments(a, now);
-    const expiryTotal = Math.max(1, expiry.reduce((sum, s) => sum + s.amount, 0));
-    const expiryColor = expiryColors.get(String(a.uid)) || 'var(--accent)';
-    const expiryBar = expiry.length ? '<div class="expirybar" role="img" aria-label="积分到期分布">' +
-      expiry.map(s => {
-        const title = s.source + '\n' + fmtTok(s.amount) + ' 积分\n到期时间 ' +
-          pkExpiryDateTime(s.expiresAt) + '（' + pkExpiryText(s.expiresAt) + '）';
-        return '<i style="background:' + expiryColor +
-          ';opacity:' + pkCreditOpacity(s.days).toFixed(5) +
-          ';flex:' + Math.max(0.008, s.amount / expiryTotal).toFixed(4) +
-          ' 1 0" title="' + esc(title) + '"></i>';
-      }).join('') + '</div>' : '';
     return '<div class="pk-card">' +
       '<div class="who"><span class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
       '<span class="realm">' + esc(a.realm || '') + '</span></div>' +
@@ -1588,7 +1575,6 @@ function renderPackages(d, detailLimit) {
       '<div class="sub">共 ' + fmtTok(a.size) + ' · ' + (a.packages || []).length +
       ' 个包 · 占最高 ' + (Number(a.remain || 0) / maxRemain * 100).toFixed(0) + '%</div>' +
       '<div class="mixbar">' + bar + '</div>' +
-      expiryBar +
       '<div class="pk-legend">' + legend + '</div>' +
       '</div>';
   }).join('');
