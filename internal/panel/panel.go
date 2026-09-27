@@ -223,6 +223,14 @@ func (p *Panel) apiKey() string {
 	return p.cfg.APIKey
 }
 
+// expiringSoonWindow 返回调度器当前生效的快过期路由窗口；测试面板无调度器时返回 0。
+func (p *Panel) expiringSoonWindow() time.Duration {
+	if p.cfg.Scheduler == nil {
+		return 0
+	}
+	return p.cfg.Scheduler.ExpiringSoonWindow()
+}
+
 // ---------------------------------------------------------------------------
 // 只读接口
 // ---------------------------------------------------------------------------
@@ -443,20 +451,21 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
 	}
-	remain, total, err := p.cfg.Upstream.UserResource(a)
+	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 	if err != nil {
 		resp["balance_error"] = err.Error()
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	p.cfg.Pool.ReenableIfCredits(uid, remain, total)
+	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
 	resp["credits"] = remain
 	resp["credits_total"] = total
 	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, total)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// accountBalance 单号余额刷新：UserResource → SetCredits（不触碰冷却状态）。
+// accountBalance 单号余额刷新：更新余额与到期快照，不触碰冷却状态。
 func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.cfg.Pool.AuthByUID(uid)
@@ -464,12 +473,12 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	remain, total, err := p.cfg.Upstream.UserResource(a)
+	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
 		return
 	}
-	p.cfg.Pool.SetCredits(uid, remain, total)
+	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": total})
 }
 

@@ -110,6 +110,11 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 			e.credits = remain
 			e.creditsTotal = total
 		}
+		// ReenableIfCredits 只有聚合余额上下文；到期明细必须由 SetCreditsDetailed
+		// 重新写入，不能沿用旧窗口/旧批次的缓存。
+		e.creditsExpiring = 0
+		e.creditsEarliestExpiry = time.Time{}
+		e.creditsEarliestRemaining = 0
 		p.dirty.Store(true)
 	}
 }
@@ -154,7 +159,7 @@ func (p *Pool) NoteSuccess(uid string) {
 }
 
 // NoteModelCost 记录一次实测扣费观测，更新该 (账号, 模型) 的成本账本，并顺带
-// 扣减账号余额（credits/creditsExpiring）。credit 为上游 usage.credit（本次真实
+// 扣减账号余额（credits/creditsExpiring/最早到期批次）。credit 为上游 usage.credit（本次真实
 // 扣费=消耗量），tokens 为本次请求的 token 总数（prompt+completion，用于折算单位
 // 成本）。tokens<=0 时不记录：无法折算单价，记进去会污染账本。
 //
@@ -166,7 +171,7 @@ func (p *Pool) NoteSuccess(uid string) {
 // （运维据此知道"免费午餐结束了"），判定在写入口做、只看覆盖前值。
 //
 // credits 签到外回写：credit 是本次请求的**消耗量**，不是剩余余额。顺手扣减
-// credits 与 creditsExpiring，让选号余额因子随消耗实时收敛——旧口径只在签到
+// credits 与到期快照，让选号余额因子随消耗实时收敛——旧口径只在签到
 // （每天 09:00/21:00 两次）刷新，两次签到之间（最长 12h）高消耗号持续高权重直到
 // 打空撞 402；global 账号不签到，credits 曾是终身冻结。签到仍定期覆盖
 // （ReenableIfCredits/SetCreditsDetailed 以 authoritative 余额重置），扣减只是
@@ -192,11 +197,22 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 			d = e.credits // 钳 0：扣穿（对账延迟/消费早于记账）不产生负余额
 		}
 		e.credits -= d
+		consume := d
 		if e.creditsExpiring > 0 {
-			if d > e.creditsExpiring {
-				d = e.creditsExpiring
+			if consume > e.creditsExpiring {
+				consume = e.creditsExpiring
 			}
-			e.creditsExpiring -= d
+			e.creditsExpiring -= consume
+		}
+		if e.creditsEarliestRemaining > 0 {
+			if consume > e.creditsEarliestRemaining {
+				consume = e.creditsEarliestRemaining
+			}
+			e.creditsEarliestRemaining -= consume
+		}
+		if e.creditsExpiring == 0 || e.creditsEarliestRemaining == 0 {
+			e.creditsEarliestExpiry = time.Time{}
+			e.creditsEarliestRemaining = 0
 		}
 	}
 	if e.modelCost == nil {
@@ -537,28 +553,31 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 每模型一行（modelCooldowns 内未到期的条目），多模型同时限流全部展示。
 		// 到期判据 = 该模型的独立冷却 until 未过；条件满足才输出，随到期自然消失，
 		// 普通软冷却（无模型级表）/硬冷却不产生台账（零回归）。
-		RateLimitedModels: p.rateLimitedModelsLocked(e, now),
-		Realm:             e.a.Realm(),
-		Nickname:          e.a.Nickname,
-		Credits:           e.credits,
-		CreditsTotal:      e.creditsTotal,
-		ReserveBlocked:    p.reserveBlocked(e),
-		Cooling:           now.Before(e.until) || now.Before(e.breakerUntil),
-		Reason:            e.reason,
-		Disabled:          e.disabled,
-		SuccessCount:      e.successCount,
-		ErrTotal:          e.errTotal,
-		TokenUsage:        e.tokenUsage,
-		LastSuccessTime:   e.lastSuccess,
-		LastErrTime:       e.lastErr,
-		Until:             e.until,
-		SoftStreak:        e.softStreak,
-		ModelCosts:        p.modelCostsStatusLocked(e, now),
-		ConsecutiveFails:  e.consecutiveFails,
-		DegradeUntil:      e.degradeUntil,
-		InFlight:          int(e.inFlight.Load()),
-		BreakerFails:      e.fails,
-		BreakerUntil:      e.breakerUntil,
+		ReserveBlocked:           p.reserveBlocked(e),
+		RateLimitedModels:        p.rateLimitedModelsLocked(e, now),
+		Realm:                    e.a.Realm(),
+		Nickname:                 e.a.Nickname,
+		Credits:                  e.credits,
+		CreditsTotal:             e.creditsTotal,
+		CreditsExpiring:          e.creditsExpiring,
+		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
+		CreditsEarliestRemaining: e.creditsEarliestRemaining,
+		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil),
+		Reason:                   e.reason,
+		Disabled:                 e.disabled,
+		SuccessCount:             e.successCount,
+		ErrTotal:                 e.errTotal,
+		TokenUsage:               e.tokenUsage,
+		LastSuccessTime:          e.lastSuccess,
+		LastErrTime:              e.lastErr,
+		Until:                    e.until,
+		SoftStreak:               e.softStreak,
+		ModelCosts:               p.modelCostsStatusLocked(e, now),
+		ConsecutiveFails:         e.consecutiveFails,
+		DegradeUntil:             e.degradeUntil,
+		InFlight:                 int(e.inFlight.Load()),
+		BreakerFails:             e.fails,
+		BreakerUntil:             e.breakerUntil,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。

@@ -93,7 +93,7 @@ func main() {
 	p.RestoreFromSnapshot() // 择新恢复：Redis 快照比本地新才采用，否则本地优先
 	p.SyncToDir(auths)      // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
 
-	// 熔断器 + 在途上限（含 global 分档）+ 连败降权 + 三因子加权调优（从 config 注入，
+	// 熔断器 + 在途上限（含 global 分档）+ 连败降权 + 闲置补偿调优（从 config 注入，
 	// 非正值回退默认）。
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
@@ -103,6 +103,7 @@ func main() {
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetReserveCredits(*cfg.Pool.ReserveCredits) // 保留积分：余额低于阈值停止接单（0 = 关闭，缺省 10）
+	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -375,8 +376,8 @@ func panelListenPath(listen string) string {
 //
 // 热生效范围（设计取舍）：
 //   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints → livecfg 快照
-//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval
-//   - schedule.* → scheduler.Reconfigure/SetBalanceInterval
+//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetPreferExpiring
+//   - schedule.* → scheduler.Reconfigure/SetBalanceInterval/SetExpiringSoonWindow
 //
 // 需重启（涉及监听地址、HTTP client 超时、auth_dir 等装配期依赖）：
 //   - listen / auth_dir / state_file / upstream.* / upstash.* / session_sticky.*（TTL 类）
@@ -457,6 +458,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
+	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
+	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	p.SetReserveCredits(*newCfg.Pool.ReserveCredits) // 保留积分热生效（0 = 关闭，缺省 10）
 	sch.Reconfigure(scheduler.ScheduleParams{
 		CheckinHours:   newCfg.Schedule.CheckinHours,

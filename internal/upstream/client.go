@@ -1690,7 +1690,8 @@ type CreditPackage struct {
 	Remain int64  `json:"remain"`
 	Used   int64  `json:"used"`
 	Size   int64  `json:"size"`
-	// EndTime 该包的周期结束时间（上游 ExpiredTime / PackageEndTime 二者取有值者）。
+	// EndTime 该包的周期结束时间（上游 ExpiredTime / PackageEndTime / CycleEndTime
+	// 按优先级取首个有值字段）。
 	EndTime string `json:"end_time,omitempty"`
 	// ExpiresAt 与 EndTime 同源的 Unix 毫秒时间戳，供面板按精确剩余天数聚合。
 	ExpiresAt int64 `json:"expires_at,omitempty"`
@@ -1818,6 +1819,19 @@ func (c *Client) UserResource(a *auth.Auth) (remain, total int64, err error) {
 // packageEndLayout 上游套餐到期时间的墙钟格式（UTC+8，与 softRateResetLoc 同口径）。
 const packageEndLayout = "2006-01-02 15:04:05"
 
+// parsePackageEndTime 统一解析上游套餐到期时间。空值、格式异常返回 false，
+// 调用方据此保守地不把该包计入最早到期路由。
+func parsePackageEndTime(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+	t, err := time.ParseInLocation(packageEndLayout, raw, softRateResetLoc)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 // UserResourceDetailed 在 UserResource 基础上额外返回「快过期」积分子集：
 // soon > 0 且套餐 CycleEndTime 解析成功且到期时刻 ≤ now+soon 的余额计入 expiring
 // （pool 据此优先消耗，避免官方活动赠送的奖励积分到期作废）；soon ≤ 0 时 expiring
@@ -1831,6 +1845,14 @@ const packageEndLayout = "2006-01-02 15:04:05"
 // 钳 [0,size] 与 used 修正；消除双份逻辑漂移——旧中间 switch 只钳负值，上游脏数据
 // CycleRemain>Size 时会高估）。
 func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, err error) {
+	remain, total, expiring, _, _, err = c.UserResourceDetailedWithExpiry(a, soon)
+	return remain, total, expiring, err
+}
+
+// UserResourceDetailedWithExpiry 在 UserResourceDetailed 基础上返回最早未来到期批次：
+// earliestAt 是最早的可用到期时刻，earliestRemaining 是同一时刻所有正余额包的剩余量之和。
+// 已过期、剩余为 0、缺少或无法解析到期时间的包都不会成为最早批次；无有效批次时返回零值。
+func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
 	now := time.Now()
 	body := map[string]any{
 		"PageNumber":               1,
@@ -1842,7 +1864,7 @@ func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain,
 	}
 	data, err := c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, time.Time{}, 0, err
 	}
 	var resp struct {
 		Response struct {
@@ -1861,7 +1883,7 @@ func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain,
 		} `json:"Response"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, 0, 0, fmt.Errorf("resource parse: %w", err)
+		return 0, 0, 0, time.Time{}, 0, fmt.Errorf("resource parse: %w", err)
 	}
 	for _, acct := range resp.Response.Data.Accounts {
 		r, _, size := packageRemainUsed(respAccount{
@@ -1880,16 +1902,25 @@ func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain,
 		}
 		remain += r
 		total += size
-		// 分桶：仅 soon>0 且能解析出有效到期时间、且确实在窗口内 → expiring。
-		if soon > 0 && r > 0 && acct.CycleEndTime != "" {
-			if end, perr := time.ParseInLocation(packageEndLayout, acct.CycleEndTime, softRateResetLoc); perr == nil {
-				if !end.After(now.Add(soon)) {
-					expiring += r
-				}
-			}
+		if r <= 0 {
+			continue
+		}
+		end, ok := parsePackageEndTime(acct.CycleEndTime)
+		if !ok || !end.After(now) {
+			continue
+		}
+		if earliestAt.IsZero() || end.Before(earliestAt) {
+			earliestAt = end
+			earliestRemaining = r
+		} else if end.Equal(earliestAt) {
+			earliestRemaining += r
+		}
+		// 分桶：仅 soon>0 且确实在窗口内 → expiring。
+		if soon > 0 && !end.After(now.Add(soon)) {
+			expiring += r
 		}
 	}
-	return remain, total, expiring, nil
+	return remain, total, expiring, earliestAt, earliestRemaining, nil
 }
 
 // respAccount 供 packageRemainUsed 解析的套餐字段（CreditPackages 的逐包结构同构）。

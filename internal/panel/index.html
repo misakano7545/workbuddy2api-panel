@@ -756,6 +756,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">成本探索窗口</span>
                 <input name="cost_explore_interval" placeholder="30m">
                 <span class="hint">垄断破除：免费层垄断时定期搭车探索未知号；0 关停</span></label>
+              <label class="fld"><span class="lb">快过期路由窗口</span>
+                <input name="expiring_soon" placeholder="168h">
+                <span class="hint">窗口内按最早到期优先；0 关闭</span></label>
               <label class="fld"><span class="lb">会话粘性 TTL</span>
                 <input name="ttl" placeholder="30m">
                 <span class="hint">改动需重启进程</span></label>
@@ -763,6 +766,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input name="reserve_credits" type="number" min="0" placeholder="10">
                 <span class="hint">余额低于该值的账号停止接单（0 = 关闭，缺省 10）</span></label>
             </div>
+            <div class="switch"><span class="lb">快过期积分优先</span>
+              <input type="checkbox" name="prefer_expiring"></div>
           </div>
         </div>
 
