@@ -586,13 +586,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
       <div class="box">
         <header><h3>积分与 token 按小时</h3><span class="grow"></span>
-          <span class="note">积分取上游 usage.credit（没观测到的请求不计）；单价 = 积分 ÷ 千 token</span></header>
+          <span class="note">积分取上游 usage.credit（没观测到的请求不计）；兑换率 = token ÷ 积分</span></header>
         <div class="tbl-wrap">
           <table class="acc">
             <thead><tr>
               <th class="mark" aria-hidden="true"></th><th>时段</th>
               <th class="num">请求</th><th class="num">Prompt</th><th class="num">Completion</th>
-              <th class="num">合计</th><th class="num">积分</th><th class="num">积分/千token</th>
+              <th class="num">合计</th><th class="num">积分</th><th class="num">token/积分</th>
             </tr></thead>
             <tbody id="usHourBody"></tbody>
           </table>

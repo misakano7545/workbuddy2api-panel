@@ -996,12 +996,16 @@ function fmtCredit(v) {
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
-/* fmtUnitCredit 每千 token 的积分单价。token 为 0 留 '—'：没得算，不拿 0 顶替。 */
-function fmtUnitCredit(credits, tokens) {
-  const t = Number(tokens || 0);
-  if (!t) return '—';
-  const v = Number(credits || 0) / t * 1000;
-  return v ? v.toFixed(2) : '0';
+/* fmtTokPerCredit 兑换率：1 积分换多少 token。
+ *
+ * 为什么不做「积分/千token」：实测量级是 0.000003 积分/千token（上游按请求计费，
+ * 而请求动辄几十万 token 且大量命中缓存），两位小数一律显示 0.00，等于没显示。
+ * 反过来用 token/积分，量级落在 k~M，fmtTok 直接可读。 */
+function fmtTokPerCredit(credits, tokens) {
+  const c = Number(credits || 0);
+  if (!c) return '—';
+  const v = Number(tokens || 0) / c;
+  return v ? fmtTok(v) : '—';
 }
 
 /* renderUsageHours 时序明细表（积分历史的落地形态）。
@@ -1018,7 +1022,7 @@ function renderUsageHours(series) {
       '<td class="num">' + fmtTok(p.completion_tokens) + '</td>' +
       '<td class="num">' + fmtTok(p.total_tokens) + '</td>' +
       '<td class="num">' + fmtCredit(p.credits) + '</td>' +
-      '<td class="num">' + fmtUnitCredit(p.credits, p.total_tokens) + '</td></tr>';
+      '<td class="num">' + fmtTokPerCredit(p.credits, p.total_tokens) + '</td></tr>';
   }).reverse();
   $('usHourBody').innerHTML = rows.join('') ||
     '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
@@ -1067,7 +1071,7 @@ function renderUsage(d) {
     usStat(t.errors ? String(t.errors) : '0', '失败尝试', t.errors ? 'warn' : '') +
     usStat(fmtMs(t.avg_latency_ms), '平均延迟') +
     usStat(fmtCredit(t.credits), '积分（窗口内）') +
-    usStat(fmtUnitCredit(t.credits, t.total_tokens), '积分/千token');
+    usStat(fmtTokPerCredit(t.credits, t.total_tokens), 'token/积分');
 
   // 卡片、三张表与时序图全部按所选窗口统计（切窗口数字随之变化）；
   // 「全部历史」含 90 天前折叠出的日桶。这里标注当前口径与数据起点。
