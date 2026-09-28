@@ -1189,7 +1189,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
 			return
 		}
-		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "account fault (14017)")
+		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)

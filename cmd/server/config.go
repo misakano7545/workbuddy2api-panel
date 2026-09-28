@@ -663,6 +663,7 @@ func (c *Config) normalize() error {
 	}
 	if err := c.normalizeAlerting(); err != nil {
 		return err
+
 	}
 	// 余额后台刷新：启用时 minutes<=0 回落默认 5；关闭时 interval 保持 0（不启动）。
 	if c.Schedule.BalanceRefreshEnabled {

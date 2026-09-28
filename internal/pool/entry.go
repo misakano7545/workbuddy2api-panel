@@ -291,7 +291,7 @@ func (e *entry) healthy(now time.Time) bool {
 // healthyForModel 与 ServableNow 共用本谓词，保证 chat 选号与探活口径一致。
 // 调用方负责 now 与冷却有效性的判断（本方法只看形态，不看冷却是否已过期）。
 func (e *entry) modelExempt() bool {
-	if e.disabled || !e.breakerUntil.IsZero() {
+	if e.disabled || !e.until.IsZero() || !e.degradeUntil.IsZero() || !e.breakerUntil.IsZero() {
 		return false
 	}
 	for _, mc := range e.modelCooldowns {
