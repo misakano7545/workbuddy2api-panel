@@ -344,6 +344,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .uschart-body .gl { stroke: var(--line-soft); stroke-width: 1; stroke-dasharray: 2 3; opacity: .7; }
   .uschart-body .tk { fill: var(--ink-3); font: 10px var(--mono); }
   .uschart-body .us-empty { padding: 28px 0; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+  .credit-dim + .credit-dim { margin-top: 16px; }
+  .credit-dim-hd { padding: 8px 11px; border-top: 1px solid var(--line-soft);
+    border-bottom: 1px solid var(--line-soft); background: var(--surface-2);
+    color: var(--ink-2); font-size: 12.5px; font-weight: 600; }
   /* 用量表内的 prompt/completion 小条。必须限定在 .us-wrapbar 内：账号池积分条
      也叫 .bar（块级容器 + 百分比内条），同优先级下这里的全局 .bar 会覆盖它，
      把积分条塌成 min-width 的一个小点（v1.9.0 回归）。 */
@@ -598,6 +602,41 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             </tr></thead>
             <tbody id="usHourBody"></tbody>
           </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>积分扣除历史</h3>
+          <span class="grow"></span>
+          <span class="note" id="usCreditNote">—</span>
+        </header>
+        <div class="stats" id="usCreditStats"></div>
+        <div class="credit-dim">
+          <div class="credit-dim-hd">按账号</div>
+          <div class="tbl-wrap">
+            <table class="acc">
+              <thead><tr>
+                <th class="mark" aria-hidden="true"></th><th>账号</th>
+                <th class="num">请求</th><th class="num">扣除积分</th>
+                <th class="num">有效样本 Token</th><th class="num">积分 / 1M Token</th>
+              </tr></thead>
+              <tbody id="usCreditAccBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="credit-dim">
+          <div class="credit-dim-hd">按模型</div>
+          <div class="tbl-wrap">
+            <table class="acc">
+              <thead><tr>
+                <th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th>
+                <th class="num">请求</th><th class="num">扣除积分</th>
+                <th class="num">有效样本 Token</th><th class="num">积分 / 1M Token</th>
+              </tr></thead>
+              <tbody id="usCreditModelBody"></tbody>
+            </table>
+          </div>
         </div>
       </div>
 

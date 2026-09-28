@@ -150,6 +150,53 @@ func TestLogoutWired(t *testing.T) {
 	}
 }
 
+// 积分扣除维度的格式必须稳定，且缺样本/缺匹配 Token 时不能伪造比例。
+func TestAppJSCreditDimensionFormatting(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; credit formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+	const start = src.indexOf('function trimFixed');
+const end = src.indexOf('function usStat');
+if (start < 0 || end < 0) throw new Error('credit helpers not found');
+const ctx = { Number, String, RegExp };
+vm.createContext(ctx);
+vm.runInContext(
+  src.slice(start, end) +
+  '\nthis.fmtCredit=fmtCredit; this.fmtCreditRatio=fmtCreditRatio; this.fmtModelRate=fmtModelRate;',
+  ctx
+);
+process.stdout.write(JSON.stringify({
+  credit: ctx.fmtCredit(1.25),
+  zero: ctx.fmtCredit(0),
+  hundred: ctx.fmtCredit(100),
+  ratio: ctx.fmtCreditRatio(12.5, 2, 400),
+  noSamples: ctx.fmtCreditRatio(12.5, 0, 400),
+  noTokens: ctx.fmtCreditRatio(12.5, 2, 0),
+  rate: ctx.fmtModelRate('0.5'),
+  noRate: ctx.fmtModelRate(''),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "credit-format-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("credit formatting node test failed: %v\n%s", err, out)
+	}
+	const want = `{"credit":"1.25","zero":"0","hundred":"100","ratio":"12.5 / 1M","noSamples":"—","noTokens":"—","rate":"x0.5","noRate":"—"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("credit formatting=%s want %s", out, want)
+	}
+}
+
 // TestQrowShowsCodeAndTitle 任务中心行必须同时画出内部代号和上游中文名。
 // 队列轮询不经过扫描，名字只能来自条目自己的 title；退回代号会让两列都是 Sequential_Tasks_*。
 func TestQrowShowsCodeAndTitle(t *testing.T) {

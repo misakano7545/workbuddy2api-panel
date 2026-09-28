@@ -992,6 +992,25 @@ function fmtMs(ms) {
   return Math.round(ms) + 'ms';
 }
 function fmtRate(r) { return r ? Number(r).toFixed(1) + ' tok/s' : '—'; }
+function trimFixed(s) {
+  if (!String(s).includes('.')) return String(s);
+  return String(s).replace(/0+$/, '').replace(/\.$/, '');
+}
+function fmtCredit(n) {
+  const v = Number(n || 0);
+  if (!Number.isFinite(v)) return '—';
+  return trimFixed(v.toFixed(2));
+}
+function fmtCreditRatio(v, samples, tokens) {
+  if (!samples || !tokens) return '—';
+  const n = Number(v || 0);
+  if (!Number.isFinite(n)) return '—';
+  return trimFixed(n.toFixed(4)) + ' / 1M';
+}
+function fmtModelRate(rate) {
+  const s = String(rate || '').trim();
+  return s ? 'x' + s : '—';
+}
 
 function usStat(v, k, cls) {
   return '<div class="stat ' + (cls || '') + '"><div class="v">' + esc(v) +
@@ -1049,9 +1068,7 @@ function usBar(prompt, completion, total) {
 }
 
 /* usRow 生成一行。mid 是插在「名称」之后、请求数之前的额外单元格（如「域」列）。
-   withPerf 控制是否追加延迟/速率两列——只有「按账号」表的表头带这两列；
-   模型表与域表没有，多输出会造成列错位。早先靠「mid 是否为 undefined」隐式
-   判断，调用方稍一改动就会错列，故改为显式参数。 */
+   withPerf 控制延迟/速率两列；列开关显式传入，避免调用方改动后与表头错列。 */
 function usRow(name, sub, a, mid, withPerf) {
   return '<tr>' +
     '<td class="mark" aria-hidden="true"></td>' +
@@ -1103,8 +1120,48 @@ function renderUsage(d) {
   $('usRealmBody').innerHTML = (d.by_realm || []).map(x =>
     usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
 
+  renderCreditDimensions(d);
   renderUsageChart(d.series || []);
   renderUsageHours(d.series || []);
+}
+
+function renderCreditDimensions(d) {
+  const t = d.totals || {};
+  const accounts = d.credit_by_account || [];
+  const models = d.credit_by_model || [];
+  $('usCreditStats').innerHTML =
+    usStat(fmtCredit(t.credits), '扣除积分') +
+    usStat(fmtTok(t.credit_tokens), '匹配 Token') +
+    usStat(fmtCreditRatio(t.credits_per_1m_tokens, t.credit_samples, t.credit_tokens), '平均积分 / 1M Token') +
+    usStat(String(t.credit_samples || 0), '有效积分样本');
+
+  $('usCreditNote').textContent =
+    accounts.length + ' 个账号 · ' + models.length + ' 个模型倍率分组 · 仅统计与积分同时观测到的 Token';
+
+  $('usCreditAccBody').innerHTML = accounts.map(row => {
+    const uid = String(row.key || '');
+    const account = row.nickname || uid.slice(0, 8) || '—';
+    return '<tr>' +
+      '<td class="mark" aria-hidden="true"></td>' +
+      '<td>' + esc(account) + '<div class="note">' + esc(row.realm || '') + ' · ' + esc(uid.slice(0, 8)) + '</div></td>' +
+      '<td class="num">' + fmtTok(row.requests) + '</td>' +
+      '<td class="num">' + fmtCredit(row.credits) + '</td>' +
+      '<td class="num">' + fmtTok(row.credit_tokens) + '</td>' +
+      '<td class="num">' + fmtCreditRatio(row.credits_per_1m_tokens, row.credit_samples, row.credit_tokens) + '</td>' +
+      '</tr>';
+  }).join('') || '<tr><td colspan="6" class="empty">暂无积分扣除记录；升级前仅含 Token 的历史不会伪造积分。</td></tr>';
+
+  $('usCreditModelBody').innerHTML = models.map(row =>
+    '<tr>' +
+      '<td class="mark" aria-hidden="true"></td>' +
+      '<td>' + esc(row.key || '—') + '</td>' +
+      '<td>' + esc(fmtModelRate(row.rate)) + '</td>' +
+      '<td class="num">' + fmtTok(row.requests) + '</td>' +
+      '<td class="num">' + fmtCredit(row.credits) + '</td>' +
+      '<td class="num">' + fmtTok(row.credit_tokens) + '</td>' +
+      '<td class="num">' + fmtCreditRatio(row.credits_per_1m_tokens, row.credit_samples, row.credit_tokens) + '</td>' +
+    '</tr>'
+  ).join('') || '<tr><td colspan="7" class="empty">暂无积分扣除记录；升级前仅含 Token 的历史不会伪造积分。</td></tr>';
 }
 
 /* renderUsageChart 画堆叠柱状图。
@@ -1279,9 +1336,23 @@ function fmtHit(a) {
   return '<span title="' + esc(title) + '">' + Math.round(h * 100 / (h + m)) + '%</span>';
 }
 
+/* warmUsageModelRates 预热模型目录缓存（倍率来源）。旧桶缺倍率时后端只在
+   这次请求里能拿到当前倍率做展示回填；失败不阻塞用量统计，10 分钟后再试。 */
+let usageRateWarmAt = 0;
+async function warmUsageModelRates() {
+  if (Date.now() - usageRateWarmAt < 10 * 60 * 1000) return;
+  try {
+    await api('models');
+  } catch (e) {
+    // 倍率回填是可选增强；失败不阻塞用量统计，10 分钟后再试。
+  }
+  usageRateWarmAt = Date.now();
+}
+
 async function loadUsage() {
   const hours = ($('usWindow') && $('usWindow').value) || 72;
   try {
+    await warmUsageModelRates();
     const d = await api('usage?hours=' + encodeURIComponent(hours));
     renderUsage(d);
   } catch (e) {

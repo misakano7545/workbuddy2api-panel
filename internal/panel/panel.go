@@ -594,7 +594,11 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 			nicks[s.UID] = s.Nickname
 		}
 	}
-	writeJSON(w, http.StatusOK, p.cfg.Usage.Snapshot(hours, nicks))
+	var currentRate func(realm, model string) string
+	if p.cfg.Upstream != nil {
+		currentRate = p.cfg.Upstream.ModelRate
+	}
+	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWithRates(hours, nicks, currentRate))
 }
 
 // usageSave 立即把内存中的用量桶落盘（正常由后台 30s 防抖刷新负责）。

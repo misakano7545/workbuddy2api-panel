@@ -616,6 +616,9 @@ type Client struct {
 	// thinking.go 补档：缺显式 effort 时优先用模型声明默认档，空串回退硬编码 high。
 	// 与 efforts 同 realm 分层桶（同 C-2 隔离原则），共用 effortsMu。
 	defaultEfforts map[string]map[string]string
+	// modelRates 缓存各模型当前生效积分倍率（规范化数值，如 "0.5"）。
+	// 与 efforts 共用 realm 分层和锁；每次成功刷新模型目录时整体替换对应域。
+	modelRates map[string]map[string]string
 
 	// globalModels 缓存 global 模型名目录探测结果（成功 ∩ 静态 overlay；
 	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
@@ -1245,6 +1248,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
+	c.storeModelRates(a.Realm(), out)
 	// 刷新 effort 能力缓存（供请求体降级；无 supportedEfforts 的模型不入桶）。
 	// 空桶时跳过写：避免「某探测无档位数据」清掉既有桶。
 	cache := make(map[string][]string, len(out))
@@ -1545,6 +1549,71 @@ func (c *Client) storeEfforts(realm string, efforts map[string][]string, defs ma
 	}
 	c.efforts[k] = efforts
 	c.defaultEfforts[k] = defs
+}
+
+// normalizeModelRate 把上游倍率原文规范化为可比较的数值键。
+// 兼容 "x0.05" / "x0.05 credits" / "0.50x" 等形态；无法数值化时保留去除
+// credits 后缀与空白后的原文，避免编造倍率。
+func normalizeModelRate(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.HasSuffix(strings.ToLower(s), "credits") {
+		s = strings.TrimSpace(s[:len(s)-len("credits")])
+	}
+	if strings.HasPrefix(strings.ToLower(s), "x") {
+		s = strings.TrimSpace(s[1:])
+	} else if strings.HasSuffix(strings.ToLower(s), "x") {
+		s = strings.TrimSpace(s[:len(s)-1])
+	}
+	if s == "" {
+		return ""
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return strings.TrimSpace(raw)
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// effectiveModelRate 返回模型当前生效倍率：有机器可读优惠时取折扣价，
+// 否则取牌价；两者均缺省时为空。
+func effectiveModelRate(mi ModelInfo) string {
+	if mi.PromoFactor != nil && strings.TrimSpace(mi.PromoCredits) != "" {
+		return normalizeModelRate(mi.PromoCredits)
+	}
+	return normalizeModelRate(mi.Credits)
+}
+
+// storeModelRates 按 realm 整体替换模型倍率快照。目录成功刷新但没有可解析
+// 倍率时写入空桶，使旧倍率不会继续冒充当前价。
+func (c *Client) storeModelRates(realm string, infos []ModelInfo) {
+	rates := make(map[string]string, len(infos))
+	for _, mi := range infos {
+		if mi.ID == "" {
+			continue
+		}
+		if rate := effectiveModelRate(mi); rate != "" {
+			rates[mi.ID] = rate
+		}
+	}
+	c.effortsMu.Lock()
+	defer c.effortsMu.Unlock()
+	if c.modelRates == nil {
+		c.modelRates = make(map[string]map[string]string)
+	}
+	c.modelRates[realmKey(realm)] = rates
+}
+
+// ModelRate 返回最近成功刷新的指定域模型生效倍率；未知返回空串。
+func (c *Client) ModelRate(realm, model string) string {
+	if c == nil || model == "" {
+		return ""
+	}
+	c.effortsMu.RLock()
+	defer c.effortsMu.RUnlock()
+	return c.modelRates[realmKey(realm)][model]
 }
 
 // GlobalEffortSnapshot 导出 global 域 effort 能力缓存（探测下发 ∪ 静态兜底合并后的桶），
