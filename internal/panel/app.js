@@ -74,6 +74,52 @@ function dur(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
   return h ? h + '时' + String(m).padStart(2, '0') + '分' : m ? m + '分' + String(s).padStart(2, '0') + '秒' : s + '秒';
 }
+function parseAPITime(value) {
+  const text = String(value || '');
+  if (!text || text.startsWith('0001-')) return 0;
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? ms : 0;
+}
+function fmtLocalDateTime(ms) {
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+    p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function rateLimitMeta(row, now) {
+  const model = String(row && row.model || '未知模型');
+  const kind = String(row && row.kind || 'rate_limit');
+  const resetAt = parseAPITime(row && row.reset_at);
+  const until = parseAPITime(row && row.until);
+  const deadline = resetAt || until;
+  const remaining = deadline > now ? Math.round((deadline - now) / 1000) : 0;
+  if (kind === 'model_unavailable') {
+    return {
+      model,
+      kind,
+      detail: remaining ? '预计 ' + dur(remaining) + ' 后重试' : '等待重新探测',
+      title: model + '\n模型当前不可用' + (deadline ? '\n最早重试：' + fmtLocalDateTime(deadline) : ''),
+    };
+  }
+  let detail = resetAt
+    ? '预计 ' + fmtLocalDateTime(resetAt) + ' 解封' + (remaining ? '（剩余 ' + dur(remaining) + '）' : '')
+    : (until ? '预计 ' + fmtLocalDateTime(until) + ' 恢复（剩余 ' + dur(remaining) + '）' : '预计解封时间未知');
+  const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
+  if (until && resetAt && until < resetAt) {
+    detail += ' · 网关最快 ' + dur(Math.max(0, Math.round((until - now) / 1000))) + ' 后重试';
+    title.push('网关最早重试：' + fmtLocalDateTime(until));
+  }
+  return { model, kind, detail, title: title.join('\n') };
+}
+function rateLimitRowsHtml(rows, now) {
+  const list = Array.isArray(rows) ? rows.filter(row => row && row.model) : [];
+  if (!list.length) return '';
+  return '<div class="rate-limits">' + list.map(row => {
+    const m = rateLimitMeta(row, now);
+    return '<div class="rate-limit ' + (m.kind === 'model_unavailable' ? 'model-unavailable' : '') +
+      '" title="' + esc(m.title) + '"><b>' + esc(m.model) + '</b><span>' + esc(m.detail) + '</span></div>';
+  }).join('') + '</div>';
+}
 
 function formatTokenCount(tokens) {
   if (tokens == null || tokens === '') return '—';
@@ -175,6 +221,7 @@ function renderAccounts(list) {
     else if (s.reserve_blocked) { cls = 'cool'; tag = '<span class="tag warn">保留积分</span>'; }
     else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
+    const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
     const cred = s.credits == null ? '—' : (s.credits_total > 0 ? s.credits + '<span class="of">/' + s.credits_total + '</span>' : String(s.credits));
     const pct = s.credits_total > 0
@@ -199,7 +246,7 @@ function renderAccounts(list) {
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
-      '<td>' + tag + note + '</td>' +
+      '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +

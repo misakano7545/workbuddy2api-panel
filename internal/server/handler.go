@@ -1089,8 +1089,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 6004 还是 11140 rate-limiting 等形态，都精确冷却到该墙钟、绝不指数堆加。
 		//   - 模型级（6004）→ CooldownSoftForModel：写 modelCooldowns[model]，切模型豁免。
 		//   - 账号级（非 6004）→ CooldownSoftRate：写账号级 until，不产生模型豁免。
+		modelRateLimited := upstream.IsModelRateLimit(body)
 		if resetAt, ok := upstream.ParseRateReset(body); ok {
-			if upstream.IsModelRateLimit(body) {
+			if modelRateLimited {
 				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, "6004 model rate limit")
 				return
 			}
@@ -1101,12 +1102,18 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 头优先于「有界退避」，但低于 body 重置文案（文案是上游更权威的口径）。
 		if uerr != nil && uerr.RetryAfter > 0 {
 			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
+			if modelRateLimited {
+				h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
+			}
 			return
 		}
 		// 无重置时间 → 账号级有界退避（soft_rate 基数起、softStreak 翻倍、封顶
 		// soft_rate_max；已在冷却中的兜底探测不翻倍）。基数取 h.softCooldown()
 		// （热改优先），管理面板改 soft_rate 后立即生效。
 		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "429 rate limit")
+		if modelRateLimited {
+			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
+		}
 	case upstream.ErrWafBlock:
 		// WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族：基数
 		// wafCooldownBase（60s，抖动后落 [45s,75s]）、softStreak 指数升级、封顶

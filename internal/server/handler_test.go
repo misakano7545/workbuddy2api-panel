@@ -739,6 +739,9 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
 		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
 	}
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" || st.RateLimitedModels[0].Kind != "rate_limit" {
+		t.Fatalf("rate-limited models=%+v, want audit row for glm-5.3", st.RateLimitedModels)
+	}
 }
 
 func TestChatAllUnavailableReturns503(t *testing.T) {

@@ -251,6 +251,15 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
 .tag.bad { background: var(--bad-soft); color: var(--bad); }
 .tag.mute { background: var(--surface-2); color: var(--ink-3); border: 1px solid var(--line); }
+.rate-limits { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; min-width: 210px; }
+.rate-limit {
+  display: flex; align-items: baseline; gap: 6px; padding: 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--warn) 24%, var(--line));
+  border-radius: 6px; background: var(--warn-soft); font-size: 11.5px; line-height: 1.35;
+}
+.rate-limit.model-unavailable { border-color: var(--line); background: var(--surface-2); color: var(--ink-3); }
+.rate-limit b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
+.rate-limit span { color: var(--ink-2); }
 .acts { display: flex; gap: 5px; justify-content: flex-end; white-space: nowrap; }
 .acts button { padding: 3.5px 8px; font-size: 12.5px; white-space: nowrap; flex: none; }
 

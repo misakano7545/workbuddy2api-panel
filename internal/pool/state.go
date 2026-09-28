@@ -5,6 +5,7 @@ package pool
 import (
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -686,8 +687,13 @@ func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedMod
 	for _, m := range models {
 		mc := e.modelCooldowns[m]
 		if !mc.Until.IsZero() && now.Before(mc.Until) {
+			kind := "rate_limit"
+			if strings.HasPrefix(mc.Reason, "11102") {
+				kind = "model_unavailable"
+			}
 			row := RateLimitedModel{
 				Model:  m,
+				Kind:   kind,
 				Until:  mc.Until,
 				Reason: mc.Reason,
 			}

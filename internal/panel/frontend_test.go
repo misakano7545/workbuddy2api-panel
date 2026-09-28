@@ -403,3 +403,49 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("detail groups=%s want %s", out, want)
 	}
 }
+
+// 模型限流时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
+func TestAppJSRateLimitMeta(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; rate limit formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function dur(');
+const end = src.indexOf('function rateLimitRowsHtml');
+if (start < 0 || end < 0) throw new Error('rate limit helpers not found');
+const ctx = { Date, Number, String, Math };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
+const now = new Date(2026, 8, 28, 14, 0, 0).getTime();
+const reset = new Date(2026, 8, 28, 16, 0, 0).getTime();
+const until = new Date(2026, 8, 28, 15, 0, 0).getTime();
+const rate = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit', reset_at: new Date(reset).toISOString(), until: new Date(until).toISOString() }, now);
+const unavailable = ctx.rateLimitMeta({ model: 'missing', kind: 'model_unavailable', until: new Date(until).toISOString() }, now);
+const unknown = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit' }, now);
+process.stdout.write(JSON.stringify({
+  rate: rate.detail,
+  unavailable: unavailable.detail,
+  unknown: unknown.detail,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "rate-limit-format-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rate-limit formatting node test failed: %v\n%s", err, out)
+	}
+	const want = `{"rate":"预计 2026-09-28 16:00 解封（剩余 2时00分） · 网关最快 1时00分 后重试","unavailable":"预计 1时00分 后重试","unknown":"预计解封时间未知"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("rate-limit formatting=%s want %s", out, want)
+	}
+}
+
+// 同到期时间按面额降序；其余未用完包与零/负余额包分别聚合。
