@@ -1112,12 +1112,8 @@ function usStat(v, k, cls) {
          '</div><div class="k">' + esc(k) + '</div></div>';
 }
 
-/* fmtCredit 积分显示：整数不带小数（上游 credit 可能是小数，保留一位）。 */
-function fmtCredit(v) {
-  const n = Number(v || 0);
-  if (!n) return '0';
-  return Number.isInteger(n) ? String(n) : n.toFixed(1);
-}
+/* fmtCredit 定义见上方（积分扣除维度引入的 fmtCredit/trimFixed）：
+   整数不带小数，小数保留到两位再去尾零。 */
 
 /* fmtTokPerCredit 兑换率：1 积分换多少 token。
  *
