@@ -280,7 +280,6 @@ func (r *Recorder) Rollup(now time.Time) {
 			dst.LatN += src.LatN
 			dst.TPS += src.TPS
 			dst.TPSN += src.TPSN
-			dst.CR += src.CR
 			dst.CRN += src.CRN
 			dst.CRT += src.CRT
 		}
