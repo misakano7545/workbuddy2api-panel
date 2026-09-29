@@ -490,6 +490,7 @@ func (s *Scheduler) RunCheckinNow() {
 		if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
 			// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
 			if upstream.IsAlreadyCheckin(err) {
+				s.cfg.Pool.NoteCheckinDone(st.UID)
 				log.Printf("checkin %s: 今天已签到（幂等）", logfmt.Label(st.UID, st.Nickname))
 			} else {
 				log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
@@ -498,6 +499,7 @@ func (s *Scheduler) RunCheckinNow() {
 		} else {
 			// 首次签到成功此前静默——排查「签到到底跑没跑」时无迹可循（幂等行只在
 			// 重复触发时出现），成功也落一行。
+			s.cfg.Pool.NoteCheckinDone(st.UID)
 			log.Printf("checkin %s: 签到成功", logfmt.Label(st.UID, st.Nickname))
 		}
 		// 分桶查余额：配置窗口内的积分单独标记，同时记录最早未来到期批次。

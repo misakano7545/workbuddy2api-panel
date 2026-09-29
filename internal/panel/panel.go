@@ -485,10 +485,19 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	checkinMsg := ""
+	checkinDone := false
 	if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额
+		// 幂等拒绝同样是「今日已签」，标记后按钮显示「已签」。
+		if upstream.IsAlreadyCheckin(err) {
+			p.cfg.Pool.NoteCheckinDone(uid)
+			checkinDone = true
+		}
+	} else {
+		p.cfg.Pool.NoteCheckinDone(uid)
+		checkinDone = true
 	}
-	resp := map[string]any{"ok": true}
+	resp := map[string]any{"ok": true, "checkin_done": checkinDone}
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
 	}
