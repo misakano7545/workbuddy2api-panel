@@ -762,5 +762,27 @@ func TestIndexHTMLConfigInputsUnique(t *testing.T) {
 	}
 }
 
-// TestAppJSExpirySummary 验证前端到期分布与 WorkDaddy 同口径：
-// 精确剩余天数聚合、账号内按总余额钳制、无到期批次不进入图表。
+// TestAppJSIdsExistInHTML 钉住「app.js 里 $('id') 引用的字面 id 必须在 index.html 里存在」。
+// 为什么需要：元素缺失时 $('x').innerHTML = ... 抛 TypeError，而 loadLogs 这类函数把它吞在
+// try/catch 里 —— 症状是整块视图静默空白（运行日志在合并 PR #87 时就丢过一次），
+// 而所有 Go 测试与 JS 语法检查全绿。
+func TestAppJSIdsExistInHTML(t *testing.T) {
+	app, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, m := range regexp.MustCompile(`\$\('([A-Za-z0-9_-]+)'\)`).FindAllStringSubmatch(string(app), -1) {
+		n++
+		if !strings.Contains(string(html), `id="`+m[1]+`"`) {
+			t.Errorf("app.js 引用的 id 在 index.html 里不存在: %s", m[1])
+		}
+	}
+	if n == 0 {
+		t.Fatal("没有从 app.js 里扫到任何 id 引用，正则可能失效")
+	}
+}

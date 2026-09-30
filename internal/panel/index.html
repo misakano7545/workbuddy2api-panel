@@ -1083,6 +1083,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="grow"></span>
           <span class="note" id="reqNote">—</span>
         </header>
+        <!-- reqStats：指标行容器（renderRequestMetrics 写入）。合并 #87 时新排版丢了它，
+             而 loadLogs 里的 renderRequestMetrics 仍写这个 id —— 元素缺失时抛错被
+             loadLogs 的 try/catch 吞掉，整块运行日志渲染不出来（只有它这一个 id 悬空）。 -->
+        <div class="stats" id="reqStats"></div>
         <div class="fbar" id="reqFilter">
           <input id="reqQ" type="search" placeholder="搜索 IP / UA / 模型 / 账号 / 请求 ID" aria-label="搜索请求记录">
           <select id="reqOutcome" aria-label="按结果筛选">
