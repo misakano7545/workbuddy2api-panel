@@ -30,6 +30,21 @@ $('btnTheme').onclick = () => {
 };
 applyTheme();
 
+/* ── 手机抽屉导航（≤760px；桌面按钮隐藏、类名无副作用） ─────────────── */
+const navEl = document.querySelector('.nav'), navScrim = $('navScrim'), btnNav = $('btnNav');
+function navSet(open) {
+  if (!navEl || !navScrim) return;
+  navEl.classList.toggle('open', open);
+  navScrim.classList.toggle('on', open);
+  document.body.classList.toggle('nav-open', open);
+  if (btnNav) btnNav.setAttribute('aria-expanded', String(open));
+}
+if (btnNav && navScrim) {
+  btnNav.onclick = () => navSet(!navEl.classList.contains('open'));
+  navScrim.onclick = () => navSet(false);
+}
+addEventListener('keydown', e => { if (e.key === 'Escape') navSet(false); });
+
 /* ── 请求 ─────────────────────────────────────────────────────────── */
 async function api(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
@@ -183,6 +198,7 @@ $('btnLogout').onclick = () => {
 /* ── 路由 ─────────────────────────────────────────────────────────── */
 const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
+  navSet(false);
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
