@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -15,7 +16,13 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
+
+// maxUserAgentLen 归档与面板展示保留的 UA 字节上限。UA 是客户端完全可控的
+// 自由文本（浏览器动辄 150+ 字符，恶意客户端可以塞几 KB），落盘前必须截断，
+// 否则一条请求就能把归档行撑大。截断只影响展示，不影响请求处理。
+const maxUserAgentLen = 200
 
 // chatSeq 进程级请求序号。
 var chatSeq atomic.Int64
@@ -56,6 +63,11 @@ type chatStat struct {
 	hasCache  bool
 	budget    *dailyBudget
 
+	// 调用来源（客户端 IP / User-Agent）。空 = 未采集（logging.request_client_info
+	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
+	clientIP  string
+	userAgent string
+
 	logged bool
 }
 
@@ -77,7 +89,8 @@ func (s *chatStat) done() {
 	total := time.Since(s.start)
 	logChatRowFull(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks,
 		s.cacheHit, s.cacheMiss, s.hasCache,
-		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit)
+		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit,
+		s.clientIP, s.userAgent)
 	s.budget.add(s.credit, s.hasCredit)
 	noteProm(s, total)
 }
@@ -336,6 +349,47 @@ type requestTrace struct {
 	id    string
 	start time.Time
 	stat  *chatStat
+	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
+	clientIP  string
+	userAgent string
+}
+
+// captureClientInfo 采集调用来源（客户端 IP + 截断后的 UA）。开关关闭时保持空串：
+// 来源信息比 token 计数敏感，是否落盘由 logging.request_client_info 决定。
+func (t *requestTrace) captureClientInfo(r *http.Request) {
+	if t == nil || r == nil {
+		return
+	}
+	t.clientIP = clientIPForLog(r)
+	t.userAgent = logfmt.Truncate(r.UserAgent(), maxUserAgentLen)
+}
+
+// clientIPForLog 提取用于日志展示的客户端 IP。
+//
+// 与 upstream.ExtractClientIP 的差别：后者只认代理头（X-Forwarded-For 首段 →
+// X-Real-IP），因为它的用途是把客户端 IP **透传给上游**，回落到网关自身地址会
+// 污染上游风控判据；日志场景相反——直连（无反代）时 RemoteAddr 就是唯一线索，
+// 必须回落，否则面板里所有来源都显示 "-"。代理头优先保证反代后拿到真实客户端。
+func clientIPForLog(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if ip := upstream.ExtractClientIP(r); ip != "" {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
+}
+
+// dashIfEmpty 空串统一显示 "-"（来源字段未采集时不留空白列）。
+func dashIfEmpty(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "-"
+	}
+	return s
 }
 
 func requestTraceFrom(r *http.Request) *requestTrace {
@@ -371,6 +425,8 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.Credit = s.credit
 		e.HasCredit = s.hasCredit
 	}
+	e.ClientIP = t.clientIP
+	e.UserAgent = t.userAgent
 	if e.Outcome == "" {
 		if status >= 200 && status < 300 {
 			e.Outcome = reqlog.OutcomeSuccess
@@ -435,20 +491,23 @@ const (
 //   - toks<0 表示 usage 缺失，显示 "-"。
 // logChatRow 旧形态（带缓存命中率、无请求 ID）；新代码请用 logChatRowFull。
 func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int, cacheHit, cacheMiss int, hasCache bool) {
-	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, cacheHit, cacheMiss, hasCache, "", "", 0, 0, false)
+	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, cacheHit, cacheMiss, hasCache, "", "", 0, 0, false, "", "")
 }
 
-// logChatRowEx 带请求 ID、结果、重试和积分字段的扩展形态；缓存列不传（显示 "-"）。
+// logChatRowEx 带请求 ID、结果、重试、积分与调用来源字段的扩展形态；缓存列不传
+// （显示 "-"）；来源两参均为空时不追加来源段。
 func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int,
-	requestID, outcome string, attempts int, credit float64, hasCredit bool) {
+	requestID, outcome string, attempts int, credit float64, hasCredit bool,
+	clientIP, userAgent string) {
 	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, 0, 0, false,
-		requestID, outcome, attempts, credit, hasCredit)
+		requestID, outcome, attempts, credit, hasCredit, clientIP, userAgent)
 }
 
-// logChatRowFull 是本文件唯一的行输出点：宽表字段 + 可选请求 ID/结果/重试/积分尾段。
+// logChatRowFull 是本文件唯一的行输出点：宽表字段 + 缓存列 + 可选请求 ID/结果/重试/积分尾段 + 调用来源段。
 func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int,
 	cacheHit, cacheMiss int, hasCache bool,
-	requestID, outcome string, attempts int, credit float64, hasCredit bool) {
+	requestID, outcome string, attempts int, credit float64, hasCredit bool,
+	clientIP, userAgent string) {
 	if !chatLogEnabled {
 		return
 	}
@@ -489,7 +548,18 @@ func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, st
 		}
 		extra = fmt.Sprintf(" rid=%s | out=%s | try=%d | credit=%s |", requestID, outcome, attempts, creditField)
 	}
-	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | cache=%s | total=%.1fs |%s\n",
+	// 调用来源：IP 用可解析的裸值（便于 grep），UA 用 ShortUA 压缩后的客户端标签
+	// 并加引号（标签内可能含空格，如 `OpenAI/Python 1.30.0` 只会取到 OpenAI/Python）。
+	// 两者都未采集时不追加，旧行格式保持不变。
+	src := ""
+	if clientIP != "" || userAgent != "" {
+		ua := "-"
+		if s := logfmt.ShortUA(userAgent); s != "" {
+			ua = `"` + s + `"`
+		}
+		src = fmt.Sprintf(" src=%s ua=%s |", dashIfEmpty(clientIP), ua)
+	}
+	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | cache=%s | total=%.1fs |%s%s\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
@@ -502,5 +572,6 @@ func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, st
 		logfmt.Pad(cacheField, chatCacheWidth),
 		total.Seconds(),
 		extra,
+		src,
 	)
 }

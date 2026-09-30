@@ -277,6 +277,9 @@ func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestLogs 从 JSONL 归档读取最近请求；limit 默认 200、最大 1000。
+// 支持按 outcome/account/model/client_ip/user_agent 过滤（字符串字段为包含匹配）
+// 与 from/to 时间区间（闭区间，unix 秒或 RFC3339）——面板「运行日志」的筛选框、
+// 来源查询与「今天 / 自定义区间」都走这里。
 func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.RequestLog == nil {
 		writeErr(w, http.StatusNotImplemented, "request logger not available")
@@ -291,14 +294,24 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 	if limit > 1000 {
 		limit = 1000
 	}
+	q := r.URL.Query()
 	rows, err := p.cfg.RequestLog.ReadArchive(limit, reqlog.Filter{
-		Outcome: r.URL.Query().Get("outcome"),
-		Account: r.URL.Query().Get("account"),
-		Model:   r.URL.Query().Get("model"),
+		Outcome:   q.Get("outcome"),
+		Account:   q.Get("account"),
+		Model:     q.Get("model"),
+		ClientIP:  q.Get("client_ip"),
+		UserAgent: q.Get("user_agent"),
+		From:      parseTimeParam(q.Get("from")),
+		To:        parseTimeParam(q.Get("to")),
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// 空结果回 []（而不是 JSON null）：前端把 null 与"归档关闭"混在一起会走错分支，
+	// 显示成不满足筛选条件的最近请求。
+	if rows == nil {
+		rows = []reqlog.Event{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": rows, "limit": limit})
 }
@@ -620,22 +633,31 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 // helpers
 // ---------------------------------------------------------------------------
 
-// usage 返回逐请求用量聚合。hours 查询参数控制统计窗口（默认 72，上限 1440=60
-// 天）：卡片汇总/按域/按账号/按模型/时序**全部**按该窗口统计。显式 hours=0 表示
-// 全部历史（含 90 天前折叠出的日桶，看长期趋势）。
+// usage 返回逐请求用量聚合。统计窗口三选一：
+//   - from/to（unix 秒）：显式区间，用于「今天」与「自定义」——区间由浏览器按
+//     本地时区算好再发，服务端时区与浏览器不一致时「今天」才不会被算错；
+//   - hours：滚动窗口（默认 72，上限 1440=60 天），卡片汇总/按域/按账号/按模型/
+//     时序**全部**按该窗口统计；显式 hours=0 表示全部历史（含 90 天前折叠出的日桶）；
+//   - 都不给：等同于 hours=72（保持旧调用方行为）。
 func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Usage == nil {
 		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
 		return
 	}
-	hours := 72
-	if v := r.URL.Query().Get("hours"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			hours = n
+	q := r.URL.Query()
+	win := usage.Window{}
+	win.From = parseTimeParam(q.Get("from"))
+	win.To = parseTimeParam(q.Get("to"))
+	if win.From.IsZero() && win.To.IsZero() {
+		win.Hours = 72
+		if v := q.Get("hours"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				win.Hours = n
+			}
 		}
-	}
-	if hours > 1440 {
-		hours = 1440
+		if win.Hours > 1440 {
+			win.Hours = 1440
+		}
 	}
 	// 昵称仅用于展示，取自池快照（不含任何凭证）。
 	nicks := map[string]string{}
@@ -648,7 +670,34 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Upstream != nil {
 		currentRate = p.cfg.Upstream.ModelRate
 	}
-	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWithRates(hours, nicks, currentRate))
+	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindow(win, nicks, currentRate))
+}
+
+// parseTimeParam 解析时间查询参数：unix 秒（前端默认）或 RFC3339（便于手工调
+// 接口/写脚本）。空串与非法值都返回零值 = 该侧不设界，不报错——区间参数是可选
+// 增强，拼错一个 from 不该让整页用量打不开。
+func parseTimeParam(v string) time.Time {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n <= 0 {
+			return time.Time{}
+		}
+		// 兼容秒与毫秒（前端可能直接把 Date.now() 传上来）。
+		if n > 1e12 {
+			return time.UnixMilli(n)
+		}
+		return time.Unix(n, 0)
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t
+	}
+	if t, err := time.ParseInLocation("2006-01-02T15:04", v, time.Local); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // usageSave 立即把内存中的用量桶落盘（正常由后台 30s 防抖刷新负责）。
