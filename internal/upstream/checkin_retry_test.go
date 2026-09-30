@@ -14,12 +14,17 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
-// shortBillingRetry 测试用重试间隔（生产 2s 会让单测秒级膨胀）。
+// shortBillingRetry 测试用重试间隔（生产阶梯会让单测秒级膨胀）。
 func shortBillingRetry(t *testing.T) {
 	t.Helper()
 	old := billingRetryDelay
 	billingRetryDelay = time.Millisecond
-	t.Cleanup(func() { billingRetryDelay = old })
+	oldProc := billingProcessingRetryDelays
+	billingProcessingRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() {
+		billingRetryDelay = old
+		billingProcessingRetryDelays = oldProc
+	})
 }
 
 func TestDailyCheckinRetriesTransient500(t *testing.T) {
@@ -110,5 +115,57 @@ func TestUserResourceDetailedRetriesTransient500(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&calls); n != 2 {
 		t.Fatalf("calls=%d want 2（1 次失败 + 1 次重试）", n)
+	}
+}
+
+// TestDailyCheckinRetriesProcessing429 钉住移植来的口径（cli2api 519a529）：429 的
+// body 里写着「请求处理中」时，这是上游临时状态，值得等沉降后重发，不是真·限流。
+func TestDailyCheckinRetriesProcessing429(t *testing.T) {
+	shortBillingRetry(t)
+	var calls int32
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			return jsonResp(429, `{"code":10001,"msg":"请求处理中，请稍后重试"}`), nil
+		}
+		return jsonResp(200, `{"code":0,"data":{}}`), nil
+	})
+	if err := c.DailyCheckin(&auth.Auth{AccessToken: "at"}); err != nil {
+		t.Fatalf("429「请求处理中」应重试到成功，err=%v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n != 3 {
+		t.Fatalf("calls=%d want 3（2 次处理中 + 1 次成功）", n)
+	}
+}
+
+// TestDailyCheckinProcessing429Exhausted 处理中类别最多补打 3 次（比 5xx 多一次）。
+func TestDailyCheckinProcessing429Exhausted(t *testing.T) {
+	shortBillingRetry(t)
+	var calls int32
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return jsonResp(429, `{"code":10001,"msg":"request is being processed"}`), nil
+	})
+	if err := c.DailyCheckin(&auth.Auth{AccessToken: "at"}); err == nil {
+		t.Fatal("持续「请求处理中」应返回错误")
+	}
+	if n := atomic.LoadInt32(&calls); n != 4 {
+		t.Fatalf("calls=%d want 4（1 次 + 3 次补打封顶）", n)
+	}
+}
+
+// TestDailyCheckinNoRetryOnPlain429 真·限流（429 但没有「处理中」文案）不重试——
+// 否则会把限流转成三次长重试，放大上游压力。
+func TestDailyCheckinNoRetryOnPlain429(t *testing.T) {
+	shortBillingRetry(t)
+	var calls int32
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return jsonResp(429, `{"code":14018,"msg":"rate limit exceeded"}`), nil
+	})
+	if err := c.DailyCheckin(&auth.Auth{AccessToken: "at"}); err == nil {
+		t.Fatal("真·限流应返回错误")
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Fatalf("calls=%d want 1（真·限流不重试）", n)
 	}
 }

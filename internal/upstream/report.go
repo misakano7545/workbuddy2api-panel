@@ -13,6 +13,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -65,13 +66,41 @@ func (c *Client) billingMeterJSON(a *auth.Auth, paths []string, method string, b
 // 独立变量供测试缩短（生产固定 2s：第 1 次重试等 2s、第 2 次等 4s）。
 var billingRetryDelay = 2 * time.Second
 
+// billingProcessingRetryDelays 429「请求处理中」的退避阶梯：这是上游**临时状态**
+// （签到/余额查询偶发），比 5xx 需要更久沉降才能结算完；与真·限流的退避分开，
+// 免得把限流也拖成三次长重试。口径移植自 cli2api 的 WorkBuddy 修复（519a529）。
+var billingProcessingRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+
+// billingProcessingMarkers 上游 429 里表示「请求处理中」的文案（中英双形态）。
+var billingProcessingMarkers = []string{"请求处理中", "request is being processed", "request processing"}
+
+// isBillingProcessingErr 报告 err 是否为「429 + 请求处理中」形态：临时状态，值得等它沉降。
+// 只认带分类的 *Error 且 Status==429；普通 429（真·限流）不匹配，仍不重试。
+func isBillingProcessingErr(err error) bool {
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Status != http.StatusTooManyRequests {
+		return false
+	}
+	lower := strings.ToLower(ue.Msg)
+	for _, m := range billingProcessingMarkers {
+		if strings.Contains(ue.Msg, m) || strings.Contains(lower, strings.ToLower(m)) {
+			return true
+		}
+	}
+	return false
+}
+
 // isTransientBillingErr 报告 err 是否值得对计费维护类调用做有界重试：
 // 上游 5xx（ErrServer，实测偶发 "code 10000 / API request failed with status
-// code: 500"）或网络层错误（非 *Error 的传输失败）。业务错误（code!=0 的
-// 已签到/参数错、4xx、限流）不重试——重试只会原样再失败一次。
+// code: 500"）、网络层错误（非 *Error 的传输失败），以及 429「请求处理中」
+// （临时状态）。业务错误（code!=0 的已签到/参数错、其余 4xx、真·限流）不重试
+// ——重试只会原样再失败一次。
 func isTransientBillingErr(err error) bool {
 	if err == nil {
 		return false
+	}
+	if isBillingProcessingErr(err) {
+		return true
 	}
 	var ue *Error
 	if errors.As(err, &ue) {
@@ -80,19 +109,28 @@ func isTransientBillingErr(err error) bool {
 	return true
 }
 
-// retryBillingTransient 对签到/余额这类低频维护调用做瞬时错误有界重试：
-// 最多补打 2 次（间隔 2s、4s），首次成功或非瞬时错误立即返回。chat 热路径
-// 不用本策略——它有自己的换号轮转语义，重试会放大在途请求。
+// retryBillingTransient 对签到/余额这类低频维护调用做瞬时错误有界重试。两类瞬时
+// 错误、两套退避：429「请求处理中」按 2s/5s/10s 最多补打 3 次（上游结算需要更久）；
+// 其余瞬时错误沿用 2s/4s 最多补打 2 次。首次成功或非瞬时错误立即返回；类别中途
+// 变化（处理中 → 5xx）按新类别继续。chat 热路径不用本策略——它有自己的换号轮转
+// 语义，重试会放大在途请求。
 func (c *Client) retryBillingTransient(fn func() error) error {
 	err := fn()
-	if err == nil || !isTransientBillingErr(err) {
-		return err
-	}
-	for i := 1; i <= 2; i++ {
-		time.Sleep(time.Duration(i) * billingRetryDelay)
-		if err = fn(); err == nil || !isTransientBillingErr(err) {
-			return err
+	for used := 0; err != nil && isTransientBillingErr(err); used++ {
+		processing := isBillingProcessingErr(err)
+		max := 2
+		if processing {
+			max = len(billingProcessingRetryDelays)
 		}
+		if used >= max {
+			break
+		}
+		if processing {
+			time.Sleep(billingProcessingRetryDelays[used])
+		} else {
+			time.Sleep(time.Duration(used+1) * billingRetryDelay)
+		}
+		err = fn()
 	}
 	return err
 }
