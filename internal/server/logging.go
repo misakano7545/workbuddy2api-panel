@@ -349,6 +349,9 @@ type requestTrace struct {
 	id    string
 	start time.Time
 	stat  *chatStat
+	// path 本次请求的真实入站路径（isChatEntry 四条之一），归档事件按它记录——
+	// 来源采集与归档已覆盖 /v1/responses、/v1/messages，不能再写死 chat 路径。
+	path string
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string
@@ -404,7 +407,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 	e := reqlog.Event{
 		Time:      t.start,
 		RequestID: t.id,
-		Path:      "/v1/chat/completions",
+		Path:      t.path,
 		Status:    status,
 	}
 	duration := time.Since(t.start)

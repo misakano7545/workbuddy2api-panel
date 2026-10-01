@@ -169,9 +169,21 @@ func NewHandler(cfg Config) *Handler {
 	return h
 }
 
+// isChatEntry 四条入站协议路径：/v1/responses 与 /v1/messages（含 /messages 别名）
+// 经 r.Clone 转进 chatCompletions 内核，与直连的 /v1/chat/completions 共用同一套
+// 行日志/归档/来源采集/X-Request-Id——四者一视同仁，别再按单路径放行（Codex 走
+// /v1/responses，曾因此整类请求无来源、不入归档）。
+func isChatEntry(path string) bool {
+	switch path {
+	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages":
+		return true
+	}
+	return false
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
-		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
+	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && isChatEntry(r.URL.Path) {
+		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path}
 		if h.loadLive().RecordClientInfo {
 			trace.captureClientInfo(r)
 		}

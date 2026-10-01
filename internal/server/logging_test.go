@@ -174,6 +174,46 @@ func TestRequestMetricsCapturesClientInfo(t *testing.T) {
 	}
 }
 
+// 来源采集/归档/X-Request-Id 对四条入站协议路径一视同仁：/v1/responses 与
+// /v1/messages（含 /messages 别名）经 r.Clone 转进 chatCompletions，此前入口
+// 中间件只放行 /v1/chat/completions —— Codex 客户端整类请求因此无来源、不入
+// 归档、响应也无请求 ID（行里没有 src/ua 段）。此测试钉住四条路径拿到同一份 trace。
+func TestRequestMetricsCoversAllProtocolEntries(t *testing.T) {
+	cases := []struct{ name, path, body string }{
+		{"chat", "/v1/chat/completions", `{"model":"glm-5.2","stream":true,"messages":[]}`},
+		{"responses", "/v1/responses", `{"model":"glm-5.2","input":"hi","stream":true}`},
+		{"messages", "/v1/messages", `{"model":"glm-5.2","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}`},
+		{"messages-alias", "/messages", `{"model":"glm-5.2","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
+			reqLog := reqlog.New(reqlog.Config{})
+			h := NewHandler(Config{
+				Pool:             testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+				Upstream:         up,
+				RequestLog:       reqLog,
+				RecordClientInfo: true,
+			})
+			req := httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body))
+			req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
+			req.Header.Set("User-Agent", "codex_cli_rs/0.44.0")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if got := rec.Header().Get("X-Request-Id"); !strings.HasPrefix(got, "req-") {
+				t.Errorf("X-Request-Id=%q want req- 前缀", got)
+			}
+			s := reqLog.Snapshot()
+			if len(s.Recent) != 1 {
+				t.Fatalf("recent = %+v", s.Recent)
+			}
+			if e := s.Recent[0]; e.Path != tc.path || e.ClientIP != "203.0.113.7" || e.UserAgent != "codex_cli_rs/0.44.0" {
+				t.Errorf("归档事件 = path:%q ip:%q ua:%q", e.Path, e.ClientIP, e.UserAgent)
+			}
+		})
+	}
+}
+
 // 开关关闭时不采集来源（归档里不出现 IP/UA），但请求指标照常记录。
 func TestRequestMetricsClientInfoDisabled(t *testing.T) {
 	up := newFakeUpstream(t, func(string) (int, string, bool) {
