@@ -983,6 +983,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.toks = toks
 			}
 			st.cacheHit, st.cacheMiss, st.hasCache = stats.Cache()
+			// WARN 信号（issue #92 同步）：曾命中过的模型本次大前缀整段未命中 →
+			// 记一条可行动告警（上游前缀缓存重算，费用数倍放大）。
+			if st.hasCache {
+				cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, int64(st.cacheHit), int64(st.cacheMiss))
+			}
 			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
 			// 供下次选号把免费/便宜的号排在前面。
 			if hasCredit {
@@ -1013,6 +1018,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.toks = completionTokens(resp)
 		if ud.HasCacheTokens {
 			st.cacheHit, st.cacheMiss, st.hasCache = int(ud.CacheHitTokens), int(ud.CacheMissTokens), true
+		}
+		// WARN 信号（issue #92 同步）：与流式路径同口径（st.promptTokens 已由
+		// recordAttempt 按本次观测填入）。
+		if st.hasCache {
+			cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, int64(st.cacheHit), int64(st.cacheMiss))
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if hasCredit {

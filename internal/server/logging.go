@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -112,9 +114,11 @@ type chatStatsReader struct {
 	// credit 上游末帧 usage.credit（本次真实扣费积分），供成本台账（NoteModelCost）。
 	hasCredit  bool
 	credit     float64
-	cacheHit   int
-	cacheMiss  int
-	hasCache   bool
+	cacheHit      int
+	cacheMiss     int
+	hasCache      bool
+	hasCacheHit   bool
+	hasCacheMiss  bool
 	errorFrame bool
 	pend       []byte // 已读未返回的行缓存
 }
@@ -138,6 +142,7 @@ func (s *chatStatsReader) TotalTokens() (int, bool) { return s.totalTokens, s.ha
 
 // Usage 返回流式响应中已收到的 token usage 字段。
 func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
+	hit, miss, hasCache := s.Cache()
 	return pool.TokenUsageDelta{
 		HasPromptTokens:     s.hasPromptTokens,
 		PromptTokens:        int64(s.promptTokens),
@@ -145,17 +150,30 @@ func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
 		CompletionTokens:    int64(s.completionTokens),
 		HasTotalTokens:      s.hasTotalTokens,
 		TotalTokens:         int64(s.totalTokens),
-		HasCacheTokens:      s.hasCache,
-		CacheHitTokens:      int64(s.cacheHit),
-		CacheMissTokens:     int64(s.cacheMiss),
+		HasCacheTokens:      hasCache,
+		CacheHitTokens:      int64(hit),
+		CacheMissTokens:     int64(miss),
 		HasCredit:           s.hasCredit,
 		Credit:              s.credit,
 	}
 }
 
 // Cache 返回末帧 usage 的 prompt 缓存命中/未命中 token 与是否缺失。
+// miss 缺失时按 prompt-hit 推导（与上游 issue #92 同步口径）；hit 与 miss 均不可得
+// 时 ok=false（不参与命中率统计）。
 func (s *chatStatsReader) Cache() (hit, miss int, ok bool) {
-	return s.cacheHit, s.cacheMiss, s.hasCache
+	if !s.hasCacheHit && !s.hasCacheMiss {
+		return 0, 0, false
+	}
+	hit, miss = s.cacheHit, s.cacheMiss
+	if !s.hasCacheMiss {
+		if s.hasPromptTokens && s.promptTokens >= s.cacheHit {
+			miss = s.promptTokens - s.cacheHit
+		} else {
+			miss = 0 // 推导不可信（prompt 缺失/矛盾）：留 0，不计假数据
+		}
+	}
+	return hit, miss, true
 }
 
 // parseSSELine 解析一行 "data: {...}"：首帧记 TTFB，含 usage 时采信精确 completion_tokens。
@@ -210,10 +228,12 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	}
 	if chunk.Usage.PromptCacheHitTokens != nil {
 		s.hasCache = true
+		s.hasCacheHit = true
 		s.cacheHit = *chunk.Usage.PromptCacheHitTokens
 	}
 	if chunk.Usage.PromptCacheMissTokens != nil {
 		s.hasCache = true
+		s.hasCacheMiss = true
 		s.cacheMiss = *chunk.Usage.PromptCacheMissTokens
 	}
 }
@@ -311,8 +331,16 @@ func usageDeltaFromResponse(resp map[string]any) pool.TokenUsageDelta {
 	if n, ok := read("prompt_cache_hit_tokens"); ok {
 		delta.HasCacheTokens, delta.CacheHitTokens = true, n
 	}
+	missSet := false
 	if n, ok := read("prompt_cache_miss_tokens"); ok {
 		delta.HasCacheTokens, delta.CacheMissTokens = true, n
+		missSet = true
+	}
+	// miss 缺失时按 prompt-hit 推导（issue #92 同步口径）；推导不可信则留 0。
+	if !missSet && delta.HasCacheTokens && delta.CacheHitTokens > 0 {
+		if p, okP := read("prompt_tokens"); okP && p >= delta.CacheHitTokens {
+			delta.CacheMissTokens = p - delta.CacheHitTokens
+		}
 	}
 	// 扣费积分（用量视图与成本台账同源）。这里不要求 total_tokens>0——
 	// 历史口径要的是"这一笔花了多少"，拿不到 token 数不该把积分一起丢掉。
@@ -427,6 +455,9 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.TotalTokens = s.totalTokens
 		e.Credit = s.credit
 		e.HasCredit = s.hasCredit
+		// 缓存命中/未命中（issue #92 同步）：hasCache 未置位时为零值，omitempty 省略。
+		e.CacheHitTokens = int64(s.cacheHit)
+		e.CacheMissTokens = int64(s.cacheMiss)
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent
@@ -577,4 +608,50 @@ func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, st
 		extra,
 		src,
 	)
+}
+
+// cacheMissSignal 低命中率告警信号（issue #92 同步 P1 轻量化）：同一模型此前观测到
+// 过命中、本次大前缀（≥1000 tok）整段未命中（命中率 <10%）时打一条 WARN，每模型
+// 10 分钟冷却。只报「本可命中却重算」的可行动信号——新模型/新会话的首请求天然
+// 全 miss，不在此列。
+type cacheMissSignal struct {
+	mu      sync.Mutex
+	everHit map[string]bool
+	last    map[string]time.Time
+}
+
+var cacheMissWarn = &cacheMissSignal{everHit: map[string]bool{}, last: map[string]time.Time{}}
+
+// cacheMissWarnEvery 冷却间隔；变量供测试缩短。
+var cacheMissWarnEvery = 10 * time.Minute
+
+// noteCacheTokens 记录一次观测：有命中 → 标记该模型可命中；整段未命中且此前
+// 命中过 → 触发 WARN（冷却内不重复）。
+func (c *cacheMissSignal) noteCacheTokens(model string, prompt, hit, miss int64) {
+	if model == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if hit > 0 {
+		c.everHit[model] = true
+		return
+	}
+	// hit==0 才可能是整段重算。小前缀（<1000 tok）的 miss 无告警价值；上游未回
+	// miss 字段时按 prompt 全量视为未命中。
+	if prompt < 1000 {
+		return
+	}
+	if miss <= 0 {
+		miss = prompt
+	}
+	if !c.everHit[model] {
+		return
+	}
+	now := time.Now()
+	if t, ok := c.last[model]; ok && now.Sub(t) < cacheMissWarnEvery {
+		return
+	}
+	c.last[model] = now
+	log.Printf("WARN: [server] cache miss: model=%s 本次大前缀未命中（prompt=%d miss=%d，此前观测到过命中）；上游前缀缓存重算，费用会显著升高", model, prompt, miss)
 }

@@ -42,8 +42,9 @@ const (
 )
 
 // fileVersion 是 usage.json 的当前格式版本。版本 2 增加积分观测字段，版本 3
-// 增加模型生效倍率分区；旧版本缺失字段按零值加载，旧数据不会丢弃。
-const fileVersion = 3
+// 增加模型生效倍率分区，版本 4 增加前缀缓存命中/未命中累计；
+// 旧版本缺失字段按零值加载，旧数据不会丢弃。
+const fileVersion = 4
 
 // bucket 一个 (时间片, realm, uid, model, rate) 的累计量。
 // JSON 字段名刻意取短，因为桶数量会随时间增长。
@@ -371,6 +372,8 @@ type Agg struct {
 	CreditSamples      int64   `json:"credit_samples"`
 	CreditTokens       int64   `json:"credit_tokens"`
 	CreditsPer1MTokens float64 `json:"credits_per_1m_tokens"`
+	// CacheHitRate 前缀缓存命中率（%，命中/(命中+未命中)；无观测样本时 0 省略）。
+	CacheHitRate float64 `json:"cache_hit_rate,omitempty"`
 }
 
 // aggAcc 是聚合过程中的累加器：Agg 只放已算好的结果，均值需要样本数才能
@@ -411,6 +414,9 @@ func (g *aggAcc) finish() Agg {
 	if g.CreditTokens > 0 {
 		a.CreditsPer1MTokens = g.Credits / float64(g.CreditTokens) * 1_000_000
 	}
+	if total := g.CacheHitTok + g.CacheMissTok; total > 0 {
+		a.CacheHitRate = float64(g.CacheHitTok) / float64(total) * 100
+	}
 	return a
 }
 
@@ -441,6 +447,10 @@ type CreditAgg struct {
 	CreditSamples      int64   `json:"credit_samples"`
 	CreditTokens       int64   `json:"credit_tokens"`
 	CreditsPer1MTokens float64 `json:"credits_per_1m_tokens"`
+	// 前缀缓存维度（issue #92 同步）：命中率 = 命中/(命中+未命中)，无样本时省略。
+	CacheHitTokens  int64   `json:"cache_hit_tokens,omitempty"`
+	CacheMissTokens int64   `json:"cache_miss_tokens,omitempty"`
+	CacheHitRate    float64 `json:"cache_hit_rate,omitempty"`
 }
 
 type creditAcc struct {
@@ -452,12 +462,17 @@ func (a *creditAcc) add(b *bucket) {
 	a.Credits += b.CR
 	a.CreditSamples += b.CRN
 	a.CreditTokens += b.CRT
+	a.CacheHitTokens += b.CH
+	a.CacheMissTokens += b.CM
 }
 
 func (a *creditAcc) finish() CreditAgg {
 	out := a.CreditAgg
 	if a.CreditTokens > 0 {
 		out.CreditsPer1MTokens = a.Credits / float64(a.CreditTokens) * 1_000_000
+	}
+	if total := a.CacheHitTokens + a.CacheMissTokens; total > 0 {
+		out.CacheHitRate = float64(a.CacheHitTokens) / float64(total) * 100
 	}
 	return out
 }
