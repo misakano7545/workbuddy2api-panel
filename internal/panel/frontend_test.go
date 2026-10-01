@@ -786,3 +786,35 @@ func TestAppJSIdsExistInHTML(t *testing.T) {
 		t.Fatal("没有从 app.js 里扫到任何 id 引用，正则可能失效")
 	}
 }
+
+// TestUsageChartSingleLegend 钉住「Token 时序」卡头只有一条图例、四个项目各出现一次。
+//
+// 为什么需要：合并上游 PR #87 时，排版重构版的图例（prompt/completion·均值）与 fork
+// 的图例（prompt/completion/缓存命中率）两条被同时留下 —— 同一张图上并排两套重复条目，
+// 用户读到「prompt completion 缓存命中率」和「prompt completion 均值」两种口径，无从
+// 判断该信哪个。图例是纯静态 HTML：Go 测试与 JS 语法检查全绿，浏览器也不报错，回归
+// 只能靠这条断言拦。
+func TestUsageChartSingleLegend(t *testing.T) {
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(html)
+	start := strings.Index(body, `class="uschart-hd"`)
+	if start < 0 {
+		t.Fatal("index.html 里没有 uschart-hd 卡头")
+	}
+	end := strings.Index(body[start:], "</div>")
+	if end < 0 {
+		t.Fatal("uschart-hd 卡头没有闭合的 </div>")
+	}
+	hd := body[start : start+end]
+	if n := strings.Count(hd, `class="legend"`); n != 1 {
+		t.Errorf("Token 时序卡头应只有 1 条图例，实际 %d 条（重复图例=同一张图两种口径）", n)
+	}
+	for _, item := range []string{"prompt", "completion", "缓存命中率", "均值"} {
+		if n := strings.Count(hd, item); n != 1 {
+			t.Errorf("图例项 %q 在卡头出现 %d 次，应为 1 次", item, n)
+		}
+	}
+}
