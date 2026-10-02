@@ -148,6 +148,51 @@ func TestPrepareBodyOptWithEfforts(t *testing.T) {
 	}
 }
 
+// TestInjectCatalogMaxTokens 缺失输出限额时按目录动态值补 max_tokens：
+// 上游对不带 max_tokens 的请求套保守默认 32000（Codex 实测被无声截断），
+// 目录声明的 maxOutputTokens 才是真实预算；显式限额（含别名翻译产物）优先。
+func TestInjectCatalogMaxTokens(t *testing.T) {
+	maxOut := map[string]int64{"deepseek-v4.1-flash": 393216}
+
+	assertMaxTokens := func(t *testing.T, body []byte, want any, absent bool) {
+		t.Helper()
+		var m map[string]any
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatalf("unmarshal: %v (body=%s)", err, body)
+		}
+		got, has := m["max_tokens"]
+		if absent {
+			if has {
+				t.Fatalf("max_tokens 不该存在, got %v", got)
+			}
+			return
+		}
+		if !has || got != want {
+			t.Fatalf("max_tokens=%v (%T) want %v", got, got, want)
+		}
+	}
+
+	// 无限额 + 目录命中 → 补上（int64 落 JSON 后按 float64 读回）。
+	body := PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","messages":[]}`), false, nil, nil, maxOut)
+	assertMaxTokens(t, body, float64(393216), false)
+
+	// 显式 max_tokens 优先：不覆盖。
+	body = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","max_tokens":123,"messages":[]}`), false, nil, nil, maxOut)
+	assertMaxTokens(t, body, float64(123), false)
+
+	// 别名 max_completion_tokens 翻译后同样算显式限额，不被目录值覆盖。
+	body = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","max_completion_tokens":456,"messages":[]}`), false, nil, nil, maxOut)
+	assertMaxTokens(t, body, float64(456), false)
+
+	// 模型未知 → 不补。
+	body = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"unknown","messages":[]}`), false, nil, nil, maxOut)
+	assertMaxTokens(t, body, nil, true)
+
+	// 快照 nil → 不补（旧行为完全一致）。
+	body = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","messages":[]}`), false, nil, nil, nil)
+	assertMaxTokens(t, body, nil, true)
+}
+
 // TestPrepareBodyStreamOptions body 未显式带 stream_options 时注入
 // {include_usage: true}（D7，官方 CLI 流式必发）；body 已带则不覆盖。
 func TestPrepareBodyStreamOptions(t *testing.T) {

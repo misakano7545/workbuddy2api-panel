@@ -137,6 +137,7 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 		c.storeEfforts("global", efforts, defaults)
 	}
 	c.storeModelRates("global", infos)
+	c.storeModelMaxOut("global", infos)
 
 	// 成功：探测结果去重。names/infos 均落缓存；倍率等选号敏感字段只透出展示，
 	// 不注入 costTier。

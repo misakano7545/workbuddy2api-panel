@@ -28,6 +28,13 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 // defaultEfforts（模型声明默认档）补档。defaultEfforts 为 nil 时与旧行为一致
 // （deepseek 缺档回退硬编码 high）。
 func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string) []byte {
+	return PrepareBodyOptWithEffortsDefaultAndCaps(src, sanitize, efforts, defaultEfforts, nil)
+}
+
+// PrepareBodyOptWithEffortsDefaultAndCaps 在 …AndDefault 之上接入模型输出上限快照：
+// 无显式限额的请求按目录动态值补 max_tokens（见 injectCatalogMaxTokens）。
+// maxOut 为 nil 时行为与 …AndDefault 完全一致。
+func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64) []byte {
 	if len(src) == 0 {
 		return src
 	}
@@ -42,6 +49,9 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// /console 同源）只认 max_tokens——别名透传会被上游忽略后回落默认输出上限
 	// （实测 32000），长流任务被截。
 	translateMaxCompletionTokens(obj)
+	// 目录动态值补默认输出上限（同 PR #116 的另一个缺口：多数客户端连别名都
+	// 不发——Codex 实测不带任何限额字段，被上游默认 32000 截断）。
+	injectCatalogMaxTokens(obj, maxOut)
 	// stream_options 仅当 body 未显式带时补 {include_usage: true}（D7）：
 	// 官方 CLI 流式必发该字段，上游据此在末帧返回 usage 用量；显式带则不覆盖。
 	if _, has := obj["stream_options"]; !has {
@@ -115,6 +125,24 @@ func translateMaxCompletionTokens(obj map[string]any) {
 		if v > 0 {
 			obj["max_tokens"] = int64(v)
 		}
+	}
+}
+
+// injectCatalogMaxTokens 无显式输出限额时，按模型目录动态声明的 maxOutputTokens
+// 补 max_tokens。上游对缺失限额的请求套保守默认（实测 32000），而目录声明值才是
+// 模型真实预算（如 cn:deepseek-v4.1-flash 393216）——Codex 这类不发限额字段的
+// 客户端写大文件会在 32000 处被无声截断（长流任务被切）。显式限额（含别名翻译
+// 产物）优先，不覆盖；模型未知/目录无值不补（不编造）。
+func injectCatalogMaxTokens(obj map[string]any, maxOut map[string]int64) {
+	if len(maxOut) == 0 {
+		return
+	}
+	if _, has := obj["max_tokens"]; has {
+		return
+	}
+	model, _ := obj["model"].(string)
+	if v, ok := maxOut[model]; ok && v > 0 {
+		obj["max_tokens"] = v
 	}
 }
 

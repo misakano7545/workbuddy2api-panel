@@ -628,6 +628,10 @@ type Client struct {
 	// modelRates 缓存各模型当前生效积分倍率（规范化数值，如 "0.5"）。
 	// 与 efforts 共用 realm 分层和锁；每次成功刷新模型目录时整体替换对应域。
 	modelRates map[string]map[string]string
+	// modelMaxOut 缓存各模型输出上限（maxOutputTokens，随模型目录刷新）。
+	// 供出站请求体补默认 max_tokens：上游对缺失限额的请求套保守默认（实测
+	// 32000），Codex 等不发限额的客户端写大文件会被无声截断。与 efforts 共用锁。
+	modelMaxOut map[string]map[string]int64
 
 	// globalModels 缓存 global 模型名目录探测结果（成功 ∩ 静态 overlay；
 	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
@@ -786,13 +790,14 @@ func (c *Client) chatBase(a *auth.Auth) string {
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
 func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
+	maxOut := c.modelMaxOutSnapshot(realm)
 	if realmKey(realm) == "global" {
 		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如
 		// deepseek-v4.1-flash ['high']）。当前探测桶为空时也按静态表降级，不全程透传
 		//（issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
-	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
+	body = PrepareBodyOptWithEffortsDefaultAndCaps(body, c.SanitizeFingerprints.Load(), efforts, defs, maxOut)
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)
@@ -1260,6 +1265,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
 	c.storeModelRates(a.Realm(), out)
+	c.storeModelMaxOut(a.Realm(), out)
 	// 刷新 effort 能力缓存（供请求体降级；无 supportedEfforts 的模型不入桶）。
 	// 空桶时跳过写：避免「某探测无档位数据」清掉既有桶。
 	cache := make(map[string][]string, len(out))
@@ -1615,6 +1621,40 @@ func (c *Client) storeModelRates(realm string, infos []ModelInfo) {
 		c.modelRates = make(map[string]map[string]string)
 	}
 	c.modelRates[realmKey(realm)] = rates
+}
+
+// storeModelMaxOut 按 realm 整体替换模型输出上限快照（maxOutputTokens）。
+// 供出站请求体补默认 max_tokens（见 payload.go injectCatalogMaxTokens）——上游
+// 对缺失限额的请求套保守默认（实测 32000），目录声明的值才是模型真实预算。
+// 与 modelRates 同口径：目录刷新即整体替换，空快照 = 该域无可用上限（不补默认）。
+func (c *Client) storeModelMaxOut(realm string, infos []ModelInfo) {
+	m := make(map[string]int64, len(infos))
+	for _, mi := range infos {
+		if mi.ID != "" && mi.MaxTokens > 0 {
+			m[mi.ID] = mi.MaxTokens
+		}
+	}
+	c.effortsMu.Lock()
+	defer c.effortsMu.Unlock()
+	if c.modelMaxOut == nil {
+		c.modelMaxOut = make(map[string]map[string]int64)
+	}
+	c.modelMaxOut[realmKey(realm)] = m
+}
+
+// modelMaxOutSnapshot 返回输出上限快照副本；nil 表示未知（不补默认，行为同旧路径）。
+func (c *Client) modelMaxOutSnapshot(realm string) map[string]int64 {
+	c.effortsMu.RLock()
+	defer c.effortsMu.RUnlock()
+	bucket := c.modelMaxOut[realmKey(realm)]
+	if len(bucket) == 0 {
+		return nil
+	}
+	cp := make(map[string]int64, len(bucket))
+	for k, v := range bucket {
+		cp[k] = v
+	}
+	return cp
 }
 
 // ModelRate 返回最近成功刷新的指定域模型生效倍率；未知返回空串。
