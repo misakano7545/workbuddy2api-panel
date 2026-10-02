@@ -110,7 +110,7 @@ func (r *continueReader) Close() error {
 
 // step 处理当前段的一行。与 upstream.StreamHint 的行约定保持一致：
 // `data: [DONE]` 段结束；`data: <payload>` 帧；其他非空行原样透传；空行吞掉
-//（帧分隔由本层自产 "\n\n"）。
+// （帧分隔由本层自产 "\n\n"）。
 func (r *continueReader) step() {
 	line, err := r.br.ReadString('\n')
 	trimmed := strings.TrimRight(line, "\r\n")
