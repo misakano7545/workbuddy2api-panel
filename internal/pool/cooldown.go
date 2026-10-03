@@ -14,6 +14,7 @@ func (p *Pool) SetCredits(uid string, credits, total int64) {
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = credits
+		e.creditsRemainder = 0 // 权威余额整写：亚积分余量作废（同 SetCreditsDetailed）
 		e.creditsTotal = total
 		p.dirty.Store(true)
 	}
@@ -91,6 +92,7 @@ func (p *Pool) SetCreditsDetailed(uid string, credits, total, expiring int64, ea
 			earliestRemaining = 0
 		}
 		e.credits = credits
+		e.creditsRemainder = 0 // 权威余额整写：亚积分余量作废
 		e.creditsTotal = total
 		e.creditsExpiring = expiring
 		e.creditsEarliestExpiry = earliestAt

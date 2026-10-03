@@ -513,6 +513,56 @@ func applyEnv(c *Config) {
 	}
 }
 
+// EnvironmentManagedFields 列出被启动环境变量覆盖的配置字段路径（**值不回传**——
+// 面板只用这些名字把对应输入框禁用/提示，避免「改了也不生效」的无效编辑）。
+// 只报告「值合法、启动时确实会生效」的项：int/bool/float 解析不过的 env 视为不生效、不列出。
+// 移植上游 PR #104；字段表覆盖本 fork 全部 WB2A_* 覆盖项（含本 fork 扩展的
+// schedule/admin/metrics/budget/alerting 族）。
+func (c *Config) EnvironmentManagedFields() []string {
+	fields := []struct{ env, path, kind string }{
+		{"WB2A_LISTEN", "listen", ""}, {"WB2A_API_KEY", "api_key", ""},
+		{"WB2A_AUTH_DIR", "auth_dir", ""}, {"WB2A_STATE_FILE", "state_file", ""},
+		{"WB2A_SOFT_RATE", "cooldown.soft_rate", ""}, {"WB2A_SOFT_RATE_MAX", "cooldown.soft_rate_max", ""},
+		{"WB2A_TIMEOUT_SECONDS", "upstream.timeout_seconds", "int"}, {"WB2A_HEADER_TIMEOUT_SECONDS", "upstream.header_timeout_seconds", "int"},
+		{"WB2A_IDLE_TIMEOUT_SECONDS", "upstream.idle_timeout_seconds", "int"}, {"WB2A_USER_AGENT", "upstream.user_agent", ""},
+		{"WB2A_CLIENT_VERSION", "upstream.client_version", ""}, {"WB2A_CLI_VERSION", "upstream.cli_version", ""},
+		{"WB2A_CLIENT_NAME", "upstream.client_name", ""}, {"WB2A_DEVICE_TOKEN", "upstream.device_token", ""},
+		{"WB2A_DEVICE_TOKEN_FILE", "upstream.device_token_file", ""}, {"WB2A_PASSTHROUGH_IP", "upstream.passthrough_ip", "bool"},
+		{"WB2A_SANITIZE_FINGERPRINTS", "features.sanitize_blacklist_fingerprints", "bool"},
+		{"WB2A_PROMPT_MODE", "prompt.mode", ""}, {"WB2A_PROMPT_FILE", "prompt.file", ""},
+		{"WB2A_EXPIRING_SOON", "pool.expiring_soon", ""}, {"WB2A_PREFER_EXPIRING", "pool.prefer_expiring", "bool"},
+		{"WB2A_SCHEDULE_JITTER_MINUTES", "schedule.jitter_minutes", "int"},
+		{"WB2A_ADMIN_ENABLED", "admin.enabled", "bool"}, {"WB2A_ADMIN_AUDIT_ENABLED", "admin.audit_enabled", "bool"},
+		{"WB2A_ADMIN_AUDIT_FILE", "admin.audit_file", ""},
+		{"WB2A_METRICS_ENABLED", "metrics.enabled", "bool"},
+		{"WB2A_BUDGET_DAILY_CREDIT_LIMIT", "budget.daily_credit_limit", "float"},
+		{"WB2A_ALERTING_ENABLED", "alerting.enabled", "bool"}, {"WB2A_ALERTING_WEBHOOK_URL", "alerting.webhook_url", ""},
+	}
+	var out []string
+	for _, field := range fields {
+		value := os.Getenv(field.env)
+		if value == "" {
+			continue
+		}
+		switch field.kind {
+		case "int":
+			if _, err := strconv.Atoi(value); err != nil {
+				continue
+			}
+		case "bool":
+			if _, err := strconv.ParseBool(value); err != nil {
+				continue
+			}
+		case "float":
+			if _, err := strconv.ParseFloat(value, 64); err != nil {
+				continue
+			}
+		}
+		out = append(out, field.path)
+	}
+	return out
+}
+
 func (c *Config) normalize() error {
 	var err error
 	if c.Panel.PackageDetailLimit <= 0 {

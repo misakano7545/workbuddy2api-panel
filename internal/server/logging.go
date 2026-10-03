@@ -60,10 +60,10 @@ type chatStat struct {
 	promptTokens     int64
 	completionTokens int64
 	totalTokens      int64
-	cacheHit  int
-	cacheMiss int
-	hasCache  bool
-	budget    *dailyBudget
+	cacheHit         int
+	cacheMiss        int
+	hasCache         bool
+	budget           *dailyBudget
 
 	// 调用来源（客户端 IP / User-Agent）。空 = 未采集（logging.request_client_info
 	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
@@ -112,15 +112,15 @@ type chatStatsReader struct {
 	hasCompletionTokens bool
 	hasTotalTokens      bool
 	// credit 上游末帧 usage.credit（本次真实扣费积分），供成本台账（NoteModelCost）。
-	hasCredit  bool
-	credit     float64
-	cacheHit      int
-	cacheMiss     int
-	hasCache      bool
-	hasCacheHit   bool
-	hasCacheMiss  bool
-	errorFrame bool
-	pend       []byte // 已读未返回的行缓存
+	hasCredit    bool
+	credit       float64
+	cacheHit     int
+	cacheMiss    int
+	hasCache     bool
+	hasCacheHit  bool
+	hasCacheMiss bool
+	errorFrame   bool
+	pend         []byte // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -193,12 +193,12 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	var chunk struct {
 		Error json.RawMessage `json:"error"`
 		Usage *struct {
-			PromptTokens          *int     `json:"prompt_tokens"`
-			CompletionTokens      *int     `json:"completion_tokens"`
-			TotalTokens           *int     `json:"total_tokens"`
-			Credit                *float64 `json:"credit"`
-			PromptCacheHitTokens  *int     `json:"prompt_cache_hit_tokens"`
-			PromptCacheMissTokens *int     `json:"prompt_cache_miss_tokens"`
+			PromptTokens          *int            `json:"prompt_tokens"`
+			CompletionTokens      *int            `json:"completion_tokens"`
+			TotalTokens           json.RawMessage `json:"total_tokens"`
+			Credit                json.RawMessage `json:"credit"`
+			PromptCacheHitTokens  *int            `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTokens *int            `json:"prompt_cache_miss_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
@@ -218,13 +218,35 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		s.hasCompletionTokens = true
 		s.completionTokens = *chunk.Usage.CompletionTokens
 	}
-	if chunk.Usage.TotalTokens != nil {
-		s.hasTotalTokens = true
-		s.totalTokens = *chunk.Usage.TotalTokens
+	// total_tokens / credit 走「先判合法性再采信」：上游偶发小数字段或负值
+	// （旧版直接断言 *int / *float64 会静默截断/采信脏值）。非法值置为「未知」
+	// 并覆盖先前帧——迟到的坏帧不得把早帧的费用当成本响应的账（上游 PR #104）。
+	if len(chunk.Usage.TotalTokens) > 0 {
+		var total float64
+		if json.Unmarshal(chunk.Usage.TotalTokens, &total) == nil {
+			parsedTotal, valid := parseUsageTotalTokens(total)
+			if !valid {
+				s.hasTotalTokens = false
+				s.totalTokens = 0
+			} else {
+				s.hasTotalTokens = true
+				s.totalTokens = parsedTotal
+			}
+		} else {
+			s.hasTotalTokens = false
+			s.totalTokens = 0
+		}
 	}
-	if chunk.Usage.Credit != nil {
-		s.hasCredit = true
-		s.credit = *chunk.Usage.Credit
+	if len(chunk.Usage.Credit) > 0 {
+		var credit float64
+		if json.Unmarshal(chunk.Usage.Credit, &credit) == nil && validUsageCredit(credit, true) {
+			s.hasCredit = true
+			s.credit = credit
+		} else {
+			// 非法 credit 覆盖先前值：不得把早帧的费用归档成本响应的账。
+			s.hasCredit = false
+			s.credit = 0
+		}
 	}
 	if chunk.Usage.PromptCacheHitTokens != nil {
 		s.hasCache = true
@@ -523,6 +545,7 @@ const (
 //   - uid/nick：完整 uid 与账号昵称，经 logfmt.Label 拼成 "昵称(uid8)" 展示——只有
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。
+//
 // logChatRow 旧形态（带缓存命中率、无请求 ID）；新代码请用 logChatRowFull。
 func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int, cacheHit, cacheMiss int, hasCache bool) {
 	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, cacheHit, cacheMiss, hasCache, "", "", 0, 0, false, "", "")

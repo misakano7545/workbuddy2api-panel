@@ -948,16 +948,21 @@ async function loadConfig() {
     cfgLoaded = d.config;
     $('cfgPath').textContent = d.path || '';
     const f = $('cfgForm');
+    const managed = d.environment_managed_fields || [];
     for (const [name, path] of Object.entries(CFG_MAP)) {
       const el = f.elements[name];
       if (!el) continue;
+      el.disabled = managed.includes(path.join('.'));
+      el.title = el.disabled ? '此项由启动环境变量设置，请在部署配置中修改。' : '';
       const v = dig(cfgLoaded, path);
       if (el.type === 'checkbox') el.checked = !!v;
       else if (Array.isArray(v)) el.value = v.join(', ');
       else el.value = v == null ? '' : v;
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
-    $('cfgNote').textContent = '';
+    $('cfgKey').disabled = !!d.api_key_env_managed;
+    $('cfgKey').title = d.api_key_env_managed ? '访问密钥由启动环境变量设置，请在部署配置中修改。' : '';
+    $('cfgNote').textContent = managed.length ? '由启动环境管理：' + managed.join('、') : '';
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
 function collectConfig() {
@@ -1026,12 +1031,15 @@ $('cfgForm').onsubmit = async ev => {
   btn.disabled = true; btn.textContent = '保存中…';
   try {
     const r = await api('config', { method: 'POST', body: JSON.stringify(collectConfig()) });
-    const n = (r.restart_required || []).length;
-    toast(n ? '配置已保存，其中 ' + n + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
+    const fields = r.restart_required || [];
+    const restartNote = fields.length ? '需重启生效：' + fields.join('、') : '';
+    toast(fields.length ? '配置已保存，其中 ' + fields.length + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
     // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
+    // 由启动环境变量托管时不写入本地（避免把无效值当会话密钥）。
     const k = $('cfgKey').value.trim();
-    if (k) localStorage.setItem(LS_KEY, k);
-    loadConfig();
+    if (k && !r.api_key_env_managed) localStorage.setItem(LS_KEY, k);
+    await loadConfig();
+    $('cfgNote').textContent = [restartNote, (r.environment_managed_fields || []).length ? '由启动环境管理：' + r.environment_managed_fields.join('、') : ''].filter(Boolean).join('；');
     loadOverview(true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '保存配置'; }

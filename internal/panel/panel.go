@@ -264,8 +264,9 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
+// archive_error：任务日志落盘故障（写失败不影响请求；前端可提示）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot(), "archive_error": p.logs.ArchiveError()})
 }
 
 // requestMetrics 返回进程内请求指标、最近 100 条与归档状态。

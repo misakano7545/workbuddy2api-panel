@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 
@@ -979,6 +980,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeSuccess
 			}
 			credit, hasCredit := stats.Credit()
+			total, hasTotal := stats.TotalTokens()
+			// 计费字段合法性闸门（流式与聚合共用口径，见 validUsageCost）：只在
+			// credit 显式存在且有限非负、total 为正整数时计入成本账本/用量账；
+			// 缺字段/NaN/负值不再被当成「免费」或脏数据污染台账（上游 PR #104）。
+			hasCredit = validUsageCost(credit, hasCredit, total, hasTotal)
 			recordAttempt(acct.UID, stats.Usage(), credit, hasCredit, attemptStarted)
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），
@@ -997,9 +1003,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 供下次选号把免费/便宜的号排在前面。
 			if hasCredit {
 				st.credit, st.hasCredit = credit, true
-				if total, tok := stats.TotalTokens(); tok && total > 0 {
-					h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
-				}
+				h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
 			}
 			rc.Close()
 			return
@@ -1107,18 +1111,44 @@ func promptTooLongMessage(body string) string {
 }
 
 // usageCreditTotal 从聚合响应取 usage.credit 与 total_tokens（成本台账非流式入口）。
-// 任一字段缺失/非法 → ok=false（不记录）。
+// 任一字段缺失/非法 → ok=false（不记录）。移植上游 PR #104。
 func usageCreditTotal(resp map[string]any) (credit float64, total int, ok bool) {
 	usage, _ := resp["usage"].(map[string]any)
 	if usage == nil {
 		return 0, 0, false
 	}
-	c, _ := usage["credit"].(float64)
-	t, _ := usage["total_tokens"].(float64)
-	if t <= 0 {
+	c, hasCredit := usage["credit"].(float64)
+	t, hasTotal := usage["total_tokens"].(float64)
+	parsedTotal, validTotal := parseUsageTotalTokens(t)
+	if !validTotal {
 		return 0, 0, false
 	}
-	return c, int(t), true
+	if !validUsageCost(c, hasCredit, parsedTotal, hasTotal) {
+		return 0, 0, false
+	}
+	return c, parsedTotal, true
+}
+
+// validUsageCredit 只接受「显式存在、有限、非负」的 credit：0 合法（= 上游确认免费）。
+func validUsageCredit(credit float64, present bool) bool {
+	return present && !math.IsNaN(credit) && !math.IsInf(credit, 0) && credit >= 0
+}
+
+// parseUsageTotalTokens 只接受落在 int 范围的有限正整数（小数/越界/NaN 一律拒绝）。
+func parseUsageTotalTokens(total float64) (int, bool) {
+	if math.IsNaN(total) || math.IsInf(total, 0) || total <= 0 || math.Trunc(total) != total {
+		return 0, false
+	}
+	parsed := int(total)
+	if parsed <= 0 || float64(parsed) != total {
+		return 0, false
+	}
+	return parsed, true
+}
+
+// validUsageCost 计费闸门（流式与聚合共用）：credit 合法且 total 为有效正整数。
+func validUsageCost(credit float64, hasCredit bool, total int, hasTotal bool) bool {
+	return validUsageCredit(credit, hasCredit) && hasTotal && total > 0
 }
 
 // rotateBackoff 轮转间指数退避 + 抖动（WAF 403 修复 P0-2）：第 i 次轮转失败

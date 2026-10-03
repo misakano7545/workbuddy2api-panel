@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"syscall"
 	"time"
 
@@ -273,6 +275,8 @@ func main() {
 	}
 
 	var gw *server.Handler
+	// configSaveMu 串行化面板配置保存（并发两次保存会在读-改-写文件与热应用之间互踩）。
+	var configSaveMu sync.Mutex
 	// pn 先声明再赋值：SaveConfig 闭包要在同一条语句里捕获它（:= 的作用域从语句结束才开始）。
 	var pn *panel.Panel
 	pn = panel.New(panel.Config{
@@ -295,9 +299,15 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch, gw, pn)
+			configSaveMu.Lock()
+			defer configSaveMu.Unlock()
+			return saveConfig(raw, *cfgPath, live, p, up, sch, gw, pn, cfg)
 		},
 	})
+	// 任务频道日志落盘（重启后任务结果可回溯）；失败只 WARN，不阻塞启动。
+	if err := pn.Logs().SetTaskArchive(stateSibling(cfg.StateFile, "task-logs.json")); err != nil {
+		log.Printf("WARN: task log archive: %v", err)
+	}
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 	// 成长任务队列排程的执行体在面板（队列逻辑唯一实现）：注入回调，避免 scheduler → panel 循环依赖。
@@ -465,11 +475,21 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, gw *server.Handler, pn *panel.Panel) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, gw *server.Handler, pn *panel.Panel, running ...*Config) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read current config: %w", err)
+	}
+	// 重启清单的比较基线：优先用「运行中配置」（含 env 覆盖与启动归一化）；
+	// 未传入（测试/旧调用）时退化为磁盘旧值。见 restartRequiredFields。
+	previous, err := ParseConfig(oldRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse current config: %w", err)
+	}
+	baseline := previous
+	if len(running) > 0 && running[0] != nil {
+		baseline = running[0]
 	}
 	var cur, incoming map[string]any
 	if err := json.Unmarshal(oldRaw, &cur); err != nil {
@@ -483,6 +503,12 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
 	newCfg, err := ParseConfig(mergedJSON(merged))
 	if err != nil {
+		return nil, err
+	}
+	// 环境变量覆盖与启动同优先级：保存路径同样应用（否则 env 托管字段会被文件值
+	// 抢班——面板显示 env 值、运行却按文件值）。移植上游 PR #104。
+	applyEnv(newCfg)
+	if err := newCfg.normalize(); err != nil {
 		return nil, err
 	}
 
@@ -570,30 +596,50 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		gw.SetBudgetLimit(newCfg.Budget.DailyCreditLimit)
 	}
 
-	return restartRequiredFields(newCfg), nil
+	return restartRequiredFields(baseline, newCfg), nil
 }
 
-// restartRequiredFields 返回本次改动中无法热生效、需要重启进程的字段名。
-// 恒返回完整清单中的"与当前进程装配期依赖相关"的项——面板据此提示用户。
-func restartRequiredFields(c *Config) []string {
+// restartRequiredFields 比较运行中装配值与新配置（有运行配置时以它为准，否则退化
+// 为磁盘旧值），只报告「确实变化且无法热生效」的字段——第二次保存不再重复携带上
+// 一处的待重启项、改回原值即自动清除（无独立的 pending 集合）。移植上游 PR #104；
+// 字段集保留本 fork 自有项（admin/metrics/alerting 整块）。
+func restartRequiredFields(current, next *Config) []string {
 	var out []string
-	// 这些字段在进程内被监听地址/HTTP client/目录句柄等装配期对象捕获。
-	if c.Listen != "" {
-		out = append(out, "listen")
+	changed := func(name string, before, after any) {
+		if !reflect.DeepEqual(before, after) {
+			out = append(out, name)
+		}
 	}
-	if c.AuthDir != "" {
-		out = append(out, "auth_dir")
-	}
-	if c.StateFile != "" {
-		out = append(out, "state_file")
-	}
-	out = append(out, "upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds")
-	if c.Upstash.URL != "" || c.Upstash.Token != "" {
-		out = append(out, "upstash")
-	}
-	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
-	out = append(out, "admin", "metrics", "alerting")
-	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
+	changed("listen", current.Listen, next.Listen)
+	changed("auth_dir", current.AuthDir, next.AuthDir)
+	changed("state_file", current.StateFile, next.StateFile)
+	changed("upstream.timeout_seconds", current.Upstream.TimeoutSeconds, next.Upstream.TimeoutSeconds)
+	changed("upstream.header_timeout_seconds", current.Upstream.HeaderTimeoutSeconds, next.Upstream.HeaderTimeoutSeconds)
+	changed("upstream.idle_timeout_seconds", current.Upstream.IdleTimeoutSeconds, next.Upstream.IdleTimeoutSeconds)
+	changed("upstream.user_agent", current.Upstream.UserAgent, next.Upstream.UserAgent)
+	changed("upstream.client_version", current.Upstream.ClientVersion, next.Upstream.ClientVersion)
+	changed("upstream.cli_version", current.Upstream.CliVersion, next.Upstream.CliVersion)
+	changed("upstream.client_name", current.Upstream.ClientName, next.Upstream.ClientName)
+	changed("upstream.device_token", current.Upstream.DeviceToken, next.Upstream.DeviceToken)
+	changed("upstream.device_token_file", current.Upstream.DeviceTokenFile, next.Upstream.DeviceTokenFile)
+	changed("upstream.passthrough_ip", current.Upstream.PassthroughIP, next.Upstream.PassthroughIP)
+	changed("global.enabled", current.Global.Enabled, next.Global.Enabled)
+	changed("global.chat_base", current.Global.ChatBase, next.Global.ChatBase)
+	changed("global.billing_base", current.Global.BillingBase, next.Global.BillingBase)
+	changed("prompt.mode", current.Prompt.Mode, next.Prompt.Mode)
+	changed("prompt.file", current.Prompt.File, next.Prompt.File)
+	changed("prompt.text", current.PromptText, next.PromptText)
+	changed("upstash.url", current.Upstash.URL, next.Upstash.URL)
+	changed("upstash.token", current.Upstash.Token, next.Upstash.Token)
+	changed("session_sticky.enabled", current.SessionSticky.Enabled, next.SessionSticky.Enabled)
+	changed("session_sticky.ttl", current.SessionTTL, next.SessionTTL)
+	changed("session_sticky.gc_interval", current.SessionGCInterval, next.SessionGCInterval)
+	changed("admin", current.Admin, next.Admin)
+	changed("metrics", current.Metrics, next.Metrics)
+	changed("alerting", current.Alerting, next.Alerting)
+	changed("logging.request_archive_enabled", current.Logging.RequestArchiveEnabled, next.Logging.RequestArchiveEnabled)
+	changed("logging.request_retention_days", current.Logging.RequestRetentionDays, next.Logging.RequestRetentionDays)
+	changed("logging.request_archive_max_mb", current.Logging.RequestArchiveMaxMB, next.Logging.RequestArchiveMaxMB)
 	return out
 }
 
