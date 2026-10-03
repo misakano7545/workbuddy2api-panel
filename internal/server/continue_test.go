@@ -174,9 +174,10 @@ func TestContinueReaderSeg2FailureDegrades(t *testing.T) {
 	}
 }
 
-// TestContinueReaderSeamReasoningDropped 续写段自带的 reasoning 不外泄（仅累计，
-// 供下一段请求带回）：客户端只看到第一段的思考块与连续正文，不产生第二个
-// reasoning item（否则 codex 报 "OutputTextDelta without active item"）。
+// TestContinueReaderSeamReasoningDropped 正文已开始后的续写段 reasoning 不外泄
+// （仅累计，供下一段请求带回）：不能让 responses 侧在 message item 还开着时开
+// 第二个 reasoning item（否则 codex 报 "OutputTextDelta without active item"）。
+// 正文未开始时相反——照常外泄，见 TestContinueReaderSeg2ReasoningForwarded。
 func TestContinueReaderSeamReasoningDropped(t *testing.T) {
 	seg1 := `data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"reasoning_content":"公开思考"}}]}` + "\n\n" + testSeg1Text
 	seg2 := `data: {"id":"cmpl-2","choices":[{"index":0,"delta":{"reasoning_content":"内部思考"}}]}` + "\n\n" +
@@ -221,5 +222,84 @@ func TestContinueReaderCapAtMaxSegments(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"finish_reason":"length"`) {
 		t.Fatalf("封顶后 length 终态应在场:\n%s", out)
+	}
+}
+
+// TestContinueReaderSeg2ReasoningForwarded 正文尚未开始（text=0B）时的续写段
+// 思考照常外泄：此时的截断全是「纯思考烧满」形态，放行思考既续着同一个
+// reasoning item（零协议风险），又消掉客户端侧静默（codex stream_idle_timeout
+// 会在长静默时判 responseStreamDisconnected 掐线，实测静默约 122s 断开）。
+func TestContinueReaderSeg2ReasoningForwarded(t *testing.T) {
+	// 段1：纯思考截断（正文 0B —— 线上观测到的全部续写场景）。
+	seg1 := `data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"reasoning_content":"公开思考"}}]}` + "\n\n" +
+		`data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+	seg2 := `data: {"id":"cmpl-2","choices":[{"index":0,"delta":{"reasoning_content":"内部思考"}}]}` + "\n\n" +
+		`data: {"id":"cmpl-2","choices":[{"index":0,"delta":{"content":"继续"}}]}` + "\n\n" +
+		`data: {"id":"cmpl-2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, seg2 })
+	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(seg1)))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	s := string(out)
+	if len(*reqs) != 1 {
+		t.Fatalf("续写请求数=%d want 1", len(*reqs))
+	}
+	if !strings.Contains(s, "内部思考") {
+		t.Fatalf("正文未开始时续写段思考应放行（消静默）:\n%s", s)
+	}
+	if strings.Index(s, "内部思考") > strings.Index(s, "继续") {
+		t.Fatalf("思考应先于正文出现:\n%s", s)
+	}
+	// 放行不等于放弃累计：首次续写请求应携带段1 累计思考（上下文一致性；
+	// 段2 的思考若再触发续写请求才会携带）。
+	req := (*reqs)[0]
+	if !strings.Contains(req, "公开思考") {
+		t.Fatalf("续写请求应携带累计思考:\n%s", req)
+	}
+}
+
+// TestContinueReaderKeepaliveOnEmptyFrames 残余静默源（续写段的全空 no-op 帧）
+// 按 keepaliveEvery 补 SSE 注释帧——chat 路径直达客户端喂活连接。注释帧是
+// SSE 规范 no-op（": keepalive"），不得影响正文与终态。
+func TestContinueReaderKeepaliveOnEmptyFrames(t *testing.T) {
+	old := keepaliveEvery
+	keepaliveEvery = 0 // 确定性：每条被吞帧都补，不依赖墙钟
+	t.Cleanup(func() { keepaliveEvery = old })
+
+	// 段1：带正文截断（text>0，续写段思考会走剥离分支）。
+	// 段2：全空 no-op 帧（残余静默源）→ 触发 keepalive。
+	empty := `data: {"id":"cmpl-2","choices":[{"index":0,"delta":{}}]}` + "\n\n"
+	seg2 := empty +
+		`data: {"id":"cmpl-2","choices":[{"index":0,"delta":{"reasoning_content":"内部思考"}}]}` + "\n\n" +
+		`data: {"id":"cmpl-2","choices":[{"index":0,"delta":{"content":"继续"}}]}` + "\n\n" +
+		`data: {"id":"cmpl-2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, seg2 })
+	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(testSeg1Text)))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	s := string(out)
+	if len(*reqs) != 1 {
+		t.Fatalf("续写请求数=%d want 1", len(*reqs))
+	}
+	if n := strings.Count(s, ": keepalive"); n < 1 {
+		t.Fatalf("keepalive 注释帧=%d want ≥1:\n%s", n, s)
+	}
+	if strings.Contains(s, "内部思考") {
+		t.Fatalf("正文已开始后续写段思考不应外泄:\n%s", s)
+	}
+	// 注释帧不能破坏正常收尾：正文与 stop 终态照常在。
+	for _, want := range []string{"你好", "世界", "继续", `"finish_reason":"stop"`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("输出缺少 %q:\n%s", want, s)
+		}
 	}
 }

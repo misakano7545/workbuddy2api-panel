@@ -13,6 +13,12 @@
 // ponytail: 只续文本/推理段。工具参数被截断（半个 JSON）不续——拼接残缺 JSON 比
 // 不续更糟，且上游管线本就丢弃残缺 tool_calls；命中该形态只记日志（等真实分布
 // 决定要不要做 V2 的「剩余参数改写」）。每请求最多 maxContinueSegments 段。
+//
+// 续写段接缝的客户端可见性：思考在正文尚未开始时照常外泄（续着同一个 reasoning
+// item 喂，见 frame()），消掉「续写段纯思考期零事件」的静默——Codex 的 provider
+// 配置带 stream_idle_timeout_ms，静默超时判 responseStreamDisconnected 掐线
+// （线上实测续写段静默约 122s 后客户端断开、请求记 interrupted）。正文已开始后
+// 的思考仍剥离，残余空帧按 keepaliveEvery 补 SSE 注释帧（纯喂活、无语义）。
 package server
 
 import (
@@ -23,6 +29,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -34,6 +41,10 @@ const maxContinueSegments = 3
 
 // continueNudge 续写指令：线上实测该措辞能让模型从断点无缝接续（不重头、不道歉）。
 const continueNudge = "你上一条回复因达到输出长度上限被截断。请从中断处继续输出剩余内容；不要重复已输出过的部分，不要道歉或解释，直接继续。"
+
+// keepaliveEvery 客户端可见静默的最大间隔：超时就向流里补一条 SSE 注释帧
+// （": keepalive"），只喂活连接不带语义。≤0 = 每条被吞帧都补（测试确定性用）。
+var keepaliveEvery = 10 * time.Second
 
 // continueReader 读上游 SSE 并做帧级续写拼接。它在 stats/StreamHint 之下、
 // 上游 body 之上：上层看到的永远是「一条完整且恰好一个终态」的流。
@@ -61,12 +72,14 @@ type continueReader struct {
 	errSeen  bool
 	id       string
 
+	lastClientAt time.Time // 上次客户端可见输出/keepalive 的时刻（静默节流）
+
 	usage map[string]any // 跨段累计 usage（数字叶子求和）
 	done  bool
 }
 
 func newContinueReader(ctx context.Context, up *upstream.Client, acct *auth.Auth, body []byte, clientIP string, meta upstream.ChatMeta, rc io.ReadCloser) *continueReader {
-	r := &continueReader{ctx: ctx, up: up, acct: acct, body: body, clientIP: clientIP, meta: meta, cur: rc}
+	r := &continueReader{ctx: ctx, up: up, acct: acct, body: body, clientIP: clientIP, meta: meta, cur: rc, lastClientAt: time.Now()}
 	r.br = bufio.NewReaderSize(rc, 64*1024)
 	r.limitSet = bodyHasOutputLimit(body)
 	return r
@@ -159,12 +172,17 @@ func (r *continueReader) frame(payload string) {
 			if d, ok := c["delta"].(map[string]any); ok {
 				if s, ok := d["reasoning_content"].(string); ok && s != "" {
 					r.reason.WriteString(s)
-					// 续写段的思考是机制内部产物（第一段的思考已经展示过），
-					// 不向客户端暴露：否则 responses 侧会在 message item 还打开时
-					// 开第二个 reasoning item，codex 后续文本 delta 全部报
-					// "OutputTextDelta without active item"（实测 1.2 万条）。
-					// 仍累计进 r.reason，供下一段续写请求带回上下文。
-					if r.seg > 0 {
+					// 续写段思考的接缝策略（两个子情形）：
+					//   - 正文尚未开始（r.text==0）：照常外泄。此时 responses 侧的
+					//     reasoning item 还开着，续写思考只是往同一个 item 里续 delta，
+					//     零协议风险；同时消掉「续写段纯思考期客户端零事件」的静默——
+					//     codex 的 provider 带 stream_idle_timeout_ms，实测续写段静默
+					//     约 122s 后客户端断开、请求记 interrupted（观测到的截断全是
+					//     text=0B 的纯思考段，正是这条路径）。
+					//   - 正文已开始（message item 开着）：剥离（照旧）。此时再喂思考
+					//     responses 侧会开第二个 reasoning item，codex 后续文本 delta
+					//     全报 "OutputTextDelta without active item"（实测 1.2 万条）。
+					if r.seg > 0 && r.text.Len() > 0 {
 						delete(d, "reasoning_content")
 						rebuilt = true
 					}
@@ -193,8 +211,11 @@ func (r *continueReader) frame(payload string) {
 			payload = string(raw)
 		}
 	}
-	// 续写段纯 reasoning 帧：剥掉后无内容可发（且非终态）→ 吞掉。
+	// 空帧（各字段皆空的 no-op 帧、且非终态）→ 吞掉；这是残余的静默源，
+	// 按需补 keepalive（chat 路径注释帧直达；codex 路径的续写思考帧已改为
+	// 直通，见上面 reasoning 分支，不再走这里）。
 	if r.seg > 0 && !deltaNonEmpty && r.finish == "" {
+		r.maybeKeepalive()
 		return
 	}
 	if r.finish != "" {
@@ -209,9 +230,22 @@ func (r *continueReader) frame(payload string) {
 }
 
 func (r *continueReader) emit(payload string) {
+	r.lastClientAt = time.Now()
 	r.out = append(r.out, "data: "...)
 	r.out = append(r.out, payload...)
 	r.out = append(r.out, '\n', '\n')
+}
+
+// maybeKeepalive 被吞帧到达时调用：距上次客户端可见输出超过 keepaliveEvery 就
+// 补一条 SSE 注释帧。注释行（":" 开头）是 SSE 规范的 no-op——StreamHint 原样
+// 透传并 flush，responsesWriter 与 chat 类客户端的解析器都忽略它；唯一作用是
+// 让连接保持「有数据流动」，防流静默超时掐线。
+func (r *continueReader) maybeKeepalive() {
+	if keepaliveEvery > 0 && time.Since(r.lastClientAt) < keepaliveEvery {
+		return
+	}
+	r.out = append(r.out, ": keepalive\n\n"...)
+	r.lastClientAt = time.Now()
 }
 
 // endSegment 一段结束（DONE 或 EOF/读错误）时的决策：
@@ -242,6 +276,12 @@ func (r *continueReader) endSegment(sawDone bool) {
 		} else {
 			log.Printf("WARN: [continue] 续写请求体构造失败: %v", err)
 		}
+	}
+	// 段在没有任何 finish 的情况下以 EOF/读错误结束：疑似上游断流（正常收尾都带
+	// finish_reason）。不断言语义，只记一条 WARN 供对账——这类流此前完全无痕，
+	// 客户端却会看到「被标 completed 的中途截断」。
+	if !sawDone && r.finish == "" && !r.errSeen {
+		log.Printf("WARN: [continue] 段无 finish 结束（疑似上游断流，按截断终态降级）")
 	}
 	// 不续/续写失败：回放 tail（含 finish/末端帧，客户端行为与未接线时一致），
 	// 再补一条跨段合计 usage，最后 EOF（[DONE] 由 StreamHint 统一补）。
