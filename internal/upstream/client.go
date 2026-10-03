@@ -692,11 +692,11 @@ type Client struct {
 func New() *Client {
 	tr := newTransport()
 	c := &Client{
-		HTTP:         &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		ChatHTTP:     &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
-		ChatBaseCN:   "https://copilot.tencent.com",
+		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		ChatHTTP:      &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		ChatBaseCN:    "https://copilot.tencent.com",
 		BillingBaseCN: "https://www.codebuddy.cn",
-		WebBaseCN:    "https://www.workbuddy.cn",
+		WebBaseCN:     "https://www.workbuddy.cn",
 		// GlobalEnabled 缺省 true（与 config global.enabled 缺省 true 一致；纯 CN 部署行为不变：
 		// CN 账号恒判 cn，global base 只在 realm=global 的账号上被使用）。
 		GlobalEnabled: true,

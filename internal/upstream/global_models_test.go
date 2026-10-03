@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -22,6 +23,8 @@ func TestGlobalCatalogProbesDesktopUA(t *testing.T) {
 	defer auth.SetGlobalEnabled(prev)
 
 	const desktopOnly = "gpt-6-luna"
+	// 三路 /v3/config 并发探测 → handler 并发写，必须加锁（CI 曾现 concurrent map writes）。
+	var seenMu sync.Mutex
 	seenUA := map[string]bool{}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +35,9 @@ func TestGlobalCatalogProbesDesktopUA(t *testing.T) {
 			return
 		}
 		ua := r.Header.Get("User-Agent")
+		seenMu.Lock()
 		seenUA[ua] = true
+		seenMu.Unlock()
 		ids := []string{"shared-model"}
 		switch {
 		case strings.HasPrefix(ua, "CodeBuddyIDE/"):
@@ -73,7 +78,13 @@ func TestGlobalCatalogProbesDesktopUA(t *testing.T) {
 			t.Errorf("FetchGlobalModels 缺少 %q（并集=%v）", want, names)
 		}
 	}
-	if len(seenUA) != 3 {
-		t.Errorf("v3/config 应探 3 种 UA 家族，实际 %d 种: %v", len(seenUA), seenUA)
+	seenMu.Lock()
+	seen := make([]string, 0, len(seenUA))
+	for ua := range seenUA {
+		seen = append(seen, ua)
+	}
+	seenMu.Unlock()
+	if len(seen) != 3 {
+		t.Errorf("v3/config 应探 3 种 UA 家族，实际 %d 种: %v", len(seen), seen)
 	}
 }
