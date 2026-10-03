@@ -698,6 +698,7 @@ function extractFn(name) {
 const GROWTH_TITLES = {};
 const ST_WORDS = { done: '完成', scan: '待执行' };
 function esc(s) { return String(s == null ? '' : s); }
+eval(extractFn('taskProgressLabel'));
 eval(extractFn('qrowHTML'));
 eval(extractFn('groupsFromQueue'));
 const groups = groupsFromQueue([{ uid: 'u', nickname: 'n', kind: 'growth', code: 'Sequential_Tasks_4', title: '创建 1 个定时任务', status: 'done', message: 'm' }]);

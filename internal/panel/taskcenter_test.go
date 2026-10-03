@@ -1,11 +1,13 @@
 package panel
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // TestRunGrowthQueueNowUnguarded 排程入口在未接线（无上游）时安全返回，不 panic。
@@ -17,20 +19,25 @@ func TestRunGrowthQueueNowUnguarded(t *testing.T) {
 	}
 }
 
-// TestRunGrowthQueueNowBusy 队列执行中再启动：排程与手动入口共用队列状态，不重复启动。
+// TestRunGrowthQueueNowBusy 账号被其它任务动作占用（per-account 锁）时，排程轮次
+// 不重复启动该账号的后台作业——与手动/队列入口共用同一把锁。
 func TestRunGrowthQueueNowBusy(t *testing.T) {
-	p := New(Config{Version: "test", Pool: pool.New(""), Upstream: &upstream.Client{}})
-	q := p.queue()
-	q.mu.Lock()
-	q.running = true
-	q.mu.Unlock()
-	defer func() {
-		q.mu.Lock()
-		q.running = false
-		q.mu.Unlock()
-	}()
-	if total, msg := p.RunGrowthQueueNow(); total != 0 || msg != "队列正在执行中" {
-		t.Errorf("total=%d msg=%q want 0 + 队列正在执行中", total, msg)
+	p := New(Config{Version: "test", Pool: pool.New("")})
+	p.cfg.AutoTasksEnabled = func() bool { return true }
+	p.cfg.Pool.Add(&auth.Auth{UID: "busy-1", AccessToken: "t"})
+	if err := p.StartTaskJobs(context.Background(), filepath.Join(t.TempDir(), "task-jobs.json")); err != nil {
+		t.Fatal(err)
+	}
+	defer p.StopTaskJobs()
+	if !p.tryLockAccount("busy-1") {
+		t.Fatal("占锁失败")
+	}
+	defer p.unlockAccount("busy-1")
+	if total, _ := p.RunGrowthQueueNow(); total != 0 {
+		t.Errorf("锁被占用时不应启动后台作业：total=%d", total)
+	}
+	if jobs := p.ListTaskJobs(); len(jobs) != 0 {
+		t.Errorf("忙碌账号不应产生作业：%+v", jobs)
 	}
 }
 

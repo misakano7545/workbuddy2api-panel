@@ -280,17 +280,19 @@ func main() {
 	// pn 先声明再赋值：SaveConfig 闭包要在同一条语句里捕获它（:= 的作用域从语句结束才开始）。
 	var pn *panel.Panel
 	pn = panel.New(panel.Config{
-		Pool:        p,
-		Usage:       rec,
-		RequestLog:  requestLog,
-		Upstream:    up,
-		Scheduler:   sch,
-		AuthDir:     cfg.AuthDir,
-		APIKey:      cfg.APIKey,
-		RedisMode:   redisMode,
-		StickyCount: sessCount,
-		Version:     appVersion,
-		Live:        live,
+		Pool:       p,
+		Usage:      rec,
+		RequestLog: requestLog,
+		Upstream:   up,
+		Scheduler:  sch,
+		// 后台任务的自动触发开关与成长任务排程共用热配置（schedule.growth_enabled）。
+		AutoTasksEnabled: sch.GrowthEnabled,
+		AuthDir:          cfg.AuthDir,
+		APIKey:           cfg.APIKey,
+		RedisMode:        redisMode,
+		StickyCount:      sessCount,
+		Version:          appVersion,
+		Live:             live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -351,6 +353,12 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 账号后台任务（taskjobs）：状态与主 state 同目录，重启后自动恢复未完成作业。
+	if err := pn.StartTaskJobs(ctx, stateSibling(cfg.StateFile, "task-jobs.json")); err != nil {
+		log.Fatalf("task jobs: %v", err)
+	}
+	defer pn.StopTaskJobs()
+	pn.ResumeTaskJobs()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 	if cfg.Alerting.Enabled {

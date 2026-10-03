@@ -28,10 +28,55 @@ import (
 
 // scanAccountItem 单账号扫描结果。
 type scanAccountItem struct {
-	UID       string          `json:"uid"`
-	Nickname  string          `json:"nickname"`
-	Growth    []upstream.Task `json:"growth,omitempty"`
-	GrowthErr string          `json:"growth_error,omitempty"`
+	UID        string          `json:"uid"`
+	Nickname   string          `json:"nickname"`
+	Realm      string          `json:"realm"`
+	Skipped    bool            `json:"skipped"`
+	SkipReason string          `json:"skip_reason,omitempty"`
+	Growth     []upstream.Task `json:"growth,omitempty"`
+	GrowthErr  string          `json:"growth_error,omitempty"`
+}
+
+// scanAccountGrowth 单账号成长待办扫描（默认+mp 口径合并，失败不静默）。
+// global 账号仅只读：不发起任何 CN 成长接口调用，直接标记跳过。
+func (p *Panel) scanAccountGrowth(a *auth.Auth) scanAccountItem {
+	it := scanAccountItem{UID: a.UID, Nickname: a.Nickname, Realm: a.Realm()}
+	if a.IsGlobal() {
+		it.Skipped = true
+		it.SkipReason = "国际区任务仅支持查询，不执行国内区成长任务"
+		return it
+	}
+
+	var errors []string
+	if tasks, err := p.cfg.Upstream.ListTasks(a); err != nil {
+		errors = append(errors, "list tasks: "+err.Error())
+	} else {
+		for _, t := range tasks {
+			if growthPending(t) {
+				it.Growth = append(it.Growth, t)
+			}
+		}
+	}
+	// 小程序任务与默认任务分别读取。即使其中一路失败，也保留另一路结果并
+	// 明确标记扫描不完整，避免“没有待办”被误解成所有任务都已完成。
+	if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err != nil {
+		errors = append(errors, "list MP tasks: "+err.Error())
+	} else {
+		seen := make(map[string]bool, len(it.Growth))
+		for _, t := range it.Growth {
+			seen[t.TaskCode] = true
+		}
+		for _, t := range mpTasks {
+			if growthPending(t) && !seen[t.TaskCode] {
+				it.Growth = append(it.Growth, t)
+				seen[t.TaskCode] = true
+			}
+		}
+	}
+	if len(errors) > 0 {
+		it.GrowthErr = strings.Join(errors, "; ")
+	}
+	return it
 }
 
 // growthPending 任务是否"未完成且可自动化"。
@@ -51,14 +96,17 @@ func growthPending(t upstream.Task) bool {
 	return autoActionFor(t.TaskCode) != nil
 }
 
-// tasksScanAll 扫描全部账号：成长任务（未完成且可自动化）。
+// tasksScanAll 扫描全部账号：成长任务（未完成+可自动化，含 mp 口径合并）。
 // 只读操作，并发拉取（账号数个位数）。
 func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 	states := p.cfg.Pool.List()
 	items := make([]scanAccountItem, len(states))
 	var wg sync.WaitGroup
 	for i, st := range states {
+		items[i] = scanAccountItem{UID: st.UID, Nickname: st.Nickname, Realm: st.Realm}
 		if st.Disabled {
+			items[i].Skipped = true
+			items[i].SkipReason = "账号已禁用"
 			continue
 		}
 		wg.Add(1)
@@ -66,45 +114,30 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			a := p.cfg.Pool.AuthByUID(uid)
 			if a == nil {
+				items[i].GrowthErr = "account credentials not found"
 				return
 			}
-			it := &items[i]
-			it.UID, it.Nickname = uid, a.Nickname
-			// D4 门控：global 账号无 CN 成长任务体系，不发起任何上游调用。
-			if a.IsGlobal() {
-				return
-			}
-			if tasks, err := p.cfg.Upstream.ListTasks(a); err != nil {
-				it.GrowthErr = err.Error()
-			} else {
-				for _, t := range tasks {
-					if growthPending(t) {
-						it.Growth = append(it.Growth, t)
-					}
-				}
-			}
-			// 小程序口径任务（Sequential_Tasks_*）仅在 mp 头列表下发。
-			// 与默认口径不重叠时合并进待办；mp 列表失败静默。
-			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
-				seen := map[string]bool{}
-				for _, t := range it.Growth {
-					seen[t.TaskCode] = true
-				}
-				for _, t := range mpTasks {
-					if growthPending(t) && !seen[t.TaskCode] {
-						it.Growth = append(it.Growth, t)
-					}
-				}
-			}
+			items[i] = p.scanAccountGrowth(a)
 		}(i, st.UID)
 	}
 	wg.Wait()
 	pending := 0
+	skipped := 0
+	errors := 0
 	for _, it := range items {
 		pending += len(it.Growth)
+		if it.Skipped {
+			skipped++
+		}
+		if it.GrowthErr != "" {
+			errors++
+		}
 	}
-	log.Printf("panel: 队列扫描完成：全部账号待办 %d 项", pending)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": items, "pending_count": pending})
+	log.Printf("panel: 队列扫描完成：可自动化待办 %d 项，跳过 %d 账号，扫描错误 %d 账号", pending, skipped, errors)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "accounts": items, "pending_count": pending,
+		"skipped_count": skipped, "error_count": errors,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -161,33 +194,60 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 		Concurrency int `json:"concurrency"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	if p.queue().isRunning() {
-		writeErr(w, http.StatusConflict, "队列正在执行中（可在任务中心查看进度）")
-		return
+	if body.Concurrency < 1 {
+		body.Concurrency = 1
 	}
-	total, seq, msg := p.startGrowthQueue(body.Concurrency, false)
-	if total == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": msg})
-		return
+	if body.Concurrency > 4 {
+		body.Concurrency = 4
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": total, "seq": seq})
+	started, total, seq, msg, scanAccounts, scanErrorCount := p.startGrowthQueue(body.Concurrency, false)
+	result := map[string]any{"scan_accounts": scanAccounts, "scan_error_count": scanErrorCount}
+	switch {
+	case seq == -1:
+		writeErr(w, http.StatusConflict, msg)
+	case !started:
+		result["ok"], result["started"], result["message"] = scanErrorCount == 0, false, msg
+		writeJSON(w, http.StatusOK, result)
+	default:
+		result["ok"], result["started"], result["total"], result["seq"] = true, true, total, seq
+		if scanErrorCount > 0 {
+			result["message"] = fmt.Sprintf("队列已启动；%d 个账号扫描失败，队列只包含已成功读取的待办", scanErrorCount)
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
 }
 
-// RunGrowthQueueNow 无 HTTP 入口（growth 排程调用）：扫描成长待办并启动一轮队列，
-// 并发取 schedule.growth_concurrency，轮次结束发结果汇总。返回启动项数与提示文案
-// （0 项时文案说明原因）。装配期注入 scheduler（SetGrowthRunner）。
+// RunGrowthQueueNow 排程轮次（growth 调度调用）：为所有启用的国区账号启动持久化
+// 后台任务（taskjobs）。账号正在执行时复用现有作业；网络查询与动作全部由后台
+// 处理，调度器不等待完整扫描。装配期注入 scheduler（SetGrowthRunner）。
 func (p *Panel) RunGrowthQueueNow() (int, string) {
-	total, _, msg := p.startGrowthQueue(p.growthQueueConcurrency(), true)
-	return total, msg
+	if p.cfg.AutoTasksEnabled == nil || !p.cfg.AutoTasksEnabled() {
+		return 0, "成长任务未启用"
+	}
+	started := 0
+	for _, st := range p.cfg.Pool.List() {
+		if st.Disabled || st.Realm == "global" {
+			continue
+		}
+		if _, fresh, err := p.StartAccountTaskJob(st.UID, "daily"); err != nil {
+			log.Printf("panel: 定时后台任务 uid=%s: %v", st.UID, err)
+		} else if fresh {
+			started++
+		}
+	}
+	if started > 0 {
+		log.Printf("panel: 定时后台任务已启动（%d 个账号）", started)
+	}
+	return started, "后台任务已排队"
 }
 
-// startGrowthQueue 扫描成长待办并启动执行队列，返回 (启动项数, 队列轮次号, 提示文案)。
-// 面板「执行队列」按钮与 growth 排程共用这一条路径：同一队列状态、同一把 per-account 锁。
-// 先扫描，把成长待办按账号内 autoActions 顺序排队。账号内串行，账号间受并发限制。
-// notify=true 时（排程轮次）执行结束发结果汇总。
-func (p *Panel) startGrowthQueue(concurrency int, notify bool) (total int, seq int, msg string) {
+// startGrowthQueue 扫描成长待办并启动执行队列，返回 (是否启动, 启动项数, 队列轮次号,
+// 提示文案, 扫描结果, 扫描错误账号数)。面板「执行队列」与 growth 排程共用同一队列
+// 状态与同一把 per-account 锁。先扫描，把成长待办按账号内 autoActions 顺序排队。
+// 账号内串行，账号间受并发限制。notify=true 时执行结束发结果汇总。
+func (p *Panel) startGrowthQueue(concurrency int, notify bool) (started bool, total int, seq int, msg string, scanAccounts []scanAccountItem, scanErrorCount int) {
 	if p.cfg.Pool == nil || p.cfg.Upstream == nil {
-		return 0, 0, "账号池未接线"
+		return false, 0, 0, "账号池未接线", nil, 0
 	}
 	if concurrency < 1 {
 		concurrency = 1
@@ -196,69 +256,59 @@ func (p *Panel) startGrowthQueue(concurrency int, notify bool) (total int, seq i
 		concurrency = 4
 	}
 	q := p.queue()
-	if q.isRunning() {
-		return 0, 0, "队列正在执行中"
+	q.mu.Lock()
+	if q.running {
+		q.mu.Unlock()
+		return false, 0, -1, "队列正在执行中（可在任务中心查看进度）", nil, 0
 	}
 	// 先占位：扫描（数秒级网络耗时）期间若并发再次触发，直接命中上面的 running
 	// 判拒，避免两个 goroutine 同时启动互相覆盖 q.items/q.seq。无待办时回滚。
-	q.mu.Lock()
 	q.running = true
 	q.startedAt = time.Now()
 	q.mu.Unlock()
 
 	// 扫描待办（复用扫描逻辑的拉取部分）。
 	states := p.cfg.Pool.List()
-	var accts []queueAccount
+	scanAccounts = make([]scanAccountItem, len(states))
+	scanned := make([]queueAccount, len(states))
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	for _, st := range states {
+	for i, st := range states {
+		scanAccounts[i] = scanAccountItem{UID: st.UID, Nickname: st.Nickname, Realm: st.Realm}
 		if st.Disabled {
+			scanAccounts[i].Skipped = true
+			scanAccounts[i].SkipReason = "账号已禁用"
 			continue
 		}
 		a := p.cfg.Pool.AuthByUID(st.UID)
 		if a == nil {
+			scanAccounts[i].GrowthErr = "account credentials not found"
 			continue
 		}
 		wg.Add(1)
-		go func(a *auth.Auth) {
+		go func(i int, a *auth.Auth) {
 			defer wg.Done()
-			one := queueAccount{a: a}
-			// D4 门控：global 账号无 CN 成长任务体系，不发起任何上游调用。
-			if a.IsGlobal() {
-				return
-			}
-			if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
-				for _, t := range tasks {
-					if growthPending(t) {
-						one.grow = append(one.grow, t)
-					}
-				}
-				// 合并小程序口径待办（与 tasksScanAll 同口径：mp 列表是默认口径
-				// 超集，按 code 去重；失败静默）。此前此处漏合并——扫描显示
-				// mp 待办而队列报"无可执行待办"。
-				if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
-					seen := map[string]bool{}
-					for _, t := range one.grow {
-						seen[t.TaskCode] = true
-					}
-					for _, t := range mpTasks {
-						if growthPending(t) && !seen[t.TaskCode] {
-							one.grow = append(one.grow, t)
-						}
-					}
-				}
-				sort.Slice(one.grow, func(i, j int) bool { // 按 autoActions 顺序（依赖前置）
-					return autoActionIndex(one.grow[i].TaskCode) < autoActionIndex(one.grow[j].TaskCode)
+			it := p.scanAccountGrowth(a)
+			scanAccounts[i] = it
+			if len(it.Growth) > 0 {
+				sort.Slice(it.Growth, func(i, j int) bool { // 按 autoActions 顺序（依赖前置）
+					return autoActionIndex(it.Growth[i].TaskCode) < autoActionIndex(it.Growth[j].TaskCode)
 				})
+				scanned[i] = queueAccount{a: a, grow: it.Growth}
 			}
-			if len(one.grow) > 0 {
-				mu.Lock()
-				accts = append(accts, one)
-				mu.Unlock()
-			}
-		}(a)
+		}(i, a)
 	}
 	wg.Wait()
+	var accts []queueAccount
+	for _, one := range scanned {
+		if one.a != nil {
+			accts = append(accts, one)
+		}
+	}
+	for _, it := range scanAccounts {
+		if it.GrowthErr != "" {
+			scanErrorCount++
+		}
+	}
 
 	// 组装队列（账号分组，保持顺序）。
 	var items []queueItem
@@ -268,12 +318,16 @@ func (p *Panel) startGrowthQueue(concurrency int, notify bool) (total int, seq i
 		}
 	}
 	if len(items) == 0 {
-		log.Printf("panel: 队列启动：无可执行待办（全部账号任务已完成）")
+		log.Printf("panel: 队列启动：没有已确认可执行的成长待办（扫描错误 %d 个账号）", scanErrorCount)
 		q.mu.Lock()
 		q.running = false
 		q.startedAt = time.Time{}
 		q.mu.Unlock()
-		return 0, 0, "全部账号没有待办任务"
+		msg = "没有已确认可自动执行的成长任务"
+		if scanErrorCount > 0 {
+			msg = fmt.Sprintf("扫描失败：%d 个账号读取任务失败，无法确认待办", scanErrorCount)
+		}
+		return false, 0, 0, msg, scanAccounts, scanErrorCount
 	}
 
 	q.mu.Lock()
@@ -285,7 +339,7 @@ func (p *Panel) startGrowthQueue(concurrency int, notify bool) (total int, seq i
 
 	go p.runQueueItems(accts, items, concurrency, notify)
 	log.Printf("panel: 队列启动：%d 项（并发 %d）", len(items), concurrency)
-	return len(items), seq, ""
+	return true, len(items), seq, "", scanAccounts, scanErrorCount
 }
 
 // isRunning 队列是否正在跑（锁内读）。
@@ -297,7 +351,7 @@ func (q *queueState) isRunning() bool {
 
 // summaryLocked 本轮结果摘要（须持 q.mu）：状态计数 + 领奖合计 + 耗时 + 失败项代号。
 func (q *queueState) summaryLocked(dur time.Duration) string {
-	var done, skipped, failed int
+	var done, skipped, failed, awaiting, claimPending int
 	var credit, energy int64
 	var bad []string
 	for _, it := range q.items {
@@ -311,12 +365,22 @@ func (q *queueState) summaryLocked(dur time.Duration) string {
 			if len(bad) < 3 {
 				bad = append(bad, it.Code)
 			}
+		case "awaiting_progress":
+			awaiting++
+		case "claim_pending":
+			claimPending++
 		}
 		credit += it.Credit
 		energy += it.Energy
 	}
 	s := fmt.Sprintf("第 %d 轮 %d 项：完成 %d / 跳过 %d / 失败 %d · 领奖 %d 分 +%d 能 · 耗时 %s",
 		q.seq, len(q.items), done, skipped, failed, credit, energy, dur.Round(time.Second))
+	if awaiting > 0 {
+		s += fmt.Sprintf(" · 等待计分 %d", awaiting)
+	}
+	if claimPending > 0 {
+		s += fmt.Sprintf(" · 领奖待重试 %d", claimPending)
+	}
 	if len(bad) > 0 {
 		s += " · 失败项 " + strings.Join(bad, ",")
 	}
@@ -376,18 +440,12 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 					continue
 				}
 				p.queueMarkAt(i, "running", "")
-				var msg string
-				var credit, energy int64
-				var err error
+				outcome := autoTaskOutcome{Status: "error", Message: "未知的任务类型"}
 				if kind == "growth" {
-					msg, credit, energy, err = p.runGrowthQueued(one.a, code)
+					outcome = p.runGrowthQueued(one.a, code)
 				}
-				if err != nil {
-					p.queueMarkAt(i, "error", err.Error())
-				} else {
-					p.queueMarkAt(i, "done", msg)
-				}
-				p.queueRewardAt(i, credit, energy)
+				p.queueMarkAt(i, outcome.Status, outcome.Message)
+				p.queueRewardAt(i, outcome.Credit, outcome.Energy)
 				time.Sleep(reportGap) // 项间节流
 			}
 		}(one)
@@ -461,51 +519,14 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 	return len(codes)
 }
 
-// runGrowthQueued 执行单个成长任务（动作 + 回读 + 自动领奖；与
-// accountTaskAuto 同语义，结果以文字返回）。credit/energy 为本条实领奖励（汇总用）。
-func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (msg string, credit, energy int64, err error) {
+// runGrowthQueued 与单任务和 auto_all 共用完成判据（executeAutoTask），
+// 保留未入账（awaiting_progress）/领奖待重试（claim_pending）状态。
+func (p *Panel) runGrowthQueued(a *auth.Auth, code string) autoTaskOutcome {
 	act := autoActionFor(code)
 	if act == nil {
-		return "", 0, 0, fmt.Errorf("任务 %s 无自动动作", code)
+		return autoTaskOutcome{Status: "error", Message: fmt.Sprintf("任务 %s 无自动动作", code)}
 	}
-	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
-	before, err := p.taskByCode(a, code)
-	if err != nil {
-		return "", 0, 0, err
-	}
-	if before == nil {
-		return "该账号无此任务", 0, 0, nil
-	}
-	isMP := isMPTaskCode(code)
-	if before.Claimed {
-		return "已完成（已领取）", 0, 0, nil
-	}
-	msg, err = act.run(p, a)
-	if err != nil {
-		return "", 0, 0, err
-	}
-	var after *upstream.Task
-	if isMP {
-		after, _ = p.taskByCodeMP(a, code)
-	} else {
-		after, _ = p.taskByCodeWaiting(a, code)
-	}
-	if after != nil && after.Claimable {
-		var cerr error
-		if isMP {
-			credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, code)
-		} else {
-			credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, code)
-		}
-		if cerr == nil && (credit > 0 || energy > 0) {
-			msg += fmt.Sprintf("；自动领奖 +%d 分 +%d 能", credit, energy)
-		}
-	}
-	if after != nil {
-		msg += "（进度 " + taskProgressText(after) + "）"
-	}
-	log.Printf("panel: 队列 growth uid=%s code=%s: %s", a.UID, code, msg)
-	return msg, credit, energy, nil
+	return p.executeAutoTask(a, act)
 }
 
 // tasksQueueStatus 队列状态（轮询用）。

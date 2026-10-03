@@ -175,6 +175,13 @@ func (s *Scheduler) Reconfigure(p ScheduleParams) {
 	poke(s.rearmBalance)
 }
 
+// GrowthEnabled 返回当前成长任务自动执行开关（与面板热配置同步）。
+func (s *Scheduler) GrowthEnabled() bool {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	return !s.cfg.GrowthDisabled
+}
+
 // SetGrowthRunner 注入成长任务队列执行器（装配期调用一次；见 Config.GrowthRunner）。
 func (s *Scheduler) SetGrowthRunner(fn func() (int, string)) {
 	s.schedMu.Lock()
