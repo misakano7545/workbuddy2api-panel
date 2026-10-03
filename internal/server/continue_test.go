@@ -303,3 +303,39 @@ func TestContinueReaderKeepaliveOnEmptyFrames(t *testing.T) {
 		}
 	}
 }
+
+// TestContinueReaderSeg2StreamCutBlindRetry 续写段被上游断流（无 finish_reason
+// 直接 EOF）时盲重试一次：重试请求体与断流段逐字节相同（已收内容都进 assistant
+// 前缀，幂等不重复），客户端最终拿到完整内容。线上 17:50 的「32k 处截断」正是
+// 这条路径（15 次续写里 1 次上游断流）。
+func TestContinueReaderSeg2StreamCutBlindRetry(t *testing.T) {
+	// 断流段：有正文、无 finish_reason、无 [DONE]，直接 EOF。
+	segCut := `data: {"id":"cmpl-2","choices":[{"index":0,"delta":{"content":"部分"}}]}` + "\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) {
+		if call == 1 {
+			return 200, segCut
+		}
+		return 200, testSeg2Text
+	})
+	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(testSeg1Text)))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	s := string(out)
+	if len(*reqs) != 2 {
+		t.Fatalf("盲重试后应有 2 次续写请求，实际 %d", len(*reqs))
+	}
+	if !strings.Contains((*reqs)[1], "部分") {
+		t.Fatalf("重试请求应携带断流段已收内容（幂等不重复）:\n%s", (*reqs)[1])
+	}
+	for _, want := range []string{"你好", "世界", "部分", "继续", `"finish_reason":"stop"`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("客户端可见流缺 %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, `"finish_reason":"length"`) {
+		t.Fatalf("续写成功后 length 终态不应外泄:\n%s", s)
+	}
+}

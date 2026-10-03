@@ -72,6 +72,8 @@ type continueReader struct {
 	errSeen  bool
 	id       string
 
+	blindRetried bool // 断流盲重试已用（每请求一次；见 canContinue）
+
 	lastClientAt time.Time // 上次客户端可见输出/keepalive 的时刻（静默节流）
 
 	usage map[string]any // 跨段累计 usage（数字叶子求和）
@@ -258,14 +260,23 @@ func (r *continueReader) endSegment(sawDone bool) {
 		r.cur.Close()
 	}
 	if r.canContinue(sawDone) {
+		// 必须是「断流盲重试」还是「length 截断续写」（r.finish 在续写成功后被重置）。
+		blind := !sawDone && r.finish == ""
 		body, err := r.continuationBody()
 		if err == nil {
 			rc, status, _, terr := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta)
 			if terr == nil && status < 400 && rc != nil {
 				r.seg++
+				if blind {
+					r.blindRetried = true
+				}
 				r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
-				log.Printf("[continue] seg=%d model=%s text=%dB reason=%dB -> 续写",
-					r.seg, bareModelOf(r.body), r.text.Len(), r.reason.Len())
+				blindNote := ""
+				if blind {
+					blindNote = " (断流盲重试)"
+				}
+				log.Printf("[continue] seg=%d model=%s text=%dB reason=%dB%s -> 续写",
+					r.seg, bareModelOf(r.body), r.text.Len(), r.reason.Len(), blindNote)
 				r.finish, r.tail = "", nil
 				return
 			}
@@ -307,7 +318,10 @@ func (r *continueReader) canContinue(sawDone bool) bool {
 	case r.limitSet:
 		return false
 	case !sawDone && r.finish == "":
-		return false
+		// 段无 finish 结束 = 上游偶发断流（线上实测：15 次续写里 1 次）。续写段
+		// 允许一次盲重试：重试请求体与断流段逐字节相同、已收内容都在 assistant
+		// 前缀里，幂等不重复。主段不给盲重试（那是请求本身失败，交由既有降级）。
+		return r.seg > 0 && !r.blindRetried
 	case r.finish != "length":
 		return false
 	case r.toolSeen:
