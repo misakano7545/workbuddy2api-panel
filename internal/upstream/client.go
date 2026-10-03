@@ -1860,12 +1860,11 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 					CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
 					CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
 					CycleCapacitySize   int64  `json:"CycleCapacitySize"`
-					// 到期时间字段名在上游存在三种口径：ExpiredTime / PackageEndTime
-					// 在 CN/global 实测字段全集里均恒 miss（见 UserResourceDetailed
-					// 处注释），真实下发的是 CycleEndTime——三者都读，谁有值用谁。
-					ExpiredTime    string `json:"ExpiredTime"`
-					PackageEndTime string `json:"PackageEndTime"`
-					CycleEndTime   string `json:"CycleEndTime"`
+					// DeductionEndTime 真实扣费截止（epoch 毫秒）；CycleEndTime 只是
+					// 月度计量周期，套餐型包两者可差数年（见 packageEndAt 注释）。
+					DeductionEndTime int64  `json:"DeductionEndTime"`
+					ExpiredTime      string `json:"ExpiredTime"`
+					CycleEndTime     string `json:"CycleEndTime"`
 					// 发放时刻（epoch 毫秒）。
 					CreateTime     int64  `json:"CreateTime"`
 					PackageCode    string `json:"PackageCode"`
@@ -1888,18 +1887,9 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 			SubProductCode: p.SubProductCode,
 			SubProductName: p.SubProductName,
 		}
-		switch {
-		case p.ExpiredTime != "":
-			cp.EndTime = p.ExpiredTime
-		case p.PackageEndTime != "":
-			cp.EndTime = p.PackageEndTime
-		default:
-			cp.EndTime = p.CycleEndTime
-		}
-		if cp.EndTime != "" {
-			if end, perr := time.ParseInLocation(packageEndLayout, cp.EndTime, softRateResetLoc); perr == nil {
-				cp.ExpiresAt = end.UnixMilli()
-			}
+		if end, ok := packageEndAt(p.DeductionEndTime, p.ExpiredTime, p.CycleEndTime); ok {
+			cp.EndTime = end.Format(packageEndLayout)
+			cp.ExpiresAt = end.UnixMilli()
 		}
 		// CreateTime 是 epoch 毫秒；0 表示上游没给，留空而不是伪造 1970。
 		if p.CreateTime > 0 {
@@ -1952,6 +1942,22 @@ func parsePackageEndTime(raw string) (time.Time, bool) {
 	return t, true
 }
 
+// packageEndAt 取包的「真实到期时刻」，优先 DeductionEndTime（扣费截止，epoch 毫秒）
+// ——它是唯一直达扣费语义的字段。套餐型包的 CycleEndTime 只是**月度计量周期**
+// （月底清零），扣费截止却在数年后；用 CycleEndTime 会把长期积分误判成「快到期」
+// 而优先烧掉（实测 2026-10-03：「CodeBuddy 个人体验版」cycle=2026-10-31 而
+// deduction=2034-12-24，余额 500 分）。回退 ExpiredTime（仅在包失效后才回填）
+// → CycleEndTime。都缺 → 无到期（保守：不参与「先烧快到期的」排序）。
+func packageEndAt(deductionMS int64, expired, cycleEnd string) (time.Time, bool) {
+	if deductionMS > 0 {
+		return time.UnixMilli(deductionMS).In(softRateResetLoc), true
+	}
+	if t, ok := parsePackageEndTime(expired); ok {
+		return t, true
+	}
+	return parsePackageEndTime(cycleEnd)
+}
+
 // UserResourceDetailed 在 UserResource 基础上额外返回「快过期」积分子集：
 // soon > 0 且套餐 CycleEndTime 解析成功且到期时刻 ≤ now+soon 的余额计入 expiring
 // （pool 据此优先消耗，避免官方活动赠送的奖励积分到期作废）；soon ≤ 0 时 expiring
@@ -1997,8 +2003,11 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 		Response struct {
 			Data struct {
 				Accounts []struct {
-					PackageName         string `json:"PackageName"`
-					CycleEndTime        string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
+					PackageName string `json:"PackageName"`
+					// DeductionEndTime 真实扣费截止（epoch 毫秒）；CycleEndTime 只是
+					// 月度计量周期（见 packageEndAt 注释）。
+					DeductionEndTime    int64  `json:"DeductionEndTime"`
+					CycleEndTime        string `json:"CycleEndTime"`
 					CapacitySize        int64  `json:"CapacitySize"`
 					CapacityRemain      int64  `json:"CapacityRemain"`
 					CapacityUsed        int64  `json:"CapacityUsed"`
@@ -2032,7 +2041,7 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 		if r <= 0 {
 			continue
 		}
-		end, ok := parsePackageEndTime(acct.CycleEndTime)
+		end, ok := packageEndAt(acct.DeductionEndTime, "", acct.CycleEndTime)
 		if !ok || !end.After(now) {
 			continue
 		}

@@ -3,6 +3,7 @@ package upstream
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -891,5 +892,41 @@ func TestUserResourceDetailedWithExpirySnapshot(t *testing.T) {
 	}
 	if earliestRemaining != 25 || !earliestAt.Equal(soon) {
 		t.Fatalf("earliest=%v/%d want %v/25", earliestAt, earliestRemaining, soon)
+	}
+}
+
+// TestDeductionEndTimePreferredOverCycleEnd 套餐型包的到期判据取 DeductionEndTime
+// （真实扣费截止），不是 CycleEndTime（只是月度计量周期）——后者会把 8 年有效的
+// 「个人体验版」积分误判成「快到期」而优先烧掉（2026-10-03 实测：cycle=2026-10-31
+// vs deduction=2034-12-24，余额 500）。两条消费路径（逐包明细 / 快到期快照）同源。
+func TestDeductionEndTimePreferredOverCycleEnd(t *testing.T) {
+	now := time.Now().In(softRateResetLoc)
+	cycle := now.Add(20 * 24 * time.Hour).Truncate(time.Second) // 月度周期：20 天后
+	deduction := now.AddDate(8, 0, 0).Truncate(time.Second)     // 真实扣费截止：8 年后
+	payload := `{"code":0,"data":{"Response":{"Data":{"Accounts":[` +
+		`{"PackageName":"trial","CycleCapacitySize":500,"CycleCapacityRemain":500,"CycleCapacityUsed":0,` +
+		`"CycleEndTime":"` + cycle.Format(packageEndLayout) + `",` +
+		`"DeductionEndTime":` + fmt.Sprintf("%d", deduction.UnixMilli()) + `}` +
+		`]}}}}`
+	c := testClient(func(r *http.Request) (*http.Response, error) { return jsonResp(200, payload), nil })
+
+	packs, _, _, err := c.CreditPackages(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err != nil {
+		t.Fatalf("packages: %v", err)
+	}
+	if len(packs) != 1 || packs[0].ExpiresAt != deduction.UnixMilli() {
+		t.Fatalf("逐包到期应取 deduction %v，实得 %+v", deduction.UnixMilli(), packs)
+	}
+	_, _, expiring, earliestAt, _, err := c.UserResourceDetailedWithExpiry(
+		&auth.Auth{AccessToken: "at", UID: "u1"}, 48*time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("resource: %v", err)
+	}
+	if expiring != 0 {
+		t.Fatalf("8 年后到期的包不得计入 48h 快到期窗口：expiring=%d", expiring)
+	}
+	if !earliestAt.Equal(deduction) {
+		t.Fatalf("earliestAt=%v want %v", earliestAt, deduction)
 	}
 }
