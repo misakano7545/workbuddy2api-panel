@@ -854,7 +854,26 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
-	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
+	// 目录为纯动态（无静态兜底）：必须用假上游。此前这里用 upstream.New() 会真打
+	// codebuddy.cn——CI runner 不通时 10s 超时、models count=0（2026-10-03 实测
+	// flaky：同一提交 tag 构建过、main 构建挂）。清缓存避免其它用例的目录残留。
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.ids = nil
+	dynamicModelsCache.fetched = time.Time{}
+	dynamicModelsCache.lastFail = time.Time{}
+	dynamicModelsCache.Unlock()
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		// 真实在册模型名 + 正常量级 maxOutputTokens：目录会丢弃编造名与量级过小的条目。
+		return 200, `{"code":0,"data":{"models":[` +
+			`{"id":"glm-5.2","maxInputTokens":200000,"maxOutputTokens":32000},` +
+			`{"id":"kimi-k3-1","maxInputTokens":1000,"maxOutputTokens":8192},` +
+			`{"id":"deepseek-v4-flash","maxInputTokens":1000,"maxOutputTokens":8192},` +
+			`{"id":"hy3","maxInputTokens":1000,"maxOutputTokens":8192},` +
+			`{"id":"deepseek-v4.1-flash","maxInputTokens":1000,"maxOutputTokens":8192},` +
+			`{"id":"glm-5.1","maxInputTokens":1000,"maxOutputTokens":8192}],` +
+			`"agents":[{"name":"cli","models":["glm-5.2","kimi-k3-1","deepseek-v4-flash","hy3","deepseek-v4.1-flash","glm-5.1"]}]}}`, false
+	})
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: up})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
