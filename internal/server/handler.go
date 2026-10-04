@@ -152,7 +152,8 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
-	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(h.imagesGenerations))
+	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, false) }))
+	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) }))
 	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))
 	h.mux.HandleFunc("POST /messages", h.withAnthropicAuth(h.messages))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
@@ -177,7 +178,8 @@ func NewHandler(cfg Config) *Handler {
 // /v1/responses，曾因此整类请求无来源、不入归档）。
 func isChatEntry(path string) bool {
 	switch path {
-	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages":
+	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages",
+		"/v1/images/generations", "/v1/images/edits":
 		return true
 	}
 	return false
@@ -467,6 +469,35 @@ func (h *Handler) modelList() []map[string]any {
 				}
 			}
 			out = append(out, entry)
+		}
+	}
+	// 出图模型（目录里被 tag 剔掉的 text-to-image / image-to-image）：对话列表照旧不含它们，
+	// 这里以 image_generation=true 单列——客户端据此发现可用的出图模型名，不会误发对话。
+	out = append(out, h.imageModelEntries()...)
+	return out
+}
+
+// imageModelEntries /v1/models 里的出图模型条目（来自最近一次目录解析的旁路留存，
+// 零额外上游请求；尚未探测过该域时为空）。字段只给确定值：不编 context/output 上限。
+func (h *Handler) imageModelEntries() []map[string]any {
+	if h.cfg.Upstream == nil {
+		return nil
+	}
+	realms := []string{"cn"}
+	if h.cfg.GlobalEnabled {
+		realms = append(realms, "global")
+	}
+	var out []map[string]any
+	for _, realm := range realms {
+		for _, mi := range h.cfg.Upstream.ImageModels(realm) {
+			entry := map[string]any{
+				"id":               realm + ":" + mi.ID,
+				"object":           "model",
+				"created":          1753600000,
+				"owned_by":         "workbuddy",
+				"image_generation": true,
+			}
+			out = append(out, applyModelInfoFields(entry, mi))
 		}
 	}
 	return out

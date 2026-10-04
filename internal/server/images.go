@@ -1,47 +1,57 @@
-// images.go 文生图端点 POST /v1/images/generations（OpenAI 形状）。
+// images.go 图像端点：POST /v1/images/generations（文生图）与 /v1/images/edits（图生图）。
 //
-// 上游图像模型不进 /v1/models（目录按 tag text-to-image 剔除，见 nonChatModel），所以
-// 模型名不走目录校验，直接按 realm 前缀路由到对应账号池：
+// 上游图像模型不进**对话**列表（目录按 tag text-to-image 剔除，选它发对话会 11102），
+// 所以模型名不走目录校验，按 realm 前缀路由到对应账号池：
 //
 //	cn:hunyuan-image-alpha         国内版（实测 200 + 签名 COS URL）
 //	global:gpt-image-2.5-sunburst  国际版（混元在国际版无路由，回 14401）
 //
-// 请求体只把 model 换成裸名（前缀是网关路由协议，上游只认裸名），其余原样透传；回程把
-// 上游 data 原样写出——它已经是 {created,data:[{url}],usage}，不转存、不改写。
-// ponytail: 单次尝试、不换号不冷却（图像按次人工触发、量小）；要抗故障再接 chat 路径的
-// 轮转与 applyErrorPolicy。
+// 请求体只把 model 换成裸名（前缀是网关路由协议，上游只认裸名），其余原样透传；
+// multipart 请求（OpenAI SDK 的 images.edit 走这条）就地转成上游要的 JSON（图片转 data URL）。
+// 回程把上游 data 原样写出——它已是 {created,data:[{url}],usage}，不转存、不改写。
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
 // defaultImageModel 请求未带 model 时的缺省图像模型（国内版；realm 由前缀决定）。
 const defaultImageModel = "cn:hunyuan-image-alpha"
 
-func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+// imageAttempts 失败换号上限（与 chat 路径同量级：图像按次人工触发，3 次足够绕开坏号）。
+const imageAttempts = 3
+
+// imagesGenerations / imagesEdits 共用实现；edit 决定上游路径与入参校验。
+func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
+	start := time.Now()
+	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
-	var req map[string]any
-	if json.Unmarshal(body, &req) != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body")
+	req, err := imageRequest(r, raw, edit)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	prompt, _ := req["prompt"].(string)
 	if strings.TrimSpace(prompt) == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
-			"prompt is required（例：{\"model\":\""+defaultImageModel+"\",\"prompt\":\"一只猫\"}）")
+			`prompt is required（例：{"model":"`+defaultImageModel+`","prompt":"一只猫"}）`)
 		return
 	}
 	model, _ := req["model"].(string)
@@ -56,24 +66,222 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a := h.cfg.Pool.PickExcludingForRealm(map[string]bool{}, bare, realm)
-	if a == nil {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "no_account",
-			"没有可用的 "+realm+" 账号（图像只在 "+realm+" 域出图）")
-		return
+	// 记账：与 chat 同一条管道（请求台账归档由 ServeHTTP 的 isChatEntry 接管，
+	// 这里补账号/模型/用量/扣费 → stdout 流水行 + 面板「请求记录」+ 用量与成本账本）。
+	st := &chatStat{start: start, model: bare, mode: imageMode(edit), toks: -1, budget: h.budget}
+	if tr := requestTraceFrom(r); tr != nil {
+		tr.stat = st
+		st.requestID = tr.id
+		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
 	}
-	data, err := h.cfg.Upstream.ImageGenerations(a, json.RawMessage(out))
-	if err != nil {
-		status := http.StatusBadGateway
-		var ue *upstream.Error
-		if errors.As(err, &ue) && ue.Status >= 400 {
-			status = ue.Status // 上游状态码（如 14401 的 400）比一律 502 更能说明问题
+	defer st.done()
+
+	modelRate := ""
+	if h.cfg.Upstream != nil {
+		modelRate = h.cfg.Upstream.ModelRate(realm, bare)
+	}
+	tried := map[string]bool{}
+	var lastErr error
+	for attempt := 0; attempt < imageAttempts; attempt++ {
+		a := h.cfg.Pool.PickExcludingForRealm(tried, bare, realm)
+		if a == nil {
+			break
 		}
-		log.Printf("images %s model=%s: %v", logfmt.Label(a.UID, a.Nickname), bare, err)
-		writeOpenAIError(w, status, "upstream_error", err.Error())
+		tried[a.UID] = true
+		st.uid, st.nick = a.UID, a.Nickname
+		st.attempts = attempt + 1
+
+		var data []byte
+		if edit {
+			data, err = h.cfg.Upstream.ImageEdits(a, json.RawMessage(out))
+		} else {
+			data, err = h.cfg.Upstream.ImageGenerations(a, json.RawMessage(out))
+		}
+		if err != nil {
+			lastErr = err
+			var ue *upstream.Error
+			if errors.As(err, &ue) {
+				// 与 chat 同一套失败处置（冷却/熔断/模型负缓存/12153 计数）。
+				h.applyErrorPolicy(a.UID, ue.Kind, ue.Msg, bare, ue)
+			}
+			log.Printf("images %s model=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), bare, attempt+1, err)
+			continue
+		}
+		lastErr = nil
+		recordImageUsage(h, st, realm, a.UID, bare, modelRate, data, start)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
 		return
 	}
-	log.Printf("images %s model=%s: 出图 ok（%dB）", logfmt.Label(a.UID, a.Nickname), bare, len(data))
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
+
+	status, code := http.StatusBadGateway, "upstream_error"
+	var ue *upstream.Error
+	switch {
+	case len(tried) == 0: // 一个可用账号都没有：没有可重试的对象，明确说清楚
+		status, code = http.StatusServiceUnavailable, "no_account"
+		lastErr = fmt.Errorf("没有可用的 %s 账号（图像只在 %s 域出图）", realm, realm)
+	case errors.As(lastErr, &ue) && ue.Status >= 400:
+		status = ue.Status // 上游状态码（如 14401 的 400）比一律 502 更能说明问题
+	}
+	st.status = status
+	st.outcome = ""
+	log.Printf("images model=%s realm=%s: 全部尝试失败（%d 个账号）：%v", bare, realm, len(tried), lastErr)
+	writeOpenAIError(w, status, code, lastErr.Error())
+}
+
+// imageMode 流水行的 mode 列。
+func imageMode(edit bool) string {
+	if edit {
+		return "edit"
+	}
+	return "image"
+}
+
+// recordImageUsage 把上游 data 里的用量落到三个既有的账：流水行（st）、成本账本
+// （NoteModelCost）、用量时序（usage.Recorder）。上游 usage 缺失时只记成功、不编数。
+func recordImageUsage(h *Handler, st *chatStat, realm, uid, bare, modelRate string, data []byte, start time.Time) {
+	st.status = http.StatusOK
+	st.outcome = "success"
+	var env struct {
+		Usage struct {
+			InputTokens  int64   `json:"input_tokens"`
+			OutputTokens int64   `json:"output_tokens"`
+			TotalTokens  int64   `json:"total_tokens"`
+			Credit       float64 `json:"credit"`
+			ImageCounts  int64   `json:"output_image_counts"`
+		} `json:"usage"`
+	}
+	_ = json.Unmarshal(data, &env) // 上游省略 usage 时零值：下面按「有没有真值」决定是否记账
+	u := env.Usage
+	st.promptTokens, st.completionTokens, st.totalTokens = u.InputTokens, u.OutputTokens, u.TotalTokens
+	if u.TotalTokens > 0 {
+		st.toks = int(u.TotalTokens)
+	}
+	if u.Credit > 0 {
+		st.credit, st.hasCredit = u.Credit, true
+		h.cfg.Pool.NoteModelCost(uid, bare, u.Credit, int(u.TotalTokens))
+	}
+	imgs := u.ImageCounts
+	if imgs == 0 {
+		imgs = 1
+	}
+	log.Printf("images %s model=%s: 出图 %d 张 credit=%.2f 用时=%s",
+		logfmt.Label(uid, st.nick), bare, imgs, u.Credit, time.Since(start).Round(time.Millisecond))
+	if h.cfg.Usage != nil {
+		h.cfg.Usage.Add(time.Now(), realm, uid, bare, usage.Delta{
+			PromptTokens:    u.InputTokens,
+			HasPromptTokens: u.InputTokens > 0,
+			TotalTokens:     u.TotalTokens,
+			HasTotal:        u.TotalTokens > 0,
+			LatencyMs:       time.Since(start).Milliseconds(),
+			HasLatency:      true,
+			Credit:          u.Credit,
+			HasCredit:       u.Credit > 0,
+			ModelRate:       modelRate,
+		}, u.TotalTokens > 0)
+	}
+}
+
+// imageRequest 解析请求体：JSON 原样用（只把 image 归一成数组）；multipart
+// （OpenAI SDK 的 images.edit）就地转成上游要的 JSON，图片转 data URL。
+func imageRequest(r *http.Request, raw []byte, edit bool) (map[string]any, error) {
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		if !edit {
+			return nil, errors.New("文生图请用 application/json（multipart 只用于图生图）")
+		}
+		return multipartToImageJSON(raw, ct)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, errors.New("invalid JSON body")
+	}
+	if edit {
+		// OpenAI 的 images.edit 用 image（单值或数组）；上游要 image 数组。
+		imgs, _ := req["image"].([]any)
+		if len(imgs) == 0 {
+			if one, ok := req["image"].(string); ok && one != "" {
+				imgs = []any{one}
+			}
+		}
+		if len(imgs) == 0 {
+			return nil, errors.New("图生图需要 image（data URL / URL，或 image 数组）")
+		}
+		req["image"] = imgs
+	}
+	return req, nil
+}
+
+// multipartToImageJSON multipart 表单 → 上游 JSON：文件字段转 data URL（image[] / mask），
+// 其余字段按字符串收（n 转数字）。
+func multipartToImageJSON(raw []byte, ct string) (map[string]any, error) {
+	br := multipart.NewReader(strings.NewReader(string(raw)), boundaryOf(ct))
+	form, err := br.ReadForm(int64(len(raw)) + 1024)
+	if err != nil {
+		return nil, fmt.Errorf("解析 multipart 失败: %w", err)
+	}
+	out := map[string]any{}
+	for k, vs := range form.Value {
+		if len(vs) == 0 {
+			continue
+		}
+		if k == "n" {
+			if n, err := strconv.Atoi(vs[0]); err == nil {
+				out[k] = n
+				continue
+			}
+		}
+		out[k] = vs[0]
+	}
+	for field, files := range form.File {
+		var list []any
+		for _, fh := range files {
+			du, err := fileToDataURL(fh)
+			if err != nil {
+				return nil, err
+			}
+			list = append(list, du)
+		}
+		switch field {
+		case "mask":
+			out["mask"] = list[0]
+		case "image", "images":
+			out["image"] = list
+		default:
+			out[field] = list
+		}
+	}
+	if _, ok := out["image"]; !ok {
+		return nil, errors.New("图生图需要 image 文件")
+	}
+	return out, nil
+}
+
+// fileToDataURL 读一个上传文件并包成 data URL（上游 edits 的入参形态，实测接受）。
+func fileToDataURL(fh *multipart.FileHeader) (string, error) {
+	f, err := fh.Open()
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 8<<20)) // 8MB 上限：上游对超大 base64 会拒
+	if err != nil {
+		return "", err
+	}
+	ct := fh.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "image/png"
+	}
+	return "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(b), nil
+}
+
+// boundaryOf 从 Content-Type 里取 multipart boundary。
+func boundaryOf(ct string) string {
+	for _, part := range strings.Split(ct, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "boundary=") {
+			return strings.Trim(part[len("boundary="):], `"`)
+		}
+	}
+	return ""
 }

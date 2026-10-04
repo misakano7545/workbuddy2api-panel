@@ -204,6 +204,8 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 			}
 			ids := make([]string, 0, len(byID))
 			outInfos := make([]ModelInfo, 0, len(byID))
+			// 出图模型旁路留存（/v1/models 以 image_generation 标记列出），照旧不进对话列表。
+			c.stashImageModels("global", byID)
 			for _, mi := range byID {
 				if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {
 					continue

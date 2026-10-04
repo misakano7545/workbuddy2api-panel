@@ -606,6 +606,11 @@ type apiEnvelope struct {
 type Client struct {
 	HTTP *http.Client
 
+	// imageMu/imageModels 出图模型旁路留存（见 images.go）：目录按 tag 剔掉它们后
+	// 在此留存，供 /v1/models 单列。按 realm 分桶。
+	imageMu     sync.Mutex
+	imageModels map[string][]ModelInfo
+
 	// ChatHTTP 聊天 SSE 专用 client：无总时长上限（Timeout=0），首字节由
 	// Transport.ResponseHeaderTimeout 约束，流中空闲由 IdleTimeout 约束。
 	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
@@ -1395,6 +1400,8 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 出图模型旁路留存（供 /v1/models 以 image_generation 标记列出），下面照旧不进对话列表。
+	c.stashImageModels("cn", byID)
 	out := make([]ModelInfo, 0, len(byID))
 	for _, mi := range byID {
 		if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {

@@ -870,7 +870,9 @@ func TestModelsEndpoint(t *testing.T) {
 			`{"id":"deepseek-v4-flash","maxInputTokens":1000,"maxOutputTokens":8192},` +
 			`{"id":"hy3","maxInputTokens":1000,"maxOutputTokens":8192},` +
 			`{"id":"deepseek-v4.1-flash","maxInputTokens":1000,"maxOutputTokens":8192},` +
-			`{"id":"glm-5.1","maxInputTokens":1000,"maxOutputTokens":8192}],` +
+			`{"id":"glm-5.1","maxInputTokens":1000,"maxOutputTokens":8192},` +
+			// 出图模型：目录把它从对话列表剔掉，但应以 image_generation=true 单列出来。
+			`{"id":"hunyuan-image-alpha","name":"Hunyuan Image Alpha","tags":["text-to-image"]}],` +
 			`"agents":[{"name":"cli","models":["glm-5.2","kimi-k3-1","deepseek-v4-flash","hy3","deepseek-v4.1-flash","glm-5.1"]}]}}`, false
 	})
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: up})
@@ -897,6 +899,17 @@ func TestModelsEndpoint(t *testing.T) {
 	}
 	if !found {
 		t.Error("cn:glm-5.2 missing")
+	}
+	// 出图模型单列且带标记；对话列表口径不变（仍不含它）
+	imgOK := false
+	for _, m := range data {
+		e := m.(map[string]any)
+		if e["id"] == "cn:hunyuan-image-alpha" {
+			imgOK = e["image_generation"] == true
+		}
+	}
+	if !imgOK {
+		t.Errorf("/v1/models 应列出 cn:hunyuan-image-alpha 且带 image_generation=true：%v", data)
 	}
 }
 

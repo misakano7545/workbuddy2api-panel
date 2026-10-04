@@ -3,13 +3,16 @@ package server
 import (
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -139,5 +142,158 @@ func TestImagesGenerationsNoAccountForRealm(t *testing.T) {
 	}
 	if len(f.paths) != 0 {
 		t.Fatalf("不该发起上游调用，实际落到 %v", f.paths)
+	}
+}
+
+// TestImagesRecordedInPanel 出图必须进面板可见的三本账：请求台账事件（请求记录/归档）、
+// 模型成本账本（积分）、用量时序。用 RequestLog 的快照断言事件里的账号/模型/积分。
+func TestImagesRecordedInPanel(t *testing.T) {
+	f := &imageFake{status: 200, body: imageOK}
+	reqLog := reqlog.New(reqlog.Config{})
+	h := NewHandler(Config{
+		Pool:             imagePool(),
+		Upstream:         f.client(),
+		RequestLog:       reqLog,
+		RecordClientInfo: true, // 来源采集与 chat 同开关
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/images/generations",
+		strings.NewReader(`{"model":"cn:hunyuan-image-alpha","prompt":"一只猫"}`))
+	req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
+	req.Header.Set("User-Agent", "test-client/1.0")
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Request-Id"); !strings.HasPrefix(got, "req-") {
+		t.Fatalf("图像请求也应有 X-Request-Id，实际 %q", got)
+	}
+	s := reqLog.Snapshot()
+	if len(s.Recent) != 1 {
+		t.Fatalf("请求台账应记 1 条，实际 %d 条：%+v", len(s.Recent), s.Recent)
+	}
+	e := s.Recent[0]
+	if e.Path != "/v1/images/generations" || e.Model != "hunyuan-image-alpha" || !e.OK {
+		t.Fatalf("事件 path/model/ok 不对：%+v", e)
+	}
+	if e.Account == "" || e.Credit != 5.71 || e.TotalTokens != 854 {
+		t.Fatalf("事件应带账号与上游用量（credit/tokens）：%+v", e)
+	}
+	if e.ClientIP == "" || !strings.Contains(e.UserAgent, "test-client") {
+		t.Fatalf("事件应带来源（IP/UA）：%+v", e)
+	}
+	// 成本账本：出图扣费必须落进账号的模型成本（面板积分构成据此显示）
+	st, _ := h.cfg.Pool.Status("c1")
+	found := false
+	for _, mc := range st.ModelCosts {
+		if mc.Model == "hunyuan-image-alpha" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("NoteModelCost 未落账，model_costs=%+v", st.ModelCosts)
+	}
+}
+
+// TestImagesEdits 图生图：JSON（data URL）与 multipart（OpenAI SDK 形态）都要能转成
+// 上游要的 JSON——image 数组、其余字段透传。
+func TestImagesEdits(t *testing.T) {
+	f := &imageFake{status: 200, body: imageOK}
+	h := NewHandler(Config{Pool: imagePool(), Upstream: f.client()})
+
+	// ① JSON：image 单值归一成数组
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/images/edits",
+		strings.NewReader(`{"model":"cn:hunyuan-image-alpha","prompt":"改成蓝色","image":"data:image/png;base64,AAAA"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if f.paths[0] != "/v2/images/edits" {
+		t.Fatalf("应打上游 edits 路由，实际 %s", f.paths[0])
+	}
+	var sent map[string]any
+	_ = json.Unmarshal([]byte(f.bodies[0]), &sent)
+	if imgs, _ := sent["image"].([]any); len(imgs) != 1 || imgs[0] != "data:image/png;base64,AAAA" {
+		t.Fatalf("image 应归一成数组：%v", sent["image"])
+	}
+
+	// ② multipart：文件字段转 data URL
+	var buf strings.Builder
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("model", "cn:hunyuan-image-alpha")
+	_ = mw.WriteField("prompt", "改成蓝色")
+	_ = mw.WriteField("n", "1")
+	fw, _ := mw.CreateFormFile("image", "in.png")
+	_, _ = fw.Write([]byte("PNGDATA"))
+	_ = mw.Close()
+	f.paths, f.bodies = nil, nil
+	rd := httptest.NewRequest("POST", "/v1/images/edits", strings.NewReader(buf.String()))
+	rd.Header.Set("Content-Type", mw.FormDataContentType())
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, rd)
+	if rec.Code != 200 {
+		t.Fatalf("multipart code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var sent2 map[string]any
+	_ = json.Unmarshal([]byte(f.bodies[0]), &sent2)
+	imgs, _ := sent2["image"].([]any)
+	// 文件字段转 data URL：mime 用上传时声明的（Go 的 CreateFormFile 默认
+	// application/octet-stream）；载荷是 base64 原文。
+	if len(imgs) != 1 || !strings.HasPrefix(imgs[0].(string), "data:") ||
+		!strings.Contains(imgs[0].(string), ";base64,UE5HREFUQQ==") {
+		t.Fatalf("multipart 的 image 应转成 data URL：%v", sent2["image"])
+	}
+	if sent2["n"] != float64(1) || sent2["prompt"] != "改成蓝色" {
+		t.Fatalf("multipart 其余字段应透传且 n 转数字：%v", sent2)
+	}
+
+	// ③ 缺图 → 400（图生图必须有 image）
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/images/edits",
+		strings.NewReader(`{"model":"cn:hunyuan-image-alpha","prompt":"x"}`)))
+	if rec.Code != 400 {
+		t.Fatalf("缺 image 应 400，实际 %d", rec.Code)
+	}
+}
+
+// TestImagesRetryRotatesAccount 出图失败要换号：第一个号吃 429 软限流后应自动换第二个号
+// 成功，且失败号被冷却（下次选号跳过）。
+func TestImagesRetryRotatesAccount(t *testing.T) {
+	calls := 0
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			authz := r.Header.Get("Authorization")
+			if strings.Contains(authz, "at-bad") {
+				return &http.Response{StatusCode: 429,
+					Header: http.Header{"Content-Type": []string{"application/json"}},
+					Body:   io.NopCloser(strings.NewReader(`{"code":6004,"msg":"rate limited"}`))}, nil
+			}
+			return &http.Response{StatusCode: 200,
+				Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body:   io.NopCloser(strings.NewReader(imageOK))}, nil
+		})},
+		ChatBaseCN:    "https://cn.example",
+		BillingBaseCN: "https://cn.example",
+	}
+	// 两个号：随机源固定为 0 时先选 bad（插入顺序），失败后不应再选它
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/images/generations",
+		strings.NewReader(`{"model":"cn:hunyuan-image-alpha","prompt":"一只猫"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("换号后应成功：code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if calls != 2 {
+		t.Fatalf("应恰好 2 次上游调用（坏号 + 好号），实际 %d", calls)
+	}
+	bad, _ := p.Status("bad")
+	if !bad.Cooling || bad.Until.Before(time.Now()) {
+		t.Fatalf("坏号应被冷却（applyErrorPolicy）：%+v", bad)
 	}
 }
