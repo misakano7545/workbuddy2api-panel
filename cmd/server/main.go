@@ -193,7 +193,9 @@ func main() {
 		KeepaliveDisabled:  !cfg.Schedule.KeepaliveEnabled,
 		BlackcatDisabled:   !cfg.Schedule.BlackcatEnabled,
 		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
-		JitterMinutes:      cfg.Schedule.JitterMinutes,
+		// 保号类四任务是否覆盖禁用账号（缺省 false = 禁用即跳过，保持既有行为）。
+		IncludeDisabledInTasks: cfg.Schedule.IncludeDisabledInTasks,
+		JitterMinutes:          cfg.Schedule.JitterMinutes,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -239,6 +241,9 @@ func main() {
 		log.Printf("余额后台刷新已禁用（schedule.balance_refresh_enabled=false）")
 	case cfg.BalanceRefreshInterval > 0:
 		log.Printf("余额后台刷新：每 %s（签到时点照常额外刷新）", cfg.BalanceRefreshInterval)
+	}
+	if cfg.Schedule.IncludeDisabledInTasks {
+		log.Printf("保号任务覆盖禁用账号（schedule.include_disabled_in_tasks=true）：禁用号仍签到 / 活跃 / 保活 / 刷新余额，但不参与选号")
 	}
 
 	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
@@ -587,12 +592,13 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		BlackcatHours:  newCfg.Schedule.BlackcatHours,
 		GrowthHours:    newCfg.Schedule.GrowthHours,
 
-		CheckinDisabled:   !newCfg.Schedule.CheckinEnabled,
-		TravelDisabled:    !newCfg.Schedule.TravelEnabled,
-		ActivityDisabled:  !newCfg.Schedule.ActivityEnabled,
-		KeepaliveDisabled: !newCfg.Schedule.KeepaliveEnabled,
-		BlackcatDisabled:  !newCfg.Schedule.BlackcatEnabled,
-		GrowthDisabled:    !newCfg.Schedule.GrowthEnabled,
+		CheckinDisabled:        !newCfg.Schedule.CheckinEnabled,
+		TravelDisabled:         !newCfg.Schedule.TravelEnabled,
+		ActivityDisabled:       !newCfg.Schedule.ActivityEnabled,
+		KeepaliveDisabled:      !newCfg.Schedule.KeepaliveEnabled,
+		BlackcatDisabled:       !newCfg.Schedule.BlackcatEnabled,
+		GrowthDisabled:         !newCfg.Schedule.GrowthEnabled,
+		IncludeDisabledInTasks: newCfg.Schedule.IncludeDisabledInTasks,
 
 		JitterMinutes: newCfg.Schedule.JitterMinutes,
 	})

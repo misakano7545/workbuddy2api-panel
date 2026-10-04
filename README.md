@@ -381,6 +381,7 @@ curl -s http://localhost:7863/v1/responses \
 | `schedule.activity_enabled` | `true` | 活跃上报总开关 |
 | `schedule.keepalive_enabled` | `true` | token 保活总开关 |
 | `schedule.blackcat_enabled` | `true` | 夜猫子总开关 |
+| `schedule.include_disabled_in_tasks` | `false` | 让**保号类**四任务（签到 / 活跃上报 / token 保活 / 余额刷新）对**已禁用**账号也执行——「禁用」只关选号，不停保号。`false`（默认）保持「禁用的跳过」 |
 | `schedule.growth_enabled` | `true` | 成长任务队列排程总开关（`false` = 不自动跑，任务中心手动入口照旧） |
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
@@ -527,6 +528,16 @@ curl -s http://localhost:7863/v1/responses \
 - **结果汇总**：排程轮次跑完写一行面板日志（`第 N 轮 X 项：完成 a / 跳过 b / 失败 c · 领奖 p 分 +q 能 · 耗时 t · 失败项 CODE`），并在 `alerting.enabled` 打开时**推同一条到告警 webhook**（`event=notify`）；未配 alerting 就只落日志。手动轮次不推送（界面在看，别刷通知）
 - 手动补跑：面板任务中心的「执行队列」按钮，或 `POST /admin/tasks/growth/run`（需 `admin.enabled`）
 - 关闭：`schedule.growth_enabled: false`（只关排程，任务中心手动入口照旧可用）
+
+#### 禁用账号与保号任务（`schedule.include_disabled_in_tasks`）
+
+缺省 `false`：禁用账号被上述**签到 / 活跃上报 / 保活 / 余额刷新**四任务跳过，与选号过滤一致。
+
+面板「禁用」的语义是「**不再参与选号**」，但这四类任务此前会一并跳过禁用号——被禁用的账号因此拿不到签到积分、不续 token、余额也不再刷新；而 `ReenableIfCredits` 明确不复活 disabled 账号，等于签到这条唯一的自动回血路径也断了，只能人工点「解冻」。
+
+如果采用「**一次只放开一个账号、用禁用做流量开关**」的轮换方式（同 IP 多号怕触发风控），闲置待命的号恰恰是最需要签到的——把它设为 `true`，禁用号仍会签到 / 保活 / 刷新余额，**但依旧不参与选号**（`pool` 选号侧的 disabled 过滤不受本开关影响）。
+
+> 该开关**只覆盖调度器的这四类任务**。猫猫旅行、夜猫子、连登管家（挂在签到末尾的 `RunStreakBonusNow`）与成长任务队列**仍按原样跳过禁用账号**——若也需要，请另行提出。
 
 #### 连登管家（签到排程末尾自动执行）
 
