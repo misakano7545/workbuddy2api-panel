@@ -152,6 +152,7 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(h.imagesGenerations))
 	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))
 	h.mux.HandleFunc("POST /messages", h.withAnthropicAuth(h.messages))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
