@@ -1382,6 +1382,12 @@ function startAccountTaskJobPolling(uid) {
   taskJobTimer = setInterval(() => { if (taskUID === uid) loadAccountTaskJob(uid); }, 3000);
 }
 
+/* 任务中心：一张卡、一个列表，来源两处——常驻的「后台自动任务」(tasks/jobs) 与
+   一次性的「待办扫描/队列」(tasks/scan_all、tasks/queue)。两者都是"某账号的任务
+   进展"，行形态也一致（同走 qrowHTML），因此不各渲染一块，而是共用 renderQueue。
+   taskCenterOwner 决定列表当前显示谁：queue=扫描结果或本页启动的队列（实时优先），
+   jobs=后台自动任务（默认；点「刷新进度」也回到它）。 */
+let taskCenterOwner = 'jobs';
 async function loadTaskJobs() {
   // go() 顶层调用也会进入此函数，首次 await 前不读取后声明的状态。
   await Promise.resolve();
@@ -1390,27 +1396,33 @@ async function loadTaskJobs() {
   try {
     const d = await api('tasks/jobs');
     const jobs = d.jobs || [];
-    $('taskJobsSummary').textContent = jobs.length ? jobs.filter(j => taskJobPresentation(j).active).length + ' 个账号执行中' : '';
     $('taskJobsNote').hidden = !!jobs.length && d.auto_enabled !== false;
     $('taskJobsNote').textContent = d.auto_enabled === false ? '自动成长任务已关闭，可在账号任务中手动启动后台执行。' : '新增国区账号后自动执行，每日按成长任务排程继续推进；可在账号任务中手动启动。';
-    const expanded = new Set(Array.from($('taskJobsList').querySelectorAll('details[open][data-job-id]'), el => el.dataset.jobId));
-    $('taskJobsList').innerHTML = jobs.map(job => {
-      const info = taskJobPresentation(job);
-      return '<div class="qgroup task-job"><header><span class="nm">' + esc(job.nickname || job.uid.slice(0, 12)) + '</span>' +
-        '<span class="cnt">' + esc(info.trigger + ' · ' + info.label + ' · ' + info.progress) + '</span><span class="grow"></span>' +
-        '<button class="xs" data-job-uid="' + esc(job.uid) + '">查看任务</button></header>' +
-        '<div class="state job-summary ' + esc(info.severity) + '">' + esc(info.message) + '</div>' +
-        '<details class="job-results" data-job-id="' + esc(job.id) + '"' + (expanded.has(job.id) ? ' open' : '') + '><summary class="hint">查看结果 · 更新于 ' + esc(ago(job.updated_at)) + '</summary>' + taskJobRows(job) + '</details></div>';
-    }).join('');
+    if (taskCenterOwner !== 'jobs') return; // 队列/扫描结果正占着列表
+    const groups = groupsFromJobs(jobs);
+    renderQueue(groups, null, jobs.length ? '后台任务还没有结果' : '还没有后台任务记录',
+      jobs.length ? '任务刚开始执行，结果出来后会显示在这里。' : '新增国区账号后自动执行；也可以在上面扫描待办并执行。');
   } catch (e) {
-    $('taskJobsNote').hidden = false; $('taskJobsNote').textContent = '后台任务查询失败：' + e.message;
+    if (taskCenterOwner === 'jobs') renderQueue([], null, '后台任务查询失败', e.message);
   } finally { taskJobsLoading = false; }
 }
-$('btnTaskJobsReload').onclick = loadTaskJobs;
-$('taskJobsList').addEventListener('click', ev => {
-  const b = ev.target.closest('button[data-job-uid]');
-  if (b) openTasks(b.dataset.jobUid);
-});
+// 后台任务 → 与扫描/队列同形的分组（共用 qrowHTML 渲染）
+function groupsFromJobs(jobs) {
+  return jobs.map(job => {
+    const info = taskJobPresentation(job);
+    return {
+      uid: job.uid, nick: job.nickname,
+      cnt: info.trigger + ' · ' + info.label + (info.progress ? ' · ' + info.progress : ''),
+      tip: info.message, // 明细挂 title（原「后台自动任务」卡的状态行）
+      rows: (job.results || []).map(item => ({
+        kind: 'job', code: item.task_code || '', title: item.title,
+        status: taskOutcomeStatus(item), message: item.message || item.claim_error,
+        prog: item.progress_after || item.progress_before || '',
+      })),
+    };
+  }).filter(g => g.rows.length);
+}
+$('btnTaskJobsReload').onclick = () => { taskCenterOwner = 'jobs'; loadTaskJobs(); };
 
 async function loadTasks() {
   if (!taskUID) return;
@@ -1500,6 +1512,7 @@ $('btnScanAll').onclick = async () => {
   // 停掉队列轮询：显式扫描 = 切到待办视图。否则在途队列的下一 tick 会把扫描
   // 结果冲掉重渲染回队列视图（服务端执行不受影响，只是不再实时回写本视图）。
   if (queueTimer) { clearInterval(queueTimer); queueTimer = null; }
+  taskCenterOwner = 'queue';
   b.disabled = true; b.textContent = '扫描中…';
   try {
     const d = await api('tasks/scan_all', { method: 'POST' });
@@ -1511,6 +1524,7 @@ $('btnRunQueue').onclick = async () => {
   const conc = Number($('qcConc').value) || 1;
   if (!confirm('扫描全部账号待办并排队执行（账号并发 ' + conc + '，账号内串行）。\n含真实对话的任务耗时较长，确认继续？')) return;
   const b = $('btnRunQueue');
+  taskCenterOwner = 'queue';
   b.disabled = true; b.textContent = '启动中…';
   try {
     const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc }) });
@@ -1565,22 +1579,28 @@ function renderQueue(groups, progress, emptyTitle, emptyDesc) {
     if (emptyTitle) empty.querySelector('.t').textContent = emptyTitle;
     if (emptyDesc) empty.querySelector('.d').textContent = emptyDesc;
     list.innerHTML = '';
-    $('qProg').hidden = true; $('qcSummary').textContent = '';
+    $('qProg').hidden = true; $('tcSummary').textContent = '';
     return;
   }
-  empty.style.display = 'none';
   empty.style.display = 'none';
   let total = 0;
   list.innerHTML = groups.map(g => {
     total += g.rows.length;
-    const tasks = g.rows.filter(row => row.kind !== 'account').length;
-    return '<div class="qgroup"><header><span class="nm">' + esc(g.nick || g.uid.slice(0, 12)) + '</span><span class="cnt">' + (tasks ? tasks + ' 项任务' : '账号状态') + '</span></header>' +
+    const tasks = g.rows.filter(row => row.kind !== 'account' && row.kind !== 'job').length;
+    // cnt 给后台任务用（"每日定时 · 执行中"）；扫描/队列按任务项数自己算
+    const cnt = g.cnt ? g.cnt : (tasks ? tasks + ' 项任务' : '账号状态');
+    return '<div class="qgroup" title="' + esc(g.tip || '') + '"><header><span class="nm">' + esc(g.nick || g.uid.slice(0, 12)) + '</span><span class="cnt">' + esc(cnt) + '</span><span class="grow"></span>' +
+      '<button class="xs" data-task-uid="' + esc(g.uid) + '">查看任务</button></header>' +
       g.rows.map(qrowHTML).join('') + '</div>';
   }).join('');
   const taskCount = groups.reduce((sum, group) => sum + group.rows.filter(row => row.kind !== 'account').length, 0);
-  $('qcSummary').textContent = taskCount + ' 项任务' + (total > taskCount ? ' · ' + (total - taskCount) + ' 条账号状态' : '');
+  $('tcSummary').textContent = taskCount + ' 项任务' + (total > taskCount ? ' · ' + (total - taskCount) + ' 条账号状态' : '');
   updateProgress(progress);
 }
+$('qcList').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-task-uid]');
+  if (b) openTasks(b.dataset.taskUid);
+});
 function updateProgress(q) {
   if (!q || !q.items) { $('qProg').hidden = true; return; }
   const total = q.items.length;
@@ -1625,6 +1645,8 @@ function startQueuePolling() {
 // reattachQueueView 切回任务中心视图时恢复队列进度：仅当本页启动的队列仍在
 // 执行才重新开轮询（残留态/别页队列不接管——视图不被旧结果冲掉）。
 function reattachQueueView() {
+  // 默认显示后台自动任务的进展；本页启动的队列仍在跑时改由队列状态接管列表。
+  taskCenterOwner = 'jobs';
   loadTaskJobs();
   // 全程异步：go() 在顶层（app.js ~143 行）被调用时，本文件下方 let/const
   //（queueTimer/lastQueueSeq 等）尚未初始化——同步读取即 TDZ ReferenceError
@@ -1634,7 +1656,7 @@ function reattachQueueView() {
     try {
       const q = await api('tasks/queue');
       if (queueTimer) return; // 轮询已在跑（跨视图不中断）
-      if (q.started && q.running && (!lastQueueSeq || q.seq === lastQueueSeq)) startQueuePolling();
+      if (q.started && q.running && (!lastQueueSeq || q.seq === lastQueueSeq)) { taskCenterOwner = 'queue'; startQueuePolling(); }
     } catch (e) { /* 静默 */ }
   })();
 }

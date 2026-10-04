@@ -217,6 +217,89 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
+// 任务中心合并后的两条易回归点：①后台任务 → 与队列同形的分组（空结果不占位）；
+// ②归属标志：队列/扫描结果占着列表时，后台任务的刷新不得把它冲掉。
+func TestAppJSTaskCenterMerge(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; task center merge test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function taskOutcomeStatus');
+const end = src.indexOf("$('btnTaskJobsReload')");
+if (start < 0 || end < 0) throw new Error('task center helpers not found');
+const calls = [];
+const store = { jobs: [
+  { uid: 'u1', nickname: 'A', trigger: 'daily', status: 'finished', completed: 2, total: 2, results: [
+    { task_code: 'T1', title: 't1', status: 'done', progress_after: '1/1' },
+    { task_code: 'T2', title: 't2', claim_error: 'task not completed' },
+  ]},
+  { uid: 'u2', nickname: 'B', trigger: 'new_account', status: 'running', results: [] },
+] };
+const ctx = {
+  String, Number, RegExp, Object, Array, Map, JSON, Promise, console,
+  api: async () => ({ jobs: store.jobs, auto_enabled: true }),
+  renderQueue: (groups, progress, title, desc) => calls.push({ groups, title, desc }),
+  $: () => ({ textContent: '', hidden: false, style: {}, querySelector: () => ({ textContent: '' }), addEventListener() {} }),
+  esc: s => String(s == null ? '' : s),
+  ago: () => '刚刚',
+  qrowHTML: () => '',
+};
+vm.createContext(ctx);
+vm.runInContext('let taskJobsLoading = false;\n' + src.slice(start, end) +
+  '\nthis.loadTaskJobs = loadTaskJobs; this.groupsFromJobs = groupsFromJobs; this.setOwner = v => { taskCenterOwner = v; };', ctx);
+ctx.setJobs = v => { store.jobs = v; };
+(async () => {
+  // ① 分组 join：空结果的账号不占位，行形态与队列一致（code/status/prog）
+  const groups = ctx.groupsFromJobs([
+    { uid: 'u1', nickname: 'A', trigger: 'daily', status: 'finished', completed: 2, total: 2, results: [
+      { task_code: 'T1', title: 't1', status: 'done', progress_after: '1/1' },
+      { task_code: 'T2', title: 't2', claim_error: 'task not completed' },
+    ]},
+    { uid: 'u2', nickname: 'B', trigger: 'new_account', status: 'running', results: [] },
+  ]);
+  // ② 归属：队列占着列表时后台刷新只更新提示、不渲染
+  ctx.setOwner('queue');
+  await ctx.loadTaskJobs();
+  const queueSkip = calls.length === 0;
+  ctx.setOwner('jobs');
+  await ctx.loadTaskJobs();
+  const withJobs = calls[0].groups.length;
+  // ③ 没有后台任务时给空态（不是留一张空列表）
+  ctx.setJobs([]);
+  await ctx.loadTaskJobs();
+  process.stdout.write(JSON.stringify({
+    groups: groups.length,
+    rows: groups[0] ? groups[0].rows.map(r => [r.code, r.status, r.prog]) : null,
+    cnt: groups[0] ? groups[0].cnt : '',
+    queueSkip,
+    withJobs,
+    emptyGroups: calls[1].groups.length,
+    emptyTitle: calls[1].title,
+  }));
+})();`
+	f, err := os.CreateTemp(t.TempDir(), "task-center-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("task center node test failed: %v\n%s", err, out)
+	}
+	const want = `{"groups":1,"rows":[["T1","done","1/1"],["T2","claim_pending",""]],` +
+		`"cnt":"每日定时 · 已结束 · 处理 2 / 2 项","queueSkip":true,"withJobs":1,` +
+		`"emptyGroups":0,"emptyTitle":"还没有后台任务记录"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("task center merge=%s\nwant %s", out, want)
+	}
+}
+
 // 模型限流时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
 func TestAppJSRateLimitMeta(t *testing.T) {
 	node, err := exec.LookPath("node")

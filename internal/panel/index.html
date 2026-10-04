@@ -104,13 +104,7 @@ body {
 .qrow .prog { min-width: 0; font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qrow .st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .qrow .msg { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.task-job > header { align-items: center; flex-wrap: wrap; }
-.task-job > header .nm { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.task-job > header .grow { flex: 1; }
-.task-job > header button { flex: none; }
-.task-job > .job-summary { display: block; padding: 0 16px 10px; line-height: 1.65; overflow-wrap: anywhere; }
-.task-job > .job-results { padding-bottom: 10px; }
-.task-job > .job-results > summary { margin: 0 16px 8px; cursor: pointer; }
+.qgroup header button { flex: none; margin-left: auto; align-self: center; }
 @media (max-width: 640px) {
   .qrow { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name st" "code prog" "msg msg"; gap: 4px 12px; }
   .qrow .code { grid-area: code; }
@@ -679,27 +673,21 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
     </section>
 
-    <!-- 任务中心 -->
+    <!-- 任务中心：后台自动任务的进展与待办扫描/队列共用一张卡、一个列表
+         （两者都是"某账号的任务进展"，只是来源不同：常驻 jobs vs 一次性队列） -->
     <section class="view" id="view-taskscenter" hidden>
       <div class="box">
         <header>
-          <h3>后台自动任务 <span class="hint" id="taskJobsSummary"></span></h3>
-          <span class="grow"></span>
-          <button class="xs" id="btnTaskJobsReload">刷新进度</button>
-        </header>
-        <div class="state" id="taskJobsNote">新增国区账号后自动执行，每日按成长任务排程继续推进；可在账号任务中手动启动。</div>
-        <div id="taskJobsList"></div>
-      </div>
-      <div class="box">
-        <header>
-          <h3>成长任务队列 <span class="hint" id="qcSummary"></span></h3>
+          <h3>成长任务 <span class="hint" id="tcSummary"></span></h3>
           <span class="grow"></span>
           <label class="sel-note">并发
             <select id="qcConc"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option></select>
           </label>
           <button class="xs" id="btnScanAll">扫描待办</button>
+          <button class="xs" id="btnTaskJobsReload">刷新进度</button>
           <button class="xs primary" id="btnRunQueue">执行全部待办</button>
         </header>
+        <div class="state" id="taskJobsNote">新增国区账号后自动执行，每日按成长任务排程继续推进；可在账号任务中手动启动。</div>
         <div class="qprog" id="qProg" hidden>
           <div class="qbar"><i id="qBarFill"></i></div>
           <span class="note" id="qProgText"></span>
