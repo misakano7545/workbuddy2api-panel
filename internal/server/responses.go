@@ -235,6 +235,8 @@ func expandNamespaceTools(tools []any) ([]any, map[string]string) {
 }
 
 // downgradeCustomTool 把 custom(freeform) 工具降级成单 input 参数的 Chat function。
+// 只返回 function 体（name/description/parameters），由调用方按本仓约定包一层
+// {"type":"function","function":...}。
 func downgradeCustomTool(tool map[string]any) map[string]any {
 	extra := ""
 	if format, ok := tool["format"].(map[string]any); ok {
@@ -243,7 +245,6 @@ func downgradeCustomTool(tool map[string]any) map[string]any {
 		}
 	}
 	return map[string]any{
-		"type":        "function",
 		"name":        asString(tool["name"]),
 		"description": strings.TrimSpace(asString(tool["description"]) + "\n\n" + customToolHint + extra),
 		"parameters": map[string]any{
@@ -326,7 +327,8 @@ func convertTools(tools []any) ([]any, map[string]bool, map[string]string) {
 			if n := asString(m["name"]); n != "" {
 				custom[n] = true
 			}
-			out = append(out, downgradeCustomTool(m))
+			// 与下方普通 function 同款嵌套形状（上游只认 {"type","function"} 包裹）。
+			out = append(out, map[string]any{"type": "function", "function": downgradeCustomTool(m)})
 			continue
 		}
 		if _, ok := m["function"].(map[string]any); ok {

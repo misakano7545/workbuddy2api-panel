@@ -473,9 +473,13 @@ func TestResponsesCustomToolAndNamespace(t *testing.T) {
 		if tool["type"] != "function" {
 			t.Fatalf("tool type=%v want function（上游只认扁平 function）", tool["type"])
 		}
-		params, _ := tool["parameters"].(map[string]any)
+		fn, _ := tool["function"].(map[string]any)
+		if fn == nil {
+			t.Fatalf("tool 未按 {\"type\",\"function\"} 包裹：%v", tool)
+		}
+		params, _ := fn["parameters"].(map[string]any)
 		props, _ := params["properties"].(map[string]any)
-		if tool["name"] == "apply_patch" && props["input"] == nil {
+		if fn["name"] == "apply_patch" && props["input"] == nil {
 			t.Fatalf("custom 工具应降级为单 input 参数：%v", tool)
 		}
 	}
