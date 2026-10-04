@@ -174,6 +174,49 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
+// 日志行分级不得把「空赋值字段」当失败：`claim_error=""`（值为空 = 该项没有错误）
+// 里带 error 字样，裸匹配会让成功的任务行（status=done claimed=true）整行标红。
+func TestAppJSLogLevelNoFalsePositive(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; log level test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function logLevel');
+const end = src.indexOf('async function loadLogs');
+if (start < 0 || end < 0) throw new Error('logLevel not found');
+const ctx = { String, RegExp };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.logLevel=logLevel;', ctx);
+process.stdout.write(JSON.stringify({
+  okTask: ctx.logLevel('panel: task auto uid=df6b07f7 code=Sequential_Tasks_6 status=done progress=10/10->10/10 claimed=true claim_error=""'),
+  twoEmpty: ctx.logLevel('panel: task auto uid=x status=done claim_error="" balance_error=""'),
+  realFail: ctx.logLevel('panel: task auto uid=x status=awaiting_progress claimed=false claim_error="task not completed"'),
+  realBalanceErr: ctx.logLevel('panel: task auto uid=x status=done claim_error="" balance_error="timeout"'),
+  chineseFail: ctx.logLevel('panel: disable uid=x（人工禁用）失败'),
+  warn: ctx.logLevel('pool: uid=x 冷却中'),
+  plain: ctx.logLevel('panel: task auto uid=x status=done'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "log-level-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("log level node test failed: %v\n%s", err, out)
+	}
+	const want = `{"okTask":"","twoEmpty":"","realFail":" e","realBalanceErr":" e","chineseFail":" e","warn":" w","plain":""}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("log level=%s want %s", out, want)
+	}
+}
+
 // 模型限流时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
 func TestAppJSRateLimitMeta(t *testing.T) {
 	node, err := exec.LookPath("node")

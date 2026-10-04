@@ -714,6 +714,16 @@ $('logChips').addEventListener('click', ev => {
   document.querySelectorAll('#logChips .chip').forEach(c => c.classList.toggle('on', c === b));
   loadLogs();
 });
+// logLevel 日志行的颜色级别。先抹掉「空赋值」字段再判：
+// `claim_error=""`（值为空 = 这一项没有错误）里带 error 字样，裸匹配会把成功的任务行
+// 整行标红；非空赋值（`claim_error="task not completed"`）仍然照常标红。
+function logLevel(text) {
+  const t = String(text == null ? '' : text).replace(/\b[a-z_]+=(?:""|'')/g, '');
+  if (/error|失败|错误/.test(t)) return ' e';
+  if (/warn|冷却|熔断/.test(t)) return ' w';
+  return '';
+}
+
 async function loadLogs() {
   const box = $('logBox');
   const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
@@ -737,7 +747,7 @@ async function loadLogs() {
     const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
     box.innerHTML = entries.length
       ? entries.map(e => {
-        const lvl = /error|失败|错误/.test(e.text) ? ' e' : /warn|冷却|熔断/.test(e.text) ? ' w' : '';
+        const lvl = logLevel(e.text);
         const t = e.ts ? new Date(e.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '';
         const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + ({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
         return '<span class="ln' + lvl + '">' + ch + esc(t + ' ' + e.text) + '</span>';
