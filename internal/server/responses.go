@@ -8,7 +8,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -63,9 +65,13 @@ func responsesToChat(src []byte) ([]byte, *responsesMeta, error) {
 		out["reasoning_effort"] = v
 	}
 	if tools, ok := obj["tools"].([]any); ok {
-		chatTools, custom, nsMap := convertTools(tools)
+		chatTools, custom, nsMap, alias := convertTools(tools)
 		out["tools"] = chatTools
-		meta.customTools, meta.nsMap = custom, nsMap
+		meta.customTools, meta.nsMap, meta.alias = custom, nsMap, alias
+	}
+	// tool_choice 也要与出站工具名对齐：重名改名过的工具，客户端仍按原名点名。
+	if v, ok := out["tool_choice"]; ok {
+		out["tool_choice"] = meta.flatToolChoice(v)
 	}
 	msgs := []any{}
 	if inst, ok := obj["instructions"].(string); ok && inst != "" {
@@ -77,7 +83,7 @@ func responsesToChat(src []byte) ([]byte, *responsesMeta, error) {
 			msgs = append(msgs, map[string]any{"role": "user", "content": in})
 		}
 	case []any:
-		msgs = append(msgs, convertInputItems(in)...)
+		msgs = append(msgs, convertInputItems(in, meta)...)
 	}
 	out["messages"] = msgs
 	b, err := json.Marshal(out)
@@ -96,40 +102,79 @@ func responsesToChat(src []byte) ([]byte, *responsesMeta, error) {
 type responsesMeta struct {
 	customTools map[string]bool
 	nsMap       map[string]string
+	// alias 出站扁平名 -> 客户端原名（只对重名改名过的有值）。
+	// namespace 组内（或与顶层）重名时子工具被改成稳定后缀名（read_file_2），回程必须
+	// 还原成客户端声明的原名，否则客户端下一轮按自己声明的名字回传工具结果就匹配不上；
+	// 出站方向（历史 function_call / tool_choice）则要反着映射成扁平名。
+	alias map[string]string
 }
 
 func (m *responsesMeta) isCustom(name string) bool { return m != nil && m.customTools[name] }
 
-// stampNamespace 给回程的工具项补 namespace。必须在 output_item.added 就带上：
-// 客户端从 added 事件派发执行器，补到 done 已经错过派发时机。
-func (m *responsesMeta) stampNamespace(item map[string]any) {
-	if m == nil || len(m.nsMap) == 0 || item == nil {
-		return
+// flatName 反向映射：客户端原名 -> 出站扁平名（没改名过就原样返回）。
+// 重名改名过的工具，原名不唯一（顶层 read_file 与 codex_app.read_file 都叫 read_file），
+// 用 namespace 消歧；没有 ns 时按名字排序取第一个，保证同输入同结果。
+func (m *responsesMeta) flatName(orig, ns string) string {
+	if m == nil || len(m.alias) == 0 {
+		return orig
 	}
-	if s, ok := item["namespace"].(string); ok && s != "" {
+	best := ""
+	for flat, o := range m.alias {
+		if o != orig {
+			continue
+		}
+		if ns != "" && m.nsMap[flat] == ns {
+			return flat
+		}
+		if best == "" || flat < best {
+			best = flat
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return orig
+}
+
+// fixupItem 回程修正工具项：把模型用的出站名还原成客户端原名、并补回 namespace。
+// 必须在 output_item.added 就调用：客户端从 added 事件派发执行器，补到 done 已错过时机。
+func (m *responsesMeta) fixupItem(item map[string]any) {
+	if m == nil || item == nil {
 		return
 	}
 	name := asString(item["name"])
-	if ns, ok := m.nsMap[name]; ok && ns != "" {
-		item["namespace"] = ns
-		return
-	}
-	// 模型可能回 ns::name 形态：namespace 侧照抄，裸名侧按映射校验。
+	ns := asString(item["namespace"])
+	flat := name
+	// 模型可能按 ns::name / ns__name 回名：先剥出裸名，namespace 取映射值或前缀。
 	if i := strings.Index(name, "::"); i > 0 {
-		tail, head := name[i+2:], name[:i]
-		if ns, ok := m.nsMap[tail]; ok {
-			item["name"], item["namespace"] = tail, ns
-			return
+		head, tail := name[:i], name[i+2:]
+		if mapped, ok := m.nsMap[tail]; ok {
+			flat, ns = tail, mapped
+		} else {
+			flat, ns = tail, head
 		}
-		item["name"], item["namespace"] = tail, head
+	} else {
+		// ns + "__" + name：精确比对，避免 namespace 自身含 __ 时切错。
+		for tool, tns := range m.nsMap {
+			if name == tns+nsSep+tool {
+				flat, ns = tool, tns
+				break
+			}
+		}
+	}
+	if flat == "" {
 		return
 	}
-	// ns + "__" + name：精确比对，避免 namespace 自身含 __ 时切错。
-	for tool, ns := range m.nsMap {
-		if name == ns+nsSep+tool {
-			item["name"], item["namespace"] = tool, ns
-			return
-		}
+	if ns == "" {
+		ns = m.nsMap[flat]
+	}
+	if orig, ok := m.alias[flat]; ok {
+		flat = orig // 重名改名过的：还原客户端原名
+	}
+	item["name"] = flat
+	// namespace 取映射值最权威（模型自己填的那份它并不知道扁平名 → namespace 的关系）。
+	if ns != "" {
+		item["namespace"] = ns
 	}
 }
 
@@ -145,12 +190,31 @@ const (
 		"into the `input` string parameter. Do not wrap it in extra JSON."
 )
 
-// expandNamespaceTools 把 namespace 工具组展开成扁平 function 列表，返回 name -> namespace。
-// 组内子工具常无 type 字段，按 function 处理；同名只留第一个。
-func expandNamespaceTools(tools []any) ([]any, map[string]string) {
+// expandNamespaceTools 把 namespace 工具组展开成扁平 function 列表。
+// 返回 出站扁平名 -> namespace、出站扁平名 -> 客户端原名（只有重名改名过的才在表里）。
+// 组内子工具常无 type 字段，按 function 处理。**重名不丢弃**：先到者保留原名，后到者
+// 加稳定后缀（read_file_2）并登记还原映射 —— 丢弃等于客户端声明的工具静默消失。
+func expandNamespaceTools(tools []any) ([]any, map[string]string, map[string]string) {
 	flat := []any{}
 	mapping := map[string]string{}
+	alias := map[string]string{}
 	seen := map[string]bool{}
+
+	// uniq 取一个没被占用的出站名：占了就加 _2/_3…（顺序稳定，同输入同结果）。
+	uniq := func(name string) string {
+		if !seen[name] {
+			seen[name] = true
+			return name
+		}
+		for i := 2; ; i++ {
+			cand := name + "_" + strconv.Itoa(i)
+			if !seen[cand] {
+				seen[cand] = true
+				alias[cand] = name
+				return cand
+			}
+		}
+	}
 
 	var collect func(entry any, depth int, ns string)
 	collect = func(entry any, depth int, ns string) {
@@ -189,10 +253,10 @@ func expandNamespaceTools(tools []any) ([]any, map[string]string) {
 				}
 			}
 			name := strings.TrimSpace(asString(fn["name"]))
-			if name == "" || seen[name] {
+			if name == "" {
 				return
 			}
-			seen[name] = true
+			name = uniq(name)
 			mapping[name] = ns
 			params := fn["parameters"]
 			if params == nil {
@@ -217,12 +281,12 @@ func expandNamespaceTools(tools []any) ([]any, map[string]string) {
 			}
 		}
 		if name != "" {
-			if seen[name] {
-				return
-			}
-			seen[name] = true
+			out := uniq(name)
 			if ns != "" {
-				mapping[name] = ns
+				mapping[out] = ns
+			}
+			if out != name {
+				setToolName(item, out) // 被重名挤出原名：改写出站名，回程按 alias 还原
 			}
 		}
 		flat = append(flat, item)
@@ -231,7 +295,16 @@ func expandNamespaceTools(tools []any) ([]any, map[string]string) {
 	for _, entry := range tools {
 		collect(entry, 0, "")
 	}
-	return flat, mapping
+	return flat, mapping, alias
+}
+
+// setToolName 改写出站工具名：兼容 {"type":"function","function":{...}} 与裸 function 两种形态。
+func setToolName(item map[string]any, name string) {
+	if fn, ok := item["function"].(map[string]any); ok {
+		fn["name"] = name
+		return
+	}
+	item["name"] = name
 }
 
 // downgradeCustomTool 把 custom(freeform) 工具降级成单 input 参数的 Chat function。
@@ -260,29 +333,38 @@ func downgradeCustomTool(tool map[string]any) map[string]any {
 	}
 }
 
-// unwrapCustomInput 把 {"input":"..."} 参数还原成 freeform 原始字符串（回程用）。
-func unwrapCustomInput(args string) string {
-	if strings.TrimSpace(args) == "" {
-		return ""
+// unwrapCustomInput 严格还原 freeform 载荷，返回 (载荷, 是否可信)。
+//
+// 只接受两种形态：`{"input": "<非空字符串>"}`（单键）与裸 JSON 字符串。其余
+// （非法 JSON、多键、input 非字符串、空串）一律 ok=false —— custom 的载荷会被
+// 客户端直接执行（apply_patch 就是打补丁），宁可让它看到失败，也不能把形态不明或
+// 半截的内容当成可执行调用发出去。
+func unwrapCustomInput(args string) (string, bool) {
+	s := strings.TrimSpace(args)
+	if s == "" {
+		return "", false
 	}
 	var parsed any
-	if err := json.Unmarshal([]byte(args), &parsed); err != nil {
-		return args
+	if json.Unmarshal([]byte(s), &parsed) != nil {
+		return "", false
 	}
 	switch v := parsed.(type) {
 	case string:
-		return v
+		if v == "" {
+			return "", false
+		}
+		return v, true
 	case map[string]any:
-		if s, ok := v["input"].(string); ok {
-			return s
+		if len(v) != 1 {
+			return "", false
 		}
-		if raw, ok := v["input"]; ok && raw != nil {
-			if b, err := json.Marshal(raw); err == nil {
-				return string(b)
-			}
+		in, ok := v["input"].(string)
+		if !ok || in == "" {
+			return "", false
 		}
+		return in, true
 	}
-	return args
+	return "", false
 }
 
 // marshalCustomInput 把回传的 freeform 输入打包成 Chat 工具参数（与 downgrade 对称）。
@@ -312,9 +394,9 @@ func firstNonNil(vals ...any) any {
 }
 
 // convertTools 把 Responses 工具定义转成上游 Chat 形态，并带出回程需要的语义
-// （custom 工具名集合、name -> namespace 映射）。
-func convertTools(tools []any) ([]any, map[string]bool, map[string]string) {
-	flat, nsMap := expandNamespaceTools(tools)
+// （custom 工具名集合、出站名 -> namespace、出站名 -> 客户端原名）。
+func convertTools(tools []any) ([]any, map[string]bool, map[string]string, map[string]string) {
+	flat, nsMap, alias := expandNamespaceTools(tools)
 	out := make([]any, 0, len(flat))
 	custom := map[string]bool{}
 	for _, t := range flat {
@@ -348,10 +430,33 @@ func convertTools(tools []any) ([]any, map[string]bool, map[string]string) {
 		}
 		out = append(out, m)
 	}
-	return out, custom, nsMap
+	return out, custom, nsMap, alias
 }
 
-func convertInputItems(items []any) []any {
+// flatToolChoice tool_choice 点名了重名改名过的工具时，映射成出站扁平名。
+func (m *responsesMeta) flatToolChoice(v any) any {
+	if m == nil || len(m.alias) == 0 {
+		return v
+	}
+	switch t := v.(type) {
+	case string:
+		return m.flatName(t, "")
+	case map[string]any:
+		ns := asString(t["namespace"])
+		if n := asString(t["name"]); n != "" {
+			t["name"] = m.flatName(n, ns)
+		}
+		if fn, ok := t["function"].(map[string]any); ok {
+			if n := asString(fn["name"]); n != "" {
+				fn["name"] = m.flatName(n, ns)
+			}
+		}
+		return t
+	}
+	return v
+}
+
+func convertInputItems(items []any, meta *responsesMeta) []any {
 	var out []any
 	var pending []any
 	flush := func() {
@@ -372,7 +477,7 @@ func convertInputItems(items []any) []any {
 			flush()
 			continue
 		case "function_call", "custom_tool_call":
-			pending = append(pending, toToolCall(m))
+			pending = append(pending, toToolCall(m, meta))
 			continue
 		case "function_call_output", "custom_tool_call_output":
 			flush()
@@ -401,7 +506,7 @@ func convertInputItems(items []any) []any {
 	return out
 }
 
-func toToolCall(m map[string]any) map[string]any {
+func toToolCall(m map[string]any, meta *responsesMeta) map[string]any {
 	callID := asString(m["call_id"])
 	if callID == "" {
 		callID = asString(m["id"])
@@ -414,11 +519,13 @@ func toToolCall(m map[string]any) map[string]any {
 	if args == "" {
 		args = "{}"
 	}
+	// 历史里客户端用自己声明的原名；重名改名过的要映射成我们声明的出站名，否则对不上。
+	// 客户端回传的 item 若带 namespace，用它消歧同名工具。
 	return map[string]any{
 		"id":   callID,
 		"type": "function",
 		"function": map[string]any{
-			"name":      asString(m["name"]),
+			"name":      meta.flatName(asString(m["name"]), asString(m["namespace"])),
 			"arguments": args,
 		},
 	}
@@ -559,13 +666,21 @@ func chatCompletionToResponse(obj map[string]any, meta *responsesMeta) map[strin
 			var item map[string]any
 			if meta.isCustom(name) {
 				// custom(freeform) 回程还原：载荷是整段字符串，不是 JSON 参数。
+				// 形态非法（截断的半截 JSON / 多键 / 非字符串）时按 incomplete 下发：
+				// 客户端不会执行未完成的调用，也不能拿半截补丁去打补丁。
+				input, ok := unwrapCustomInput(args)
+				itemStatus := status
+				if !ok {
+					log.Printf("WARN: [responses] custom 载荷形态非法，按不可执行下发 name=%s", name)
+					input, itemStatus = "", "incomplete"
+				}
 				item = map[string]any{
 					"id":      callID,
 					"type":    "custom_tool_call",
 					"call_id": callID,
 					"name":    name,
-					"input":   unwrapCustomInput(args),
-					"status":  status,
+					"input":   input,
+					"status":  itemStatus,
 				}
 			} else {
 				item = map[string]any{
@@ -577,7 +692,7 @@ func chatCompletionToResponse(obj map[string]any, meta *responsesMeta) map[strin
 					"status":    status,
 				}
 			}
-			meta.stampNamespace(item)
+			meta.fixupItem(item)
 			output = append(output, item)
 		}
 	}
@@ -642,24 +757,27 @@ type responsesWriter struct {
 
 type streamState struct {
 	created, failed, completed bool
-	id, model                  string
-	createdAt                  int64
-	outN                       int
-	seq                        int // SSE 事件序号（sequence_number，当前 Responses wire 契约要求）
-	status                     string
-	incompleteDetails          map[string]any
-	reasoningOpen              bool
-	reasoningIdx               int
-	reasoningID                string
-	reasoningText              strings.Builder
-	messageOpen, textOpen      bool
-	messageIdx                 int
-	msgID                      string
-	messageText                strings.Builder
-	tools                      map[int]*toolAcc
-	toolOrder                  []int
-	usage                      map[string]any
-	output                     []any
+	// sawFinish/sawDone 上游正常收尾的两种标志：finish_reason 与 [DONE]。
+	// 两者都没有就结束 = 异常 EOF / 断流，此时工具载荷不可信（见 closeOpenItems）。
+	sawFinish, sawDone    bool
+	id, model             string
+	createdAt             int64
+	outN                  int
+	seq                   int // SSE 事件序号（sequence_number，当前 Responses wire 契约要求）
+	status                string
+	incompleteDetails     map[string]any
+	reasoningOpen         bool
+	reasoningIdx          int
+	reasoningID           string
+	reasoningText         strings.Builder
+	messageOpen, textOpen bool
+	messageIdx            int
+	msgID                 string
+	messageText           strings.Builder
+	tools                 map[int]*toolAcc
+	toolOrder             []int
+	usage                 map[string]any
+	output                []any
 }
 
 type toolAcc struct {
@@ -765,6 +883,7 @@ func (w *responsesWriter) handleFrame(frame string) error {
 		return nil
 	}
 	if strings.HasPrefix(frame, "data: [DONE]") {
+		w.x.sawDone = true
 		_ = w.closeOpenItems()
 		return w.emitCompleted()
 	}
@@ -854,6 +973,7 @@ func (w *responsesWriter) handleChunk(obj map[string]any) error {
 		}
 	}
 	if fr, ok := c["finish_reason"].(string); ok && fr != "" {
+		w.x.sawFinish = true
 		w.applyFinishReason(fr)
 		return w.closeOpenItems()
 	}
@@ -1048,7 +1168,7 @@ func (w *responsesWriter) openTool(acc *toolAcc) error {
 		item["type"], item["arguments"] = "function_call", ""
 	}
 	// namespace 必须在 added 就带上：客户端从 added 事件派发执行器，补到 done 已太晚。
-	w.meta.stampNamespace(item)
+	w.meta.fixupItem(item)
 	return w.emit("response.output_item.added", map[string]any{
 		"output_index": acc.outIdx,
 		"item":         item,
@@ -1083,7 +1203,18 @@ func (w *responsesWriter) closeOpenItems() error {
 		}
 		var item map[string]any
 		if acc.custom {
-			input := unwrapCustomInput(acc.args.String())
+			input, ok := unwrapCustomInput(acc.args.String())
+			status := w.itemStatus()
+			// 残缺的 custom 调用不作为可执行调用发出：delta 已经流出去的收不回来，
+			// 用 item 的 status=incomplete 表达 —— 客户端不会执行未完成的调用。
+			if !ok || !(w.x.sawFinish || w.x.sawDone) {
+				log.Printf("WARN: [responses] custom 调用残缺（载荷可信=%v 正常收尾=%v），按不可执行下发 name=%s",
+					ok, w.x.sawFinish || w.x.sawDone, acc.name)
+				if !ok {
+					input = ""
+				}
+				status = "incomplete"
+			}
 			if err := w.emit("response.custom_tool_call_input.done", map[string]any{
 				"item_id":      acc.id,
 				"output_index": acc.outIdx,
@@ -1092,7 +1223,7 @@ func (w *responsesWriter) closeOpenItems() error {
 				return err
 			}
 			item = map[string]any{
-				"id": acc.id, "type": "custom_tool_call", "status": w.itemStatus(),
+				"id": acc.id, "type": "custom_tool_call", "status": status,
 				"call_id": acc.id, "name": acc.name, "input": input,
 			}
 		} else {
@@ -1112,7 +1243,7 @@ func (w *responsesWriter) closeOpenItems() error {
 				"arguments": acc.args.String(),
 			}
 		}
-		w.meta.stampNamespace(item)
+		w.meta.fixupItem(item)
 		if err := w.emit("response.output_item.done", map[string]any{
 			"output_index": acc.outIdx,
 			"item":         item,

@@ -633,3 +633,218 @@ func TestResponsesEmitAfterFlushNoSuperfluousWriteHeader(t *testing.T) {
 		t.Fatalf("body=%q", fw.body.String())
 	}
 }
+
+// sseItems 取 output_item.done 事件里的 item（回程最终形态）。
+func sseItems(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, block := range strings.Split(body, "\n\n") {
+		for _, line := range strings.Split(block, "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			var m map[string]any
+			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &m) != nil {
+				continue
+			}
+			if m["type"] != "response.output_item.done" {
+				continue
+			}
+			if it, ok := m["item"].(map[string]any); ok {
+				out = append(out, it)
+			}
+		}
+	}
+	return out
+}
+
+// driveStream 把 frames 喂给 responsesWriter，返回回程 body（Codex 走的流式路径）。
+func driveStream(t *testing.T, meta *responsesMeta, frames ...string) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	rw := &responsesWriter{ResponseWriter: rec, stream: true, meta: meta}
+	rw.Header().Set("Content-Type", "text/event-stream")
+	for _, f := range frames {
+		if _, err := rw.Write([]byte(f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rw.finish()
+	return rec.Body.String()
+}
+
+// TestResponsesToolContractDetails 三条工具契约细节（对照 ithtelab/workbuddy-manager 的
+// docs/namespace-compat.md，都是别人实测踩过的坑）：
+//  1. namespace 子工具与顶层重名时不能丢弃 —— 重名者按稳定后缀改名，回程还原客户端原名，
+//     出站方向（历史 function_call 与 tool_choice）反向映射成扁平名；
+//  2. custom 载荷只有 {"input":"<string>"}（或裸 JSON 字符串）算可信，其余不当可执行调用；
+//  3. 残缺 custom 调用（形态非法 / 无 finish_reason 与 [DONE] 的异常收尾）按 incomplete 下发。
+func TestResponsesToolContractDetails(t *testing.T) {
+	// ① 严格解包：非法形态一律不可信。
+	for _, c := range []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{`{"input":"PATCH"}`, "PATCH", true},
+		{`"PATCH"`, "PATCH", true},
+		{`{"input":"PATCH","extra":1}`, "", false}, // 多键
+		{`{"input":123}`, "", false},               // 非字符串
+		{`{"input":""}`, "", false},                // 空载荷
+		{`{"input":"PATCH"`, "", false},            // 半截 JSON（length 截断的典型形态）
+		{`*** Begin Patch`, "", false},             // 未包裹的裸文本
+		{"", "", false},
+	} {
+		got, ok := unwrapCustomInput(c.in)
+		if got != c.want || ok != c.ok {
+			t.Fatalf("unwrap(%q)=(%q,%v) want (%q,%v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+
+	// ② 重名不丢弃 + 双向映射。
+	src := []byte(`{"model":"m","stream":true,"tool_choice":"read_file","input":[` +
+		`{"type":"function_call","call_id":"c0","name":"read_file","namespace":"codex_app","arguments":"{}"}],` +
+		`"tools":[` +
+		`{"type":"function","name":"read_file","description":"top","parameters":{"type":"object"}},` +
+		`{"type":"namespace","name":"codex_app","tools":[{"name":"read_file","description":"in ns","parameters":{"type":"object"}}]}` +
+		`]}`)
+	chat, meta, err := responsesToChat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(chat, &body); err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := body["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("tools=%d want 2（重名不得丢弃）", len(tools))
+	}
+	var names []string
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		fn, _ := tool["function"].(map[string]any)
+		names = append(names, asString(fn["name"]))
+	}
+	if strings.Join(names, ",") != "read_file,read_file_2" {
+		t.Fatalf("出站工具名=%v want [read_file read_file_2]", names)
+	}
+	if meta.nsMap["read_file_2"] != "codex_app" || meta.alias["read_file_2"] != "read_file" {
+		t.Fatalf("nsMap=%v alias=%v", meta.nsMap, meta.alias)
+	}
+	// 历史与 tool_choice 用客户端原名：出站必须映射成我们声明的扁平名。
+	msgs, _ := body["messages"].([]any)
+	histName := ""
+	for _, mm := range msgs {
+		m, _ := mm.(map[string]any)
+		tcs, _ := m["tool_calls"].([]any)
+		for _, tr := range tcs {
+			tc, _ := tr.(map[string]any)
+			fn, _ := tc["function"].(map[string]any)
+			histName = asString(fn["name"])
+		}
+	}
+	if histName != "read_file_2" {
+		t.Fatalf("历史 function_call 名=%q want read_file_2（出站名）", histName)
+	}
+	if tc := asString(body["tool_choice"]); tc != "read_file_2" {
+		t.Fatalf("tool_choice=%q want read_file_2（出站名）", tc)
+	}
+
+	// 回程：模型用出站名回名 → 必须还原成客户端原名，并带上 namespace。
+	streamOut := driveStream(t, meta,
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file_2","arguments":"{}"}}]}}]}`+"\n\n",
+		`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n",
+		"data: [DONE]\n\n",
+	)
+	items := sseItems(t, streamOut)
+	if len(items) != 1 {
+		t.Fatalf("流式 items=%v", items)
+	}
+	if got := asString(items[0]["name"]); got != "read_file" {
+		t.Fatalf("流式回程 name=%q want read_file（客户端原名）", got)
+	}
+	if got := asString(items[0]["namespace"]); got != "codex_app" {
+		t.Fatalf("流式回程 namespace=%q want codex_app", got)
+	}
+
+	// 非流式出口必须与流式一致（他们那次的 bug 就是两条出口名字不一致）。
+	nsObj := map[string]any{
+		"id": "c2", "model": "m",
+		"choices": []any{map[string]any{
+			"index": 0.0, "finish_reason": "tool_calls",
+			"message": map[string]any{"tool_calls": []any{map[string]any{
+				"id": "call_b", "function": map[string]any{"name": "read_file_2", "arguments": "{}"},
+			}}},
+		}},
+	}
+	nsOut, _ := chatCompletionToResponse(nsObj, meta)["output"].([]any)
+	if len(nsOut) != 1 {
+		t.Fatalf("非流式 output=%v", nsOut)
+	}
+	nsItem, _ := nsOut[0].(map[string]any)
+	if asString(nsItem["name"]) != "read_file" || asString(nsItem["namespace"]) != "codex_app" {
+		t.Fatalf("非流式出口与流式不一致：%v", nsItem)
+	}
+
+	// ③ custom 残缺 / 形态非法不得当成可执行调用。
+	meta2 := &responsesMeta{customTools: map[string]bool{"apply_patch": true}}
+	customFrame := func(args string) string {
+		b, _ := json.Marshal(map[string]any{"id": "c3", "choices": []any{map[string]any{
+			"index": 0.0, "delta": map[string]any{"tool_calls": []any{map[string]any{
+				"index": 0.0, "id": "call_patch",
+				"function": map[string]any{"name": "apply_patch", "arguments": args},
+			}}},
+		}}})
+		return "data: " + string(b) + "\n\n"
+	}
+	finishFrame := `data: {"id":"c3","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"
+	lengthFrame := `data: {"id":"c3","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}` + "\n\n"
+	onlyItem := func(streamBody string) map[string]any {
+		t.Helper()
+		its := sseItems(t, streamBody)
+		if len(its) != 1 {
+			t.Fatalf("items=%v body=%s", its, streamBody)
+		}
+		return its[0]
+	}
+
+	// 正常收尾 + 合法载荷 → 可执行。
+	okItem := onlyItem(driveStream(t, meta2, customFrame(`{"input":"PATCH"}`), finishFrame, "data: [DONE]\n\n"))
+	if asString(okItem["status"]) != "completed" || asString(okItem["input"]) != "PATCH" {
+		t.Fatalf("正常 custom 应为可执行：%v", okItem)
+	}
+	// length 截断（半截 JSON）→ incomplete，且不把半截当载荷。
+	truncItem := onlyItem(driveStream(t, meta2, customFrame(`{"input":"PATCH`), lengthFrame, "data: [DONE]\n\n"))
+	if asString(truncItem["status"]) != "incomplete" || asString(truncItem["input"]) != "" {
+		t.Fatalf("截断的 custom 应按不可执行下发：%v", truncItem)
+	}
+	// 异常收尾（既无 finish_reason 也无 [DONE]）：载荷可信但收尾不可信 → incomplete。
+	cutItem := onlyItem(driveStream(t, meta2, customFrame(`{"input":"PATCH"}`)))
+	if asString(cutItem["status"]) != "incomplete" || asString(cutItem["input"]) != "PATCH" {
+		t.Fatalf("异常收尾的 custom 应按不可执行下发：%v", cutItem)
+	}
+
+	// 非流式：合法载荷还原原文；截断的半截 JSON 不当作载荷。
+	nsCustom := func(args, fr string) map[string]any {
+		return map[string]any{
+			"id": "c4", "model": "m",
+			"choices": []any{map[string]any{
+				"index": 0.0, "finish_reason": fr,
+				"message": map[string]any{"tool_calls": []any{map[string]any{
+					"id": "call_patch", "function": map[string]any{"name": "apply_patch", "arguments": args},
+				}}},
+			}},
+		}
+	}
+	okNS, _ := chatCompletionToResponse(nsCustom(`{"input":"PATCH"}`, "tool_calls"), meta2)["output"].([]any)
+	okIt, _ := okNS[0].(map[string]any)
+	if asString(okIt["input"]) != "PATCH" || asString(okIt["status"]) != "completed" {
+		t.Fatalf("非流式合法 custom：%v", okIt)
+	}
+	truncNS, _ := chatCompletionToResponse(nsCustom(`{"input":"PATCH`, "length"), meta2)["output"].([]any)
+	truncIt, _ := truncNS[0].(map[string]any)
+	if asString(truncIt["status"]) != "incomplete" || asString(truncIt["input"]) != "" {
+		t.Fatalf("非流式截断 custom 应按不可执行下发：%v", truncIt)
+	}
+}
