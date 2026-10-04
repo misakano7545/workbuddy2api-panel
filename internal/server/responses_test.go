@@ -29,7 +29,7 @@ func TestResponsesToChat(t *testing.T) {
 		"store":true,
 		"previous_response_id":"resp_old"
 	}`)
-	got, err := responsesToChat(src)
+	got, _, err := responsesToChat(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestResponsesToChat(t *testing.T) {
 }
 
 func TestResponsesToChatStringInput(t *testing.T) {
-	got, err := responsesToChat([]byte(`{"model":"m","input":"hi","stream":true}`))
+	got, _, err := responsesToChat([]byte(`{"model":"m","input":"hi","stream":true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestChatCompletionToResponse(t *testing.T) {
 		}},
 		"usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
 	}
-	got := chatCompletionToResponse(chat)
+	got := chatCompletionToResponse(chat, nil)
 	if got["id"] != "resp_chatcmpl-1" || got["object"] != "response" || got["status"] != "completed" {
 		t.Fatalf("envelope=%v", got)
 	}
@@ -448,8 +448,79 @@ func TestResponsesStreamDropsNamelessTool(t *testing.T) {
 	}
 }
 
+// TestResponsesCustomToolAndNamespace 客户端声明 custom(freeform) 工具与 namespace 工具组：
+// 请求侧降级成扁平 function（custom 收成单 input 参数），回程按 meta 还原 custom_tool_call
+// 与 namespace —— 两者都是 Codex 派发工具的必要字段（PR #109 的两条协议细节）。
+func TestResponsesCustomToolAndNamespace(t *testing.T) {
+	src := []byte(`{"model":"m","stream":true,"input":"patch it","tools":[` +
+		`{"type":"custom","name":"apply_patch","description":"Apply a patch","format":{"type":"grammar","definition":"start: patch"}},` +
+		`{"type":"namespace","name":"codex_app","tools":[{"name":"list_threads","description":"list","parameters":{"type":"object"}}]}` +
+		`]}`)
+	chat, meta, err := responsesToChat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(chat, &body); err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := body["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("tools=%v want 2（namespace 应展开、custom 应降级）", tools)
+	}
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		if tool["type"] != "function" {
+			t.Fatalf("tool type=%v want function（上游只认扁平 function）", tool["type"])
+		}
+		params, _ := tool["parameters"].(map[string]any)
+		props, _ := params["properties"].(map[string]any)
+		if tool["name"] == "apply_patch" && props["input"] == nil {
+			t.Fatalf("custom 工具应降级为单 input 参数：%v", tool)
+		}
+	}
+	if !meta.isCustom("apply_patch") || meta.isCustom("list_threads") {
+		t.Fatalf("customTools=%v want 只有 apply_patch", meta.customTools)
+	}
+	if meta.nsMap["list_threads"] != "codex_app" {
+		t.Fatalf("nsMap=%v want list_threads -> codex_app", meta.nsMap)
+	}
+
+	// 回程（Codex 走的流式路径）：custom 还原成 custom_tool_call/input 事件，namespace 补回。
+	rec := httptest.NewRecorder()
+	rw := &responsesWriter{ResponseWriter: rec, stream: true, meta: meta}
+	rw.Header().Set("Content-Type", "text/event-stream")
+	frames := []string{
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"apply_patch","arguments":"{\"input\":\"PATCH\"}"}}]}}]}` + "\n\n",
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","function":{"name":"list_threads","arguments":"{}"}}]}}]}` + "\n\n",
+		`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	for _, f := range frames {
+		if _, err := rw.Write([]byte(f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rw.finish()
+	out := rec.Body.String()
+	for _, want := range []string{
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done",
+		`"input":"PATCH"`, // 回程已把 {"input":...} 还原成 freeform 原文
+		`"namespace":"codex_app"`,
+		"response.function_call_arguments.done", // 非 custom 工具仍走 function_call 路径
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("回程缺少 %q：\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `"type":"custom_tool_call"`) && !strings.Contains(out, `"name":"apply_patch"`) {
+		t.Fatal("custom 项应带 name")
+	}
+}
+
 func TestResponsesToChatInvalidJSON(t *testing.T) {
-	_, err := responsesToChat([]byte(`{`))
+	_, _, err := responsesToChat([]byte(`{`))
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -490,7 +561,7 @@ func TestUsageCacheFields(t *testing.T) {
 		t.Fatalf("responses input_tokens_details=%v want cached_tokens 8960", d)
 	}
 
-	chat, err := responsesToChat([]byte(`{"model":"m","prompt_cache_key":"sess-1","input":"hi"}`))
+	chat, _, err := responsesToChat([]byte(`{"model":"m","prompt_cache_key":"sess-1","input":"hi"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

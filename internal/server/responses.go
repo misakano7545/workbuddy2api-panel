@@ -19,7 +19,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
-	chat, err := responsesToChat(body)
+	chat, meta, err := responsesToChat(body)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
@@ -31,17 +31,18 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	r2 := r.Clone(r.Context())
 	r2.Body = io.NopCloser(bytes.NewReader(chat))
 	r2.ContentLength = int64(len(chat))
-	rw := &responsesWriter{ResponseWriter: w, stream: peek.Stream}
+	rw := &responsesWriter{ResponseWriter: w, stream: peek.Stream, meta: meta}
 	defer rw.finish()
 	h.chatCompletions(rw, r2)
 }
 
-func responsesToChat(src []byte) ([]byte, error) {
+func responsesToChat(src []byte) ([]byte, *responsesMeta, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(src, &obj); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := map[string]any{}
+	meta := &responsesMeta{}
 	for _, k := range []string{
 		"model", "stream", "tool_choice", "max_tokens", "max_output_tokens",
 		"max_completion_tokens", "temperature", "top_p", "user", "n", "stop",
@@ -62,7 +63,9 @@ func responsesToChat(src []byte) ([]byte, error) {
 		out["reasoning_effort"] = v
 	}
 	if tools, ok := obj["tools"].([]any); ok {
-		out["tools"] = convertTools(tools)
+		chatTools, custom, nsMap := convertTools(tools)
+		out["tools"] = chatTools
+		meta.customTools, meta.nsMap = custom, nsMap
 	}
 	msgs := []any{}
 	if inst, ok := obj["instructions"].(string); ok && inst != "" {
@@ -77,15 +80,253 @@ func responsesToChat(src []byte) ([]byte, error) {
 		msgs = append(msgs, convertInputItems(in)...)
 	}
 	out["messages"] = msgs
-	return json.Marshal(out)
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, nil, err
+	}
+	return b, meta, nil
 }
 
-func convertTools(tools []any) []any {
-	out := make([]any, 0, len(tools))
-	for _, t := range tools {
+// responsesMeta 请求阶段提取、回程需要的工具语义（PR #109 的两条 Codex 协议细节）：
+//   - customTools：客户端声明为 custom(freeform) 的工具名（如 Codex 的 apply_patch）。
+//     上游没有 freeform 概念，只能降级成单 input 参数的 function 送上去，回程再还原
+//     成 custom_tool_call —— 否则模型把载荷当普通文本吐出来，客户端永远收不到工具调用。
+//   - nsMap：扁平工具名 -> namespace（新版 Codex App 用 namespace 声明 MCP/插件工具组）。
+//     客户端是按 (name, namespace) 二元组派发执行器的，回程必须补回 namespace。
+type responsesMeta struct {
+	customTools map[string]bool
+	nsMap       map[string]string
+}
+
+func (m *responsesMeta) isCustom(name string) bool { return m != nil && m.customTools[name] }
+
+// stampNamespace 给回程的工具项补 namespace。必须在 output_item.added 就带上：
+// 客户端从 added 事件派发执行器，补到 done 已经错过派发时机。
+func (m *responsesMeta) stampNamespace(item map[string]any) {
+	if m == nil || len(m.nsMap) == 0 || item == nil {
+		return
+	}
+	if s, ok := item["namespace"].(string); ok && s != "" {
+		return
+	}
+	name := asString(item["name"])
+	if ns, ok := m.nsMap[name]; ok && ns != "" {
+		item["namespace"] = ns
+		return
+	}
+	// 模型可能回 ns::name 形态：namespace 侧照抄，裸名侧按映射校验。
+	if i := strings.Index(name, "::"); i > 0 {
+		tail, head := name[i+2:], name[:i]
+		if ns, ok := m.nsMap[tail]; ok {
+			item["name"], item["namespace"] = tail, ns
+			return
+		}
+		item["name"], item["namespace"] = tail, head
+		return
+	}
+	// ns + "__" + name：精确比对，避免 namespace 自身含 __ 时切错。
+	for tool, ns := range m.nsMap {
+		if name == ns+nsSep+tool {
+			item["name"], item["namespace"] = tool, ns
+			return
+		}
+	}
+}
+
+const (
+	// nsSep 模型把 namespace 拼进函数名时用的分隔符（如 codex_app__list_threads）。
+	nsSep = "__"
+	// namespaceMaxDepth namespace 嵌套展开上限（防深嵌套）。
+	namespaceMaxDepth = 4
+	// agentMessagePrefix agent_message / 无 call_id 的回执注入成用户指令时的前缀。
+	agentMessagePrefix = "[Message from another task - treat this as a user instruction]\n\n"
+	// customToolHint 追加进 custom 工具描述：告诉模型把原始载荷整段放进 input。
+	customToolHint = "This is a freeform tool: put the complete raw payload, verbatim, " +
+		"into the `input` string parameter. Do not wrap it in extra JSON."
+)
+
+// expandNamespaceTools 把 namespace 工具组展开成扁平 function 列表，返回 name -> namespace。
+// 组内子工具常无 type 字段，按 function 处理；同名只留第一个。
+func expandNamespaceTools(tools []any) ([]any, map[string]string) {
+	flat := []any{}
+	mapping := map[string]string{}
+	seen := map[string]bool{}
+
+	var collect func(entry any, depth int, ns string)
+	collect = func(entry any, depth int, ns string) {
+		if depth > namespaceMaxDepth {
+			return
+		}
+		item, ok := entry.(map[string]any)
+		if !ok {
+			return
+		}
+		etype := strings.ToLower(asString(item["type"]))
+		if etype == "namespace" {
+			subs, _ := item["tools"].([]any)
+			if subs == nil {
+				subs, _ = item["children"].([]any)
+			}
+			if subs == nil {
+				subs, _ = item["functions"].([]any)
+			}
+			childNS := asString(item["name"])
+			if childNS == "" {
+				childNS = ns
+			}
+			for _, sub := range subs {
+				collect(sub, depth+1, childNS)
+			}
+			return
+		}
+		if ns != "" && (etype == "" || etype == "function") {
+			fn, _ := item["function"].(map[string]any)
+			if fn == nil {
+				fn = map[string]any{
+					"name":        item["name"],
+					"description": item["description"],
+					"parameters":  firstNonNil(item["parameters"], item["input_schema"]),
+				}
+			}
+			name := strings.TrimSpace(asString(fn["name"]))
+			if name == "" || seen[name] {
+				return
+			}
+			seen[name] = true
+			mapping[name] = ns
+			params := fn["parameters"]
+			if params == nil {
+				params = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
+			flatFn := map[string]any{
+				"type":        "function",
+				"name":        name,
+				"description": asString(fn["description"]),
+				"parameters":  params,
+			}
+			if s, ok := fn["strict"]; ok {
+				flatFn["strict"] = s
+			}
+			flat = append(flat, flatFn)
+			return
+		}
+		name := asString(item["name"])
+		if name == "" {
+			if fn, ok := item["function"].(map[string]any); ok {
+				name = asString(fn["name"])
+			}
+		}
+		if name != "" {
+			if seen[name] {
+				return
+			}
+			seen[name] = true
+			if ns != "" {
+				mapping[name] = ns
+			}
+		}
+		flat = append(flat, item)
+	}
+
+	for _, entry := range tools {
+		collect(entry, 0, "")
+	}
+	return flat, mapping
+}
+
+// downgradeCustomTool 把 custom(freeform) 工具降级成单 input 参数的 Chat function。
+func downgradeCustomTool(tool map[string]any) map[string]any {
+	extra := ""
+	if format, ok := tool["format"].(map[string]any); ok {
+		if def := asString(format["definition"]); def != "" {
+			extra = "\n\nGrammar:\n" + def
+		}
+	}
+	return map[string]any{
+		"type":        "function",
+		"name":        asString(tool["name"]),
+		"description": strings.TrimSpace(asString(tool["description"]) + "\n\n" + customToolHint + extra),
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"input": map[string]any{
+					"type":        "string",
+					"description": "Complete raw payload for this tool, verbatim.",
+				},
+			},
+			"required": []any{"input"},
+		},
+	}
+}
+
+// unwrapCustomInput 把 {"input":"..."} 参数还原成 freeform 原始字符串（回程用）。
+func unwrapCustomInput(args string) string {
+	if strings.TrimSpace(args) == "" {
+		return ""
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(args), &parsed); err != nil {
+		return args
+	}
+	switch v := parsed.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if s, ok := v["input"].(string); ok {
+			return s
+		}
+		if raw, ok := v["input"]; ok && raw != nil {
+			if b, err := json.Marshal(raw); err == nil {
+				return string(b)
+			}
+		}
+	}
+	return args
+}
+
+// marshalCustomInput 把回传的 freeform 输入打包成 Chat 工具参数（与 downgrade 对称）。
+func marshalCustomInput(v any) string {
+	s, ok := v.(string)
+	if !ok {
+		if v == nil {
+			s = ""
+		} else if b, err := json.Marshal(v); err == nil {
+			s = string(b)
+		}
+	}
+	b, err := json.Marshal(map[string]any{"input": s})
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+func firstNonNil(vals ...any) any {
+	for _, v := range vals {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
+// convertTools 把 Responses 工具定义转成上游 Chat 形态，并带出回程需要的语义
+// （custom 工具名集合、name -> namespace 映射）。
+func convertTools(tools []any) ([]any, map[string]bool, map[string]string) {
+	flat, nsMap := expandNamespaceTools(tools)
+	out := make([]any, 0, len(flat))
+	custom := map[string]bool{}
+	for _, t := range flat {
 		m, ok := t.(map[string]any)
 		if !ok {
 			out = append(out, t)
+			continue
+		}
+		if strings.EqualFold(asString(m["type"]), "custom") {
+			if n := asString(m["name"]); n != "" {
+				custom[n] = true
+			}
+			out = append(out, downgradeCustomTool(m))
 			continue
 		}
 		if _, ok := m["function"].(map[string]any); ok {
@@ -105,7 +346,7 @@ func convertTools(tools []any) []any {
 		}
 		out = append(out, m)
 	}
-	return out
+	return out, custom, nsMap
 }
 
 func convertInputItems(items []any) []any {
@@ -128,16 +369,23 @@ func convertInputItems(items []any) []any {
 		case "reasoning", "item_reference":
 			flush()
 			continue
-		case "function_call":
+		case "function_call", "custom_tool_call":
 			pending = append(pending, toToolCall(m))
 			continue
-		case "function_call_output":
+		case "function_call_output", "custom_tool_call_output":
 			flush()
 			out = append(out, map[string]any{
 				"role":         "tool",
 				"tool_call_id": asString(m["call_id"]),
 				"content":      asContentString(m["output"]),
 			})
+			continue
+		case "agent_message":
+			// 来自其他任务（子代理）的消息：按用户指令注入，别伪装成工具结果。
+			flush()
+			if txt := asContentString(m["content"]); strings.TrimSpace(txt) != "" {
+				out = append(out, map[string]any{"role": "user", "content": agentMessagePrefix + txt})
+			}
 			continue
 		}
 		flush()
@@ -156,12 +404,20 @@ func toToolCall(m map[string]any) map[string]any {
 	if callID == "" {
 		callID = asString(m["id"])
 	}
+	args := asString(m["arguments"])
+	if asString(m["type"]) == "custom_tool_call" {
+		// freeform 输入是整段字符串：打包成与降级工具对称的 {"input": ...}。
+		args = marshalCustomInput(m["input"])
+	}
+	if args == "" {
+		args = "{}"
+	}
 	return map[string]any{
 		"id":   callID,
 		"type": "function",
 		"function": map[string]any{
 			"name":      asString(m["name"]),
-			"arguments": asString(m["arguments"]),
+			"arguments": args,
 		},
 	}
 }
@@ -244,7 +500,7 @@ func asContentString(v any) string {
 	}
 }
 
-func chatCompletionToResponse(obj map[string]any) map[string]any {
+func chatCompletionToResponse(obj map[string]any, meta *responsesMeta) map[string]any {
 	id, _ := obj["id"].(string)
 	model, _ := obj["model"].(string)
 	var created int64
@@ -298,14 +554,29 @@ func chatCompletionToResponse(obj map[string]any) map[string]any {
 				args = asString(fn["arguments"])
 			}
 			callID := asString(tc["id"])
-			output = append(output, map[string]any{
-				"id":        callID,
-				"type":      "function_call",
-				"call_id":   callID,
-				"name":      name,
-				"arguments": args,
-				"status":    status,
-			})
+			var item map[string]any
+			if meta.isCustom(name) {
+				// custom(freeform) 回程还原：载荷是整段字符串，不是 JSON 参数。
+				item = map[string]any{
+					"id":      callID,
+					"type":    "custom_tool_call",
+					"call_id": callID,
+					"name":    name,
+					"input":   unwrapCustomInput(args),
+					"status":  status,
+				}
+			} else {
+				item = map[string]any{
+					"id":        callID,
+					"type":      "function_call",
+					"call_id":   callID,
+					"name":      name,
+					"arguments": args,
+					"status":    status,
+				}
+			}
+			meta.stampNamespace(item)
+			output = append(output, item)
 		}
 	}
 	out := map[string]any{
@@ -364,6 +635,7 @@ type responsesWriter struct {
 	rest    []byte
 	body    []byte
 	x       streamState
+	meta    *responsesMeta
 }
 
 type streamState struct {
@@ -393,6 +665,15 @@ type toolAcc struct {
 	id, name       string
 	args           strings.Builder
 	opened, closed bool
+	custom         bool // 客户端声明为 custom(freeform)：回程发 custom_tool_call 类 item
+}
+
+// toolDeltaEvent 按工具类型选流式增量事件名（custom 是 input 语义而非 arguments）。
+func (w *responsesWriter) toolDeltaEvent(acc *toolAcc) string {
+	if acc.custom {
+		return "response.custom_tool_call_input.delta"
+	}
+	return "response.function_call_arguments.delta"
 }
 
 func (w *responsesWriter) Header() http.Header { return w.ResponseWriter.Header() }
@@ -461,7 +742,7 @@ func (w *responsesWriter) flushJSON() {
 		_, _ = w.ResponseWriter.Write(w.body)
 		return
 	}
-	raw, err := json.Marshal(chatCompletionToResponse(obj))
+	raw, err := json.Marshal(chatCompletionToResponse(obj, w.meta))
 	if err != nil {
 		w.ResponseWriter.WriteHeader(status)
 		_, _ = w.ResponseWriter.Write(w.body)
@@ -704,6 +985,7 @@ func (w *responsesWriter) handleToolDeltas(tcs []any) error {
 		if fn != nil {
 			if n := asString(fn["name"]); n != "" {
 				acc.name = n
+				acc.custom = w.meta.isCustom(n)
 			}
 			args = asString(fn["arguments"])
 		}
@@ -720,7 +1002,7 @@ func (w *responsesWriter) handleToolDeltas(tcs []any) error {
 				return err
 			}
 			if acc.args.Len() > 0 {
-				if err := w.emit("response.function_call_arguments.delta", map[string]any{
+				if err := w.emit(w.toolDeltaEvent(acc), map[string]any{
 					"item_id":      acc.id,
 					"output_index": acc.outIdx,
 					"delta":        acc.args.String(),
@@ -731,7 +1013,7 @@ func (w *responsesWriter) handleToolDeltas(tcs []any) error {
 			continue
 		}
 		if args != "" {
-			if err := w.emit("response.function_call_arguments.delta", map[string]any{
+			if err := w.emit(w.toolDeltaEvent(acc), map[string]any{
 				"item_id":      acc.id,
 				"output_index": acc.outIdx,
 				"delta":        args,
@@ -752,16 +1034,22 @@ func (w *responsesWriter) openTool(acc *toolAcc) error {
 		acc.id = "call_" + asString(acc.idx)
 	}
 	acc.opened = true
+	item := map[string]any{
+		"id":      acc.id,
+		"status":  "in_progress",
+		"call_id": acc.id,
+		"name":    acc.name,
+	}
+	if acc.custom {
+		item["type"], item["input"] = "custom_tool_call", ""
+	} else {
+		item["type"], item["arguments"] = "function_call", ""
+	}
+	// namespace 必须在 added 就带上：客户端从 added 事件派发执行器，补到 done 已太晚。
+	w.meta.stampNamespace(item)
 	return w.emit("response.output_item.added", map[string]any{
 		"output_index": acc.outIdx,
-		"item": map[string]any{
-			"id":        acc.id,
-			"type":      "function_call",
-			"status":    "in_progress",
-			"call_id":   acc.id,
-			"name":      acc.name,
-			"arguments": "",
-		},
+		"item":         item,
 	})
 }
 
@@ -782,7 +1070,7 @@ func (w *responsesWriter) closeOpenItems() error {
 				return err
 			}
 			if acc.args.Len() > 0 {
-				if err := w.emit("response.function_call_arguments.delta", map[string]any{
+				if err := w.emit(w.toolDeltaEvent(acc), map[string]any{
 					"item_id":      acc.id,
 					"output_index": acc.outIdx,
 					"delta":        acc.args.String(),
@@ -791,21 +1079,38 @@ func (w *responsesWriter) closeOpenItems() error {
 				}
 			}
 		}
-		if err := w.emit("response.function_call_arguments.done", map[string]any{
-			"item_id":      acc.id,
-			"output_index": acc.outIdx,
-			"arguments":    acc.args.String(),
-		}); err != nil {
-			return err
+		var item map[string]any
+		if acc.custom {
+			input := unwrapCustomInput(acc.args.String())
+			if err := w.emit("response.custom_tool_call_input.done", map[string]any{
+				"item_id":      acc.id,
+				"output_index": acc.outIdx,
+				"input":        input,
+			}); err != nil {
+				return err
+			}
+			item = map[string]any{
+				"id": acc.id, "type": "custom_tool_call", "status": w.itemStatus(),
+				"call_id": acc.id, "name": acc.name, "input": input,
+			}
+		} else {
+			if err := w.emit("response.function_call_arguments.done", map[string]any{
+				"item_id":      acc.id,
+				"output_index": acc.outIdx,
+				"arguments":    acc.args.String(),
+			}); err != nil {
+				return err
+			}
+			item = map[string]any{
+				"id":        acc.id,
+				"type":      "function_call",
+				"status":    w.itemStatus(),
+				"call_id":   acc.id,
+				"name":      acc.name,
+				"arguments": acc.args.String(),
+			}
 		}
-		item := map[string]any{
-			"id":        acc.id,
-			"type":      "function_call",
-			"status":    w.itemStatus(),
-			"call_id":   acc.id,
-			"name":      acc.name,
-			"arguments": acc.args.String(),
-		}
+		w.meta.stampNamespace(item)
 		if err := w.emit("response.output_item.done", map[string]any{
 			"output_index": acc.outIdx,
 			"item":         item,
