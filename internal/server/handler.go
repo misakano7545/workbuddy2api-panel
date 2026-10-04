@@ -477,8 +477,8 @@ func (h *Handler) modelList() []map[string]any {
 	return out
 }
 
-// generationModelEntries /v1/models 里的出图/出视频模型条目（来自最近一次目录解析的
-// 旁路留存，零额外上游请求；尚未探测过该域时为空）。字段只给确定值：不编 context/output。
+// generationModelEntries /v1/models 里的出图模型条目（来自最近一次目录解析的旁路留存，
+// 零额外上游请求；尚未探测过该域时为空）。字段只给确定值：不编 context/output。
 func (h *Handler) generationModelEntries() []map[string]any {
 	if h.cfg.Upstream == nil {
 		return nil
@@ -490,16 +490,17 @@ func (h *Handler) generationModelEntries() []map[string]any {
 	var out []map[string]any
 	for _, realm := range realms {
 		for _, mi := range h.cfg.Upstream.GenerationModels(realm) {
-			entry := map[string]any{
-				"id":       realm + ":" + mi.ID,
-				"object":   "model",
-				"created":  1753600000,
-				"owned_by": "workbuddy",
+			// 只列图片：视频没有网关端点（CN 侧无查询路由、视频走连接器），列出来只会
+			// 引诱客户端去调不存在的路由。视频模型照旧不进对话名单（nonChatModel）。
+			if mi.GenerationKind != "image" {
+				continue
 			}
-			if mi.GenerationKind == "video" {
-				entry["video_generation"] = true
-			} else {
-				entry["image_generation"] = true
+			entry := map[string]any{
+				"id":               realm + ":" + mi.ID,
+				"object":           "model",
+				"created":          1753600000,
+				"owned_by":         "workbuddy",
+				"image_generation": true,
 			}
 			out = append(out, applyModelInfoFields(entry, mi))
 		}

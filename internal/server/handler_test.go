@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -871,7 +872,8 @@ func TestModelsEndpoint(t *testing.T) {
 			`{"id":"hy3","maxInputTokens":1000,"maxOutputTokens":8192},` +
 			`{"id":"deepseek-v4.1-flash","maxInputTokens":1000,"maxOutputTokens":8192},` +
 			`{"id":"glm-5.1","maxInputTokens":1000,"maxOutputTokens":8192},` +
-			// 出图/出视频模型：目录把它们从对话列表剔掉，但应单列出来并带对应标记。
+			// 出图模型：目录把它从对话列表剔掉，但应以 image_generation=true 单列出来；
+			// 视频模型（seedance）同样不进对话名单，且**不单列**（没有网关端点）。
 			`{"id":"hunyuan-image-alpha","name":"Hunyuan Image Alpha","tags":["text-to-image"]},` +
 			`{"id":"seedance-2.5","name":"Seedance-2.5","tags":["text-to-video","image-to-video"]}],` +
 			`"agents":[{"name":"cli","models":["glm-5.2","kimi-k3-1","deepseek-v4-flash","hy3","deepseek-v4.1-flash","glm-5.1"]}]}}`, false
@@ -901,19 +903,22 @@ func TestModelsEndpoint(t *testing.T) {
 	if !found {
 		t.Error("cn:glm-5.2 missing")
 	}
-	// 出图/出视频模型单列且带各自标记；对话列表口径不变（都不含它们）
-	imgOK, vidOK := false, false
+	// 出图模型单列且带标记；视频模型既不进对话名单、也不单列（端点已撤回）
+	imgOK, seedanceSeen := false, false
 	for _, m := range data {
 		e := m.(map[string]any)
-		switch e["id"] {
-		case "cn:hunyuan-image-alpha":
+		if e["id"] == "cn:hunyuan-image-alpha" {
 			imgOK = e["image_generation"] == true
-		case "cn:seedance-2.5":
-			vidOK = e["video_generation"] == true
+		}
+		if strings.Contains(fmt.Sprint(e["id"]), "seedance") {
+			seedanceSeen = true
 		}
 	}
-	if !imgOK || !vidOK {
-		t.Errorf("/v1/models 应单列 image/video 生成模型并带标记（img=%v vid=%v）：%v", imgOK, vidOK, data)
+	if !imgOK {
+		t.Errorf("/v1/models 应单列 cn:hunyuan-image-alpha 且带 image_generation=true：%v", data)
+	}
+	if seedanceSeen {
+		t.Errorf("视频模型不该出现在模型列表（无网关端点）：%v", data)
 	}
 }
 

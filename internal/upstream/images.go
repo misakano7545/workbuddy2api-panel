@@ -95,7 +95,7 @@ func sortedInfos(byID map[string]ModelInfo) []ModelInfo {
 
 // GenerationModels 最近一次目录解析留存的出图/出视频模型（空 = 尚未探测过该域）。
 // 目录把这些模型从**对话**列表剔掉（客户端拿它发对话会 11102），留存只供 /v1/models
-// 与面板以 image_generation / video_generation 标记列出——客户端据此发现可用的模型名。
+// 与面板以 image_generation 标记列出（视频不列：网关没有视频端点）。
 func (c *Client) GenerationModels(realm string) []ModelInfo {
 	c.imageMu.Lock()
 	defer c.imageMu.Unlock()
