@@ -304,6 +304,52 @@ func TestContinueReaderKeepaliveOnEmptyFrames(t *testing.T) {
 	}
 }
 
+// TestContinueInStreamErrorFrameNoRetry 上游把失败塞在流里（HTTP 200 内嵌
+// {code,msg,displayMsg}、无 choices 无 error）时：按显式失败终止，不续写、不盲重试
+// ——撞的是已拦下这个账号的策略，重试只是白跑一次；此前这种帧不置 errSeen，日志会把它
+// 记成「段无 finish 结束（疑似上游断流）」并让续写段白跑一次盲重试。
+func TestContinueInStreamErrorFrameNoRetry(t *testing.T) {
+	blocked := `data: {"code":11140,"msg":"request illegal","displayMsg":"请求被安全策略拦截"}` + "\n\n"
+
+	// ① 续写段（seg=1）收到拦截帧：不盲重试（首次请求由测试直接喂入，故只应有 1 次
+	// 取流请求 = 那次续写；未修时这里会变成 2 —— 多一次白撞同一账号的盲重试）。
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) {
+		if call == 1 {
+			return 200, blocked
+		}
+		return 200, testSeg2Text
+	})
+	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(testSeg1Text)))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("拦截帧不得触发盲重试：取流请求数=%d want 1（未修时为 2）", len(*reqs))
+	}
+	if s := string(out); !strings.Contains(s, "11140") || !strings.Contains(s, "request illegal") {
+		t.Fatalf("拦截帧应如实透传给客户端：\n%s", s)
+	}
+
+	// ② 主段（seg=0）收到拦截帧：同样按显式失败终止，不续写。
+	// 主段由初始流喂入（截到 length 终态之前 + 拦截帧 + EOF），故取流请求数应为 0。
+	mainSeg := testSeg1Text[:strings.Index(testSeg1Text, `data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"length"}]`)] + blocked
+	up2, reqs2 := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
+	r2 := newTestContinueReader(t, up2, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(mainSeg)))
+	out2, err := io.ReadAll(r2)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs2) != 0 {
+		t.Fatalf("主段拦截不得发起续写：取流请求数=%d want 0（未修时为 1）", len(*reqs2))
+	}
+	if s := string(out2); !strings.Contains(s, "11140") || !strings.Contains(s, "你好") {
+		t.Fatalf("主段拦截：正文照常 + 拦截帧如实透传，实际：\n%s", s)
+	}
+}
+
 // TestContinueReaderSeg2StreamCutBlindRetry 续写段被上游断流（无 finish_reason
 // 直接 EOF）时盲重试一次：重试请求体与断流段逐字节相同（已收内容都进 assistant
 // 前缀，幂等不重复），客户端最终拿到完整内容。线上 17:50 的「32k 处截断」正是

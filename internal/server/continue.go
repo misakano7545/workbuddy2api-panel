@@ -156,6 +156,16 @@ func (r *continueReader) frame(payload string) {
 		r.emit(payload)
 		return
 	}
+	// 同型的「流内失败帧」：上游把安全策略拦截这类失败塞在顶层 {code,msg,displayMsg}、
+	// 无 choices、无 error。若不认它，这帧会走完常规路径后什么都不命中（errSeen 不置位）
+	// —— 于是 (a) 日志把它记成「段无 finish 结束（疑似上游断流）」，(b) 续写段还会白跑
+	// 一次盲重试去撞同一个已被拦的账号。按显式失败处理：如实透传 + 终止续写。
+	if code, msg, ok := upstream.StreamErrorFrame(obj); ok {
+		log.Printf("WARN: [continue] 流内失败帧 code=%d msg=%q → 按显式失败终止（不续写）", code, msg)
+		r.errSeen = true
+		r.emit(payload)
+		return
+	}
 	if id, ok := obj["id"].(string); ok && id != "" && r.id == "" {
 		r.id = id
 	}

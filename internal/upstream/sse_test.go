@@ -407,6 +407,67 @@ func streamFrames(t *testing.T, raw string) (frames []map[string]any, doneCount 
 	return frames, doneCount
 }
 
+// TestStreamInStreamErrorFrame 上游把失败塞在 HTTP 200 的流里（顶层 {code,msg,displayMsg}、
+// 无 choices、无 error）：此前 normalizeFrame 的白名单把 code/msg 一并剥掉，客户端只看到
+// 「干净地停止、无任何失败」，我们的日志也只剩「段无 finish 结束」。现在如实透出为 error 帧。
+// 判据必须**窄**：带 choices 的帧（正文里出现 11140 / request illegal 是常态）与只有 usage
+// 的帧都不得被改写。
+func TestStreamInStreamErrorFrame(t *testing.T) {
+	raw := "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"正文在讨论 11140 与 request illegal 的语义\"}}]}\n\n" +
+		"data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n" +
+		"data: {\"code\":11140,\"msg\":\"request illegal\",\"displayMsg\":\"请求被安全策略拦截\",\"requestId\":\"rid-1\"}\n\n" +
+		"data: [DONE]\n\n"
+	frames, done := streamFrames(t, raw)
+	if done != 1 {
+		t.Fatalf("done=%d want 1", done)
+	}
+	if len(frames) != 3 {
+		t.Fatalf("frames=%d want 3（正文帧 + usage 帧 + error 帧）：%v", len(frames), frames)
+	}
+	if chs, _ := frames[0]["choices"].([]any); len(chs) != 1 {
+		t.Fatalf("带 choices 的正文帧不得改写：%v", frames[0])
+	}
+	if _, has := frames[1]["error"]; has {
+		t.Fatalf("只有 usage 的帧不得被当成失败帧：%v", frames[1])
+	}
+	e, ok := frames[2]["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("内嵌失败帧应透出为 error 帧，实际：%v", frames[2])
+	}
+	if e["code"].(float64) != 11140 || e["message"] != "request illegal" || e["requestId"] != "rid-1" {
+		t.Fatalf("error 帧内容=%v want code=11140 message=request illegal requestId=rid-1", e)
+	}
+	if _, has := frames[2]["choices"]; has {
+		t.Fatalf("error 帧不应带 choices：%v", frames[2])
+	}
+}
+
+// TestStreamErrorFramePredicate 判据本身的边界（无 choices 才认；displayMsg 兜底 message；
+// 非 JSON 数字 / 缺 code / 无 error 缺 code 都不算）。
+func TestStreamErrorFramePredicate(t *testing.T) {
+	cases := []struct {
+		name string
+		obj  map[string]any
+		code int
+		msg  string
+		ok   bool
+	}{
+		{"典型拦截", map[string]any{"code": float64(11140), "msg": "request illegal"}, 11140, "request illegal", true},
+		{"displayMsg 兜底", map[string]any{"code": float64(11140), "displayMsg": "拦截"}, 11140, "拦截", true},
+		{"带 choices 的正文", map[string]any{"code": float64(11140), "choices": []any{}}, 0, "", false},
+		{"标准 error 帧让给既有分支", map[string]any{"code": float64(11140), "error": map[string]any{}}, 0, "", false},
+		{"只有 usage", map[string]any{"usage": map[string]any{}}, 0, "", false},
+		{"code 非数字", map[string]any{"code": "11140"}, 0, "", false},
+		{"code 为 0", map[string]any{"code": float64(0)}, 0, "", false},
+	}
+	for _, c := range cases {
+		code, msg, ok := StreamErrorFrame(c.obj)
+		if code != c.code || msg != c.msg || ok != c.ok {
+			t.Errorf("%s: got (%d,%q,%v) want (%d,%q,%v)", c.name, code, msg, ok, c.code, c.msg, c.ok)
+		}
+	}
+}
+
 func TestNormalizeFrame(t *testing.T) {
 	cases := []struct {
 		name string

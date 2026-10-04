@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -384,6 +385,51 @@ func stripToolCallNames(obj map[string]any, seen map[int]bool) {
 	}
 }
 
+// StreamErrorFrame 识别「HTTP 200 流里内嵌的失败帧」，返回 (code, message, ok)。
+//
+// 上游把安全策略拦截（11140 request illegal）这类失败塞在 SSE 里，报文是**顶层**
+// {code,msg,displayMsg}——既没有 choices 也没有 error。normalizeFrame 的白名单会把
+// code/msg 一并剥掉，客户端于是只看到「干净地停止、无任何失败」，我们自己的日志也只
+// 剩一条「段无 finish 结束」，把策略拦截误记成上游断流。
+//
+// 判据必须**窄**：只认「没有 choices 的帧」——正文里出现「安全审核」「request illegal」
+// 甚至字面 11140 都是常态（模型讨论这类话题时就会说这几个词），按文本判必误伤。
+func StreamErrorFrame(obj map[string]any) (int, string, bool) {
+	if _, has := obj["choices"]; has {
+		return 0, "", false
+	}
+	if _, has := obj["error"]; has { // 已是标准 error 帧：走既有 error-passthrough
+		return 0, "", false
+	}
+	code, _ := obj["code"].(float64)
+	if code <= 0 {
+		return 0, "", false
+	}
+	msg, _ := obj["msg"].(string)
+	if msg == "" {
+		msg, _ = obj["displayMsg"].(string)
+	}
+	return int(code), msg, true
+}
+
+// streamErrorPayload 把内嵌失败帧改写成标准 error 帧：客户端据此看到真实失败，
+// 而不是一个空 chunk。code/message 原样带上，requestId 有则带上（排障靠它对上游工单），
+// 其余字段不编造。
+func streamErrorPayload(code int, msg, payload string) string {
+	e := map[string]any{"message": msg, "code": code}
+	var obj map[string]any
+	if json.Unmarshal([]byte(payload), &obj) == nil {
+		if rid, ok := obj["requestId"].(string); ok && rid != "" {
+			e["requestId"] = rid
+		}
+	}
+	raw, err := json.Marshal(map[string]any{"error": e})
+	if err != nil {
+		return payload
+	}
+	return string(raw)
+}
+
 // normalizeFrame 以 OpenAI 流式规范白名单重建帧：仅保留标准字段，
 // 剔除上游噪声（finish_reason:"" → null、空 content/refusal、空 tool_calls 列表、
 // 空占位 function_call、顶层未知字段），空 delta 键一律省略，
@@ -528,6 +574,16 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 			// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 			if _, hasErr := obj["error"]; hasErr {
 				if werr := writeRaw(payload); werr != nil {
+					return 0, werr
+				}
+				return 1, nil
+			}
+			// 流内失败帧（HTTP 200 内嵌 {code,msg,displayMsg}，无 choices）：白名单会把
+			// code/msg 剥掉，客户端只看到「干净地停止、无任何失败」——如实透出为 error 帧，
+			// 并留一行日志（此前这种帧完全无痕，策略拦截被误记成上游断流）。
+			if code, msg, ok := StreamErrorFrame(obj); ok {
+				log.Printf("WARN: [upstream] 流内失败帧（HTTP 200 内嵌）code=%d msg=%q → 如实透出为 error 帧", code, msg)
+				if werr := writeRaw(streamErrorPayload(code, msg, payload)); werr != nil {
 					return 0, werr
 				}
 				return 1, nil
