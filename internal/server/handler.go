@@ -473,13 +473,13 @@ func (h *Handler) modelList() []map[string]any {
 	}
 	// 出图模型（目录里被 tag 剔掉的 text-to-image / image-to-image）：对话列表照旧不含它们，
 	// 这里以 image_generation=true 单列——客户端据此发现可用的出图模型名，不会误发对话。
-	out = append(out, h.imageModelEntries()...)
+	out = append(out, h.generationModelEntries()...)
 	return out
 }
 
-// imageModelEntries /v1/models 里的出图模型条目（来自最近一次目录解析的旁路留存，
-// 零额外上游请求；尚未探测过该域时为空）。字段只给确定值：不编 context/output 上限。
-func (h *Handler) imageModelEntries() []map[string]any {
+// generationModelEntries /v1/models 里的出图/出视频模型条目（来自最近一次目录解析的
+// 旁路留存，零额外上游请求；尚未探测过该域时为空）。字段只给确定值：不编 context/output。
+func (h *Handler) generationModelEntries() []map[string]any {
 	if h.cfg.Upstream == nil {
 		return nil
 	}
@@ -489,13 +489,17 @@ func (h *Handler) imageModelEntries() []map[string]any {
 	}
 	var out []map[string]any
 	for _, realm := range realms {
-		for _, mi := range h.cfg.Upstream.ImageModels(realm) {
+		for _, mi := range h.cfg.Upstream.GenerationModels(realm) {
 			entry := map[string]any{
-				"id":               realm + ":" + mi.ID,
-				"object":           "model",
-				"created":          1753600000,
-				"owned_by":         "workbuddy",
-				"image_generation": true,
+				"id":       realm + ":" + mi.ID,
+				"object":   "model",
+				"created":  1753600000,
+				"owned_by": "workbuddy",
+			}
+			if mi.GenerationKind == "video" {
+				entry["video_generation"] = true
+			} else {
+				entry["image_generation"] = true
 			}
 			out = append(out, applyModelInfoFields(entry, mi))
 		}

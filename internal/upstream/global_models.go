@@ -205,7 +205,7 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 			ids := make([]string, 0, len(byID))
 			outInfos := make([]ModelInfo, 0, len(byID))
 			// 出图模型旁路留存（/v1/models 以 image_generation 标记列出），照旧不进对话列表。
-			c.stashImageModels("global", byID)
+			c.stashGenerationModels("global", sortedInfos(byID))
 			for _, mi := range byID {
 				if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {
 					continue
@@ -430,6 +430,8 @@ func (c *Client) globalModelsOnce(a *auth.Auth, path string) ([]string, []ModelI
 		return nil, nil, fmt.Errorf("global models status %d: %s", resp.StatusCode, truncate(string(raw), 120))
 	}
 	names, infos, _, _, err := parseGlobalModelNames(raw)
+	// 媒体生成模型的旁路留存不在这里做：parse 已把它们剔出对话名单，出图/出视频模型由
+	// /v3/config 那条探测路径留存（那份目录完整、含 tag，见 probeGlobalModels）。
 	return names, infos, err
 }
 
@@ -496,9 +498,15 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 			if id == "" || m.Disabled {
 				continue
 			}
-			out = append(out, id)
+			// 非对话条目同样剔掉：这条路径此前**完全没过滤**——seedance-2.5（text-to-video）
+			// 因此被当成对话模型列进 global 名单，面板里显示"不支持思考"。媒体生成模型
+			// （出图/出视频）的旁路留存由调用方 globalModelsOnce 做（它手上有 Client）。
 			mi := m.modelInfo()
 			mi.ID = id // name 兜底形态下 id 取自 name，对齐 names 输出
+			if nonChatModel(id, m.MaxOutputTokens, m.Tags) {
+				continue
+			}
+			out = append(out, id)
 			objInfos = append(objInfos, mi)
 			if len(m.Reasoning.SupportedEfforts) > 0 {
 				if efforts == nil {

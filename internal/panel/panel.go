@@ -368,6 +368,24 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 出图/出视频模型：目录按 tag 把它们从**对话**列表剔掉了（/v1/models 同样单列），
+	// 面板「模型与档位」也必须看得到——否则用户不知道有哪些能调。字段与对话模型同口径，
+	// 另加 image_generation / video_generation 标记（前端据此标「出图」「出视频」）。
+	for _, realm := range []string{"cn", "global"} {
+		if realm == "global" && !p.cfg.Upstream.GlobalEnabled {
+			continue
+		}
+		for _, mi := range p.cfg.Upstream.GenerationModels(realm) {
+			e := panelModelEntry(realm, mi, nil, "", p.cfg.Upstream.HTTP)
+			if mi.GenerationKind == "video" {
+				e["video_generation"] = true
+			} else {
+				e["image_generation"] = true
+			}
+			out = append(out, e)
+		}
+	}
+
 	if len(out) == 0 {
 		if len(fetchErrs) > 0 {
 			writeErr(w, http.StatusBadGateway, "fetch models: "+strings.Join(fetchErrs, "; "))

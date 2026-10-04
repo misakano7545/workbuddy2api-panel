@@ -455,16 +455,20 @@ func TestAppJSModelFilter(t *testing.T) {
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const start = src.indexOf('function mdRateValue');
-const end = src.indexOf('function mdRowHtml');
+const end = src.indexOf('function renderModels');
 if (start < 0 || end < 0) throw new Error('model filter helpers not found');
-const ctx = { Number, String, Array, Object, isFinite, parseFloat };
+// rateCell/outCell 定义在切片之外（各管一个单元格），本测试只关心行内徽标/档位列，桩掉。
+const ctx = { Number, String, Array, Object, isFinite, parseFloat, esc: v => String(v == null ? '' : v), rateCell: () => '', outCell: () => '' };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.mdMatch=mdMatch; this.mdSortList=mdSortList; this.mdRateValue=mdRateValue;', ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.mdMatch=mdMatch; this.mdSortList=mdSortList; this.mdRateValue=mdRateValue; this.mdRowHtml=mdRowHtml;', ctx);
 const models = [
   { id: 'cn:glm-5.2', name: 'GLM-5.2', vendor: 'Zhipu', tags: ['视觉'], supports_tool_call: true, supports_images: true, supports_reasoning: true, can_disable_thinking: true, supported_efforts: ['high', 'xhigh'], default_effort: 'high', is_default: false, credits: '0.79', promo_factor: 0.5, promo_credits: '0.40', promo_label: '夜间折扣', context_length: 1000000, max_output_tokens: 131000 },
   { id: 'cn:hy3', name: 'Hy3', supports_tool_call: true, supports_images: true, supports_reasoning: true, can_disable_thinking: false, supported_efforts: ['low', 'high'], default_effort: 'high', is_default: false, credits: '0', promo_factor: 0, promo_credits: '0', promo_label: '限时免费', context_length: 192000, max_output_tokens: 64000 },
   { id: 'global:hy3', name: 'Hy3 Global', supports_tool_call: false, supports_images: false, supports_reasoning: false, supported_efforts: [], is_default: false, credits: '0.11', context_length: 1000000, max_output_tokens: 393000 },
   { id: 'cn:auto', name: 'Auto', supports_tool_call: true, supports_images: true, supports_reasoning: true, is_default: true, credits: null, context_length: 256000, max_output_tokens: 32000 },
+  // 出图/出视频模型：目录里没有思考档位与上下文，行内要标「出图」「出视频」而不是「不支持思考」。
+  { id: 'cn:hunyuan-image-alpha', name: 'Hunyuan Image Alpha', tags: ['text-to-image'], image_generation: true, credits: '5.00' },
+  { id: 'global:seedance-2.5', name: 'Seedance-2.5', tags: ['text-to-video'], video_generation: true },
 ];
 const ids = list => list.map(m => m.id);
 const filter = f => ids(ctx.mdSortList(models.filter(m => ctx.mdMatch(m, f)), f));
@@ -486,6 +490,10 @@ process.stdout.write(JSON.stringify({
   sortContext: filter({ sort: 'context' }),
   sortOutput: filter({ sort: 'output' }),
   sortName: filter({ sort: 'name' }),
+  imgBadge: /出图/.test(ctx.mdRowHtml(models[4], null)),
+  vidBadge: /出视频/.test(ctx.mdRowHtml(models[5], null)),
+  vidClean: !/不支持思考|固定档|出图/.test(ctx.mdRowHtml(models[5], null)),
+  imgById: filter({ q: 'hunyuan-image-alpha' }),
   rateFree: ctx.mdRateValue(models[1]),
   rateMissing: ctx.mdRateValue(models[3]),
 }));`
@@ -501,23 +509,17 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("model filter node test failed: %v\n%s", err, out)
 	}
-	const want = `{"all":["cn:glm-5.2","cn:hy3","global:hy3","cn:auto"],` +
-		`"realm":["cn:glm-5.2","cn:hy3","cn:auto"],` +
-		`"tool":["cn:glm-5.2","cn:hy3","cn:auto"],` +
-		`"vision":["cn:glm-5.2","cn:hy3","cn:auto"],` +
-		`"reasoning":["cn:glm-5.2","cn:hy3","cn:auto"],` +
-		`"isDefault":["cn:auto"],` +
-		`"effortOff":["cn:glm-5.2"],` +
-		`"effortLow":["cn:hy3"],` +
-		`"free":["cn:hy3"],` +
-		`"promo":["cn:glm-5.2","cn:hy3"],` +
-		`"discount":["cn:glm-5.2"],` +
-		`"q":["cn:glm-5.2"],` +
-		`"qMiss":[],` +
-		`"sortRate":["cn:hy3","global:hy3","cn:glm-5.2","cn:auto"],` +
-		`"sortContext":["cn:glm-5.2","global:hy3","cn:auto","cn:hy3"],` +
-		`"sortOutput":["global:hy3","cn:glm-5.2","cn:hy3","cn:auto"],` +
-		`"sortName":["cn:auto","cn:glm-5.2","cn:hy3","global:hy3"],` +
+	const want = `{"all":["cn:glm-5.2","cn:hy3","global:hy3","cn:auto","cn:hunyuan-image-alpha","global:seedance-2.5"],` +
+		`"realm":["cn:glm-5.2","cn:hy3","cn:auto","cn:hunyuan-image-alpha"],` +
+		`"tool":["cn:glm-5.2","cn:hy3","cn:auto"],"vision":["cn:glm-5.2","cn:hy3","cn:auto"],` +
+		`"reasoning":["cn:glm-5.2","cn:hy3","cn:auto"],"isDefault":["cn:auto"],` +
+		`"effortOff":["cn:glm-5.2"],"effortLow":["cn:hy3"],"free":["cn:hy3"],` +
+		`"promo":["cn:glm-5.2","cn:hy3"],"discount":["cn:glm-5.2"],"q":["cn:glm-5.2"],"qMiss":[],` +
+		`"sortRate":["cn:hy3","global:hy3","cn:glm-5.2","cn:hunyuan-image-alpha","cn:auto","global:seedance-2.5"],` +
+		`"sortContext":["cn:glm-5.2","global:hy3","cn:auto","cn:hy3","cn:hunyuan-image-alpha","global:seedance-2.5"],` +
+		`"sortOutput":["global:hy3","cn:glm-5.2","cn:hy3","cn:auto","cn:hunyuan-image-alpha","global:seedance-2.5"],` +
+		`"sortName":["cn:auto","cn:glm-5.2","cn:hunyuan-image-alpha","cn:hy3","global:hy3","global:seedance-2.5"],` +
+		`"imgBadge":true,"vidBadge":true,"vidClean":true,"imgById":["cn:hunyuan-image-alpha"],` +
 		`"rateFree":0,"rateMissing":null}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("model filter=%s\nwant %s", out, want)

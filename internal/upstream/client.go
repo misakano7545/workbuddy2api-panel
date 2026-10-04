@@ -1102,19 +1102,22 @@ type ModelInfo struct {
 	DefaultEffort string   // reasoning.defaultEffort（新模型键）或 reasoning.effort（老模型键）；空=未返回
 
 	// 模型目录全字段（models-full-fields）：
-	Description        string   // descriptionZh 中文描述
-	Credits            string   // credits 积分倍率原文（如 "x0.05"），仅展示不参与选号
-	Tags               []string // tags 模型标签（含 badge:限时免费 等）
-	Vendor             string   // vendor 厂商标识
-	IsDefault          bool     // isDefault 是否默认模型
-	SupportsReasoning  bool     // supportsReasoning 是否支持推理
-	SupportsToolCall   bool     // supportsToolCall 是否支持工具调用
-	OnlyReasoning      bool     // onlyReasoning 是否纯推理模型
-	SupportsImages     bool     // 顶层 supportsImages（多模态能力，透出到 /v1/models）
-	MaxAllowedSize     int64    // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
-	CanDisableThinking bool     // reasoning.canDisableThinking：思考可关（off 档可用）
-	ReasoningEffort    string   // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
-	ReasoningSummary   string   // reasoning.summary 推理摘要模式（如 "auto"）
+	Description       string   // descriptionZh 中文描述
+	Credits           string   // credits 积分倍率原文（如 "x0.05"），仅展示不参与选号
+	Tags              []string // tags 模型标签（含 badge:限时免费 等）
+	Vendor            string   // vendor 厂商标识
+	IsDefault         bool     // isDefault 是否默认模型
+	SupportsReasoning bool     // supportsReasoning 是否支持推理
+	SupportsToolCall  bool     // supportsToolCall 是否支持工具调用
+	OnlyReasoning     bool     // onlyReasoning 是否纯推理模型
+	SupportsImages    bool     // 顶层 supportsImages（多模态能力，透出到 /v1/models）
+	MaxAllowedSize    int64    // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
+	// GenerationKind 媒体生成类型（"image"/"video"），仅由旁路留存设置（见 images.go）：
+	// 这批模型被 nonChatModel 剔出对话列表，靠它单列到 /v1/models 与面板。
+	GenerationKind     string
+	CanDisableThinking bool   // reasoning.canDisableThinking：思考可关（off 档可用）
+	ReasoningEffort    string // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
+	ReasoningSummary   string // reasoning.summary 推理摘要模式（如 "auto"）
 
 	// 优惠（modelPromotions，/v3/config data.modelPromotions）：Credits 是**牌价**
 	//（转正后基准倍率），Promo* 是当前生效的限时优惠——面板据此显示「生效价 +
@@ -1193,7 +1196,9 @@ func (m dynModelEntry) modelInfo() ModelInfo {
 // 来源：harness buddy.ts:547-555。三类规则：
 //   - id 前缀 nes-/completion-/codewise-：嵌入/补全/代码专用模型，选了报 code=11102。
 //   - maxOutputTokens ≤ 256：tiny 输出非对话模型。
-//   - tags 含 text-to-image：图片生成模型，非本网关用途。
+//   - tags 标注为媒体生成（出图 text-to-image / 改图 image-to-image / 出视频
+//     text-to-video / 改视频 image-to-video）：选了发对话会 11102。**视频这两条以前
+//     漏了**，seedance-2.5 因此被当成对话模型列了一个多月（面板里显示"不支持思考"）。
 func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 	id = strings.ToLower(strings.TrimSpace(id))
 	for _, p := range [...]string{"nes-", "completion-", "codewise-"} {
@@ -1204,12 +1209,22 @@ func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 	if maxOutputTokens > 0 && maxOutputTokens <= 256 {
 		return true
 	}
+	return generationKind(tags) != ""
+}
+
+// generationKind 从 tags 判媒体生成类型（"" = 非生成模型）：image 出图/改图、
+// video 出视频/改视频。nonChatModel（把它们剔出对话列表）与旁路留存（/v1/models 与
+// 面板单列）共用同一份判据——两边各写一套必然漂移。
+func generationKind(tags []string) string {
 	for _, t := range tags {
-		if t == "text-to-image" {
-			return true
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "text-to-image", "image-to-image":
+			return "image"
+		case "text-to-video", "image-to-video":
+			return "video"
 		}
 	}
-	return false
+	return ""
 }
 
 // codeBuddyIDEUA /v3/config 要求能解析出 CodeBuddy 版本号的 UA。
@@ -1401,7 +1416,7 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 		return nil, err
 	}
 	// 出图模型旁路留存（供 /v1/models 以 image_generation 标记列出），下面照旧不进对话列表。
-	c.stashImageModels("cn", byID)
+	c.stashGenerationModels("cn", sortedInfos(byID))
 	out := make([]ModelInfo, 0, len(byID))
 	for _, mi := range byID {
 		if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {
