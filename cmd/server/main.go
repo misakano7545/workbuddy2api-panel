@@ -400,10 +400,12 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           gw,
 		ReadHeaderTimeout: 30 * time.Second,
-		// ReadTimeout 覆盖整个请求读取（含 body）：防慢速 body 拖死连接。
-		// 请求体已无网关侧上限（max_body_mb 移除），60s 按常规带宽的数十 MB
-		// 上传余量取值；超大 body 慢速上传若超时，由客户端重试。
-		ReadTimeout: 60 * time.Second,
+		// ReadTimeout 覆盖整个请求读取（含 body 上传）：防慢速 body 拖死连接。
+		// 请求体已无网关侧上限（max_body_mb 移除）。缺省 300s（issue #100：旧固定
+		// 60s 会掐掉大上下文/文件块经反代链的慢速上传，客户端收到
+		// 400 "read body: ... i/o timeout"）；server.read_timeout="0" 显式关闭。
+		// 改动需重启进程。
+		ReadTimeout: cfg.ServerReadTimeoutDur,
 		// IdleTimeout keep-alive 空闲连接回收：配合 chat 出站 ctx 传播防连接泄漏堆积。
 		// 注意：SSE 流式响应期间连接非空闲，不受此项掐断；不设全局 WriteTimeout
 		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。
@@ -654,6 +656,7 @@ func restartRequiredFields(current, next *Config) []string {
 	changed("logging.request_archive_enabled", current.Logging.RequestArchiveEnabled, next.Logging.RequestArchiveEnabled)
 	changed("logging.request_retention_days", current.Logging.RequestRetentionDays, next.Logging.RequestRetentionDays)
 	changed("logging.request_archive_max_mb", current.Logging.RequestArchiveMaxMB, next.Logging.RequestArchiveMaxMB)
+	changed("server.read_timeout", current.Server.ReadTimeout, next.Server.ReadTimeout)
 	return out
 }
 

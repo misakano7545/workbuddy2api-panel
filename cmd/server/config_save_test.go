@@ -66,12 +66,12 @@ func TestRestartRequiredIncludesAllAssemblyFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := ParseConfig([]byte(`{"global":{"enabled":false},"prompt":{"mode":"custom"},"upstream":{"user_agent":"new-agent"},"session_sticky":{"enabled":false},"upstash":{"url":"https://example.upstash.io","token":"sample"}}`))
+	next, err := ParseConfig([]byte(`{"global":{"enabled":false},"prompt":{"mode":"custom"},"upstream":{"user_agent":"new-agent"},"session_sticky":{"enabled":false},"server":{"read_timeout":"120s"},"upstash":{"url":"https://example.upstash.io","token":"sample"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	fields := restartRequiredFields(current, next)
-	for _, want := range []string{"global.enabled", "prompt.mode", "upstream.user_agent", "session_sticky.enabled", "upstash.url", "upstash.token"} {
+	for _, want := range []string{"global.enabled", "prompt.mode", "upstream.user_agent", "session_sticky.enabled", "server.read_timeout", "upstash.url", "upstash.token"} {
 		found := false
 		for _, field := range fields {
 			found = found || field == want

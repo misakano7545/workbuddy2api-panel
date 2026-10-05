@@ -3,6 +3,9 @@
   "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
+  "server": {
+    "read_timeout": "300s"
+  },
   "panel": {
     "package_detail_limit": 5
   },
