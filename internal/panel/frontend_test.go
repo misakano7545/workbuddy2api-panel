@@ -1056,3 +1056,38 @@ process.stdout.write(JSON.stringify([
 		t.Fatalf("collectConfig=%s want %s", strings.TrimSpace(string(out)), want)
 	}
 }
+
+// 图片模型的倍率格：上游不报倍率时用「实测 X/张」兜底（来源是本网关的实扣记录），
+// 有牌价时仍旧显示牌价——牌价与实测必须分列，不能互相顶替。
+func TestAppJSRateCellMeasuredFallback(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; rateCell test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function rateCell(');
+assert.ok(start >= 0, 'rateCell not found');
+const ctx = { String, Object, esc: v => String(v == null ? '' : v) };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, src.indexOf('async function loadModels(')) + '\nthis.rateCell = rateCell;', ctx);
+// ① 无牌价 + 有实测 → 实测 0.55/张
+const a = ctx.rateCell({ credits: '', measured_credit: '0.55' });
+assert.ok(a.includes('实测 0.55/张'), 'want 实测 0.55/张, got: ' + a);
+// ② 有牌价 → 显示牌价，实测不顶替
+const b = ctx.rateCell({ credits: 'x5.00', measured_credit: '5.71' });
+assert.ok(b.includes('x5.00') && !b.includes('实测'), '牌价优先, got: ' + b);
+// ③ 两者都无 → 仍是破折号（不编数字）
+const c = ctx.rateCell({ credits: '' });
+assert.equal(c, '—');
+console.log('rateCell measured fallback passed');`
+	path := filepath.Join(t.TempDir(), "ratecell.cjs")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, path, "app.js").CombinedOutput(); err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}

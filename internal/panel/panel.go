@@ -373,6 +373,21 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	// 出图模型：目录按 tag 把它们从**对话**列表剔掉了（/v1/models 同样单列），面板
 	// 「模型与档位」也必须看得到——否则用户不知道有哪些能调。字段与对话模型同口径，
 	// 另加 image_generation 标记（前端据此标「出图」）。视频不列：没有网关端点。
+	//
+	// 倍率：上游对图片模型**不报**倍率（全字段实测：v3 目录里 gpt-image-2.5-sunburst
+	// 只有 id/name/tags，连 credits 键都没有；企业端点不列媒体模型），所以空倍率那一格
+	// 用**我们自己账本里的实扣值**兜底（credit_by_model 的 credits/credit_samples）。
+	// 实测 0.55 credit/张 vs 国内混元目录牌价 x5.00 —— 两个数都不是编的，来源不同故分列：
+	// credits 是牌价，measured_credit 是实测单价（前端加「实测」字样）。
+	// ponytail: 按裸模型名聚合，不区分域（图片模型跨域同名只混元一例，且国际侧无路由）。
+	measured := map[string]string{}
+	if p.cfg.Usage != nil {
+		for _, c := range p.cfg.Usage.Snapshot(0, nil).CreditByModel {
+			if c.CreditSamples > 0 && c.Credits > 0 {
+				measured[c.Key] = strconv.FormatFloat(c.Credits/float64(c.CreditSamples), 'f', 2, 64)
+			}
+		}
+	}
 	for _, realm := range []string{"cn", "global"} {
 		if realm == "global" && !p.cfg.Upstream.GlobalEnabled {
 			continue
@@ -383,6 +398,11 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 			}
 			e := panelModelEntry(realm, mi, nil, "", p.cfg.Upstream.HTTP)
 			e["image_generation"] = true
+			if e["credits"] == "" {
+				if v, ok := measured[mi.ID]; ok {
+					e["measured_credit"] = v
+				}
+			}
 			out = append(out, e)
 		}
 	}

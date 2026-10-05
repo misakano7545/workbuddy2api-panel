@@ -570,6 +570,12 @@ function rateCell(m) {
     return '<span' + tip + ' style="cursor:help">' + (m.credits ? esc(m.credits) : '—') +
       ' <span class="tag warn">' + esc(m.promo_label) + '</span></span>';
   }
+  if (!m.credits && m.measured_credit) {
+    // 上游对图片模型不报倍率（目录条目里连 credits 键都没有），用我们账本里的实扣值兜底：
+    // 「实测 0.55/张」是真实计费观测，不是牌价——出处不同，所以加「实测」二字区分。
+    return '<span title="上游未报倍率；此值来自本网关的实际扣费记录（credits/张）" style="cursor:help;color:var(--ink-2)">实测 ' +
+      esc(m.measured_credit) + '/张</span>';
+  }
   return m.credits ? esc(m.credits) : '—';
 }
 
