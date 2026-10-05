@@ -300,6 +300,55 @@ ctx.setJobs = v => { store.jobs = v; };
 	}
 }
 
+// 成长任务行第二列必须是中文名，不能退回左边那列代号。
+//
+// 为什么需要：后台任务结果行只存 task_code + desc（线上实测 24 个任务码全无 title），
+// 而 title 兜底链原本是 title → GROWTH_TITLES → code，扫描没跑过就退成代号，
+// 出现「Model_chat_GLM5.2  Model_chat_GLM5.2」两列同名。
+func TestAppJSTaskRowNameFallback(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; task row name test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const jobsStart = src.indexOf('function taskOutcomeStatus'), jobsEnd = src.indexOf("$('btnTaskJobsReload')");
+const nameStart = src.indexOf('function groupItems(d)'), nameEnd = src.indexOf('function renderQueue');
+const titlesStart = src.indexOf('const GROWTH_TITLES'), titlesLine = src.slice(titlesStart, src.indexOf('\n', titlesStart));
+assert.ok(jobsStart >= 0 && jobsEnd > jobsStart && nameStart >= 0 && nameEnd > nameStart && titlesStart >= 0);
+const ctx = { String, Number, RegExp, Object, Array, Map, JSON, console, esc: s => String(s == null ? '' : s) };
+const dom = new Proxy(function () {}, { get: (t, k) => (k === Symbol.toPrimitive ? () => '' : dom), set: () => true, apply: () => dom });
+Object.assign(ctx, { $: () => dom, document: dom, window: dom, localStorage: dom, location: dom });
+vm.createContext(ctx);
+vm.runInContext(titlesLine + '\n' + src.slice(nameStart, nameEnd) + '\n' + src.slice(jobsStart, jobsEnd) +
+  '\nthis.GROWTH_TITLES = GROWTH_TITLES;', ctx);
+// ① 只有 desc（后台任务行的真实形状）：第二列出中文说明，代号只出现一次
+const desc = '接受任务 → glm-5.2 真实对话一次 → 对齐模型上报';
+const html = ctx.qrowHTML({ kind: 'job', code: 'Model_chat_GLM5.2', desc, status: 'done', prog: '1/1' });
+assert.ok(html.includes(desc), 'name column should show desc: ' + html);
+assert.equal(html.split('Model_chat_GLM5.2').length - 1, 1, 'code must appear once only: ' + html);
+// ② 扫描缓存里的上游短名优先于 desc
+ctx.GROWTH_TITLES['RichMeow_Chat'] = '桌面端对话1次';
+assert.ok(ctx.qrowHTML({ code: 'RichMeow_Chat', desc: 'x', status: 'done' }).includes('桌面端对话1次'));
+// ③ 两者都没有才退回代号（上游未知码的兜底不变）
+assert.ok(ctx.qrowHTML({ code: 'unknown_code', status: 'done' }).includes('>unknown_code<'));
+// ④ groupsFromJobs 必须把 desc 透传给行
+const groups = ctx.groupsFromJobs([{ uid: 'u1', nickname: 'A', trigger: 'daily', status: 'finished',
+  completed: 1, total: 1, results: [{ task_code: 'Model_chat_GLM5.2', desc, status: 'done' }] }]);
+assert.equal(groups[0].rows[0].desc, desc);
+assert.ok(ctx.qrowHTML(groups[0].rows[0]).includes(desc));
+console.log('task row name fallback passed');`
+	path := filepath.Join(t.TempDir(), "task-row-name.cjs")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, path, "app.js").CombinedOutput(); err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
 // 模型限流时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
 func TestAppJSRateLimitMeta(t *testing.T) {
 	node, err := exec.LookPath("node")

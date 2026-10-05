@@ -1341,7 +1341,7 @@ function taskJobPresentation(job) {
 }
 
 function taskJobRows(job) {
-  return (job.results || []).map(item => qrowHTML({ code: item.task_code || '', title: item.title,
+  return (job.results || []).map(item => qrowHTML({ code: item.task_code || '', title: item.title, desc: item.desc,
     status: taskOutcomeStatus(item), message: item.message || item.claim_error,
     prog: item.progress_after || item.progress_before || '' })).join('');
 }
@@ -1419,7 +1419,7 @@ function groupsFromJobs(jobs) {
       cnt: info.trigger + ' · ' + info.label + (info.progress ? ' · ' + info.progress : ''),
       tip: info.message, // 明细挂 title（原「后台自动任务」卡的状态行）
       rows: (job.results || []).map(item => ({
-        kind: 'job', code: item.task_code || '', title: item.title,
+        kind: 'job', code: item.task_code || '', title: item.title, desc: item.desc,
         status: taskOutcomeStatus(item), message: item.message || item.claim_error,
         prog: item.progress_after || item.progress_before || '',
       })),
@@ -1563,8 +1563,11 @@ function taskProgressLabel(value) {
   const progress = String(value ?? '').trim();
   return /^\d+(?:\s*\/\s*\d+)?$/.test(progress) ? progress : '—';
 }
+// 展示名：上游短中文名 > 扫描缓存 > 本仓中文说明 > 代号兜底。
+// 后台任务结果行只带 task_code/desc（实测 24 个码全无 title），不接 desc 就会
+// 一路退回代号，与左边那列代号同名。
 function qrowHTML(it) {
-  const title = it.title || GROWTH_TITLES[it.code] || it.code;
+  const title = it.title || GROWTH_TITLES[it.code] || it.desc || it.code;
   const dotCls = it.status === 'scan' ? 'wait' : it.status === 'running' ? 'run' : it.status === 'error' ? 'err' : it.status === 'skipped' ? 'skip' : it.status === 'done' ? 'done' : 'wait';
   const stWord = it.status === 'scan' ? '待执行' : (ST_WORDS[it.status] || it.status);
   const progress = taskProgressLabel(it.prog);
