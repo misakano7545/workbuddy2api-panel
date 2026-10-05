@@ -276,37 +276,6 @@ func TestRateLimitedModelsMultiModel(t *testing.T) {
 	}
 }
 
-// 无重置时间的 6004 只写 AuditOnly 台账：账号页可见，但不得改变模型路由。
-func TestModelRateLimitAuditDoesNotAffectRouting(t *testing.T) {
-	p := New("")
-	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownSoftRate("u1", time.Minute, time.Time{}, "429 rate limit")
-	p.RecordModelRateLimitAudit("u1", "glm-5.3", "6004 model rate limit (reset unknown)")
-
-	p.mu.Lock()
-	e := p.byUID["u1"]
-	mc, ok := e.modelCooldowns["glm-5.3"]
-	if ok && mc.AuditOnly {
-		mc.Until = time.Now().Add(time.Hour)
-		e.modelCooldowns["glm-5.3"] = mc
-	}
-	p.mu.Unlock()
-	if !ok || !mc.AuditOnly {
-		t.Fatalf("audit entry missing: %+v ok=%v", mc, ok)
-	}
-	if e.modelCooled(time.Now(), "glm-5.3") {
-		t.Fatal("AuditOnly 台账不得参与 modelCooled")
-	}
-	if e.modelExempt() {
-		t.Fatal("仅 AuditOnly 台账不得让账号进入模型豁免形态")
-	}
-
-	st, _ := p.Status("u1")
-	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Kind != "rate_limit" {
-		t.Fatalf("audit status = %+v, want one rate_limit row", st.RateLimitedModels)
-	}
-}
-
 // 11102 与 6004 共用台账但必须输出不同 kind。
 func TestRateLimitedModelKindModelUnavailable(t *testing.T) {
 	p := New("")
@@ -315,29 +284,6 @@ func TestRateLimitedModelKindModelUnavailable(t *testing.T) {
 	st, _ := p.Status("u1")
 	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Kind != "model_unavailable" {
 		t.Fatalf("rows=%+v want model_unavailable", st.RateLimitedModels)
-	}
-}
-
-// AuditOnly 标记必须跨重启保留，否则无重置时间的 6004 展示项会失忆并参与路由。
-func TestModelRateLimitAuditPersists(t *testing.T) {
-	dir := t.TempDir()
-	fp := dir + "/state.json"
-	p := New(fp)
-	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownSoftRate("u1", time.Minute, time.Time{}, "429 rate limit")
-	p.RecordModelRateLimitAudit("u1", "glm-5.3", "6004 model rate limit (reset unknown)")
-	p.Flush()
-
-	p2 := New(fp)
-	p2.Add(&auth.Auth{UID: "u1"})
-	p2.mu.RLock()
-	mc, ok := p2.byUID["u1"].modelCooldowns["glm-5.3"]
-	p2.mu.RUnlock()
-	if !ok || !mc.AuditOnly {
-		t.Fatalf("audit entry not restored: %+v ok=%v", mc, ok)
-	}
-	if p2.byUID["u1"].modelExempt() {
-		t.Fatal("restored AuditOnly entry must not create model exemption")
 	}
 }
 

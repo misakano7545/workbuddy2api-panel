@@ -163,9 +163,9 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 				ResetAt: resetAt,
 				Reason:  reason,
 			}
-		} else {
-			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶
-			// softRateMax）。注意：**在软冷却中**（until 未到期）时不推进/不延长。
+		} else if model == "" {
+			// 无模型名 → 无从「只停该模型」，退回账号级有界退避（现状语义）。
+			// 注意：**在软冷却中**（until 未到期）时不推进/不延长。
 			if e.coolKind != CoolSoft || !now.Before(e.until) {
 				d := p.softDurationLocked(base, e.softStreak+1)
 				e.softStreak++
@@ -174,41 +174,28 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			e.coolKind = CoolSoft
 			e.reason = reason
 			clearRoutingModelCooldownsLocked(e)
+		} else {
+			// 无解析时间：把 **(号, 模型)** 停车，而不是整号冷却。
+			//
+			// 为什么必须模型级：6004/14003 的语义都是「这个模型忙/额度紧」，上游文案就是让
+			// 客户端换模型，实测同号换模型立刻可用。按账号冷却是把「一个模型抖动」放大成
+			// 「整池停摆」（线上事故：几个并发请求几十秒内冷掉十几个号 → 全站 503）。
+			// TTL 沿用 soft_rate 家族（base 起按 hits 翻倍、封顶 soft_rate_max），
+			// 与「带解析时间」分支同表（modelCooldowns），面板台账自动可见。
+			// ponytail: 成功调用不提前清这条（只按 TTL 到期）；实测同一 (号,模型) 被反复
+			// 停车再加重试期间清除逻辑。
+			if e.modelCooldowns == nil {
+				e.modelCooldowns = map[string]modelCooldown{}
+			}
+			hits := e.modelCooldowns[model].Hits + 1
+			e.modelCooldowns[model] = modelCooldown{
+				Until:  now.Add(p.softDurationLocked(base, hits)),
+				Reason: reason,
+				Hits:   hits,
+			}
 		}
 		p.dirty.Store(true)
 	}
-}
-
-// RecordModelRateLimitAudit 记录无法参与模型路由的 6004 展示项。
-// 典型场景是 6004 没有可解析重置时间：账号仍按原有有界退避冷却，
-// 本方法只把模型名挂到 e.until 上供账号页展示，不影响 healthyForModel。
-func (p *Pool) RecordModelRateLimitAudit(uid, model, reason string) {
-	if uid == "" || model == "" {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	e, ok := p.byUID[uid]
-	if !ok {
-		return
-	}
-	now := time.Now()
-	if old, exists := e.modelCooldowns[model]; exists && !old.AuditOnly && old.Until.After(now) {
-		return // 已有真实模型冷却，审计记录不得覆盖路由截止
-	}
-	until := e.until
-	if until.IsZero() || !until.After(now) {
-		until = now.Add(p.softRateMaxOr())
-	}
-	if e.modelCooldowns == nil {
-		e.modelCooldowns = make(map[string]modelCooldown)
-	}
-	e.modelCooldowns[model] = modelCooldown{
-		Until:     until,
-		Reason:    reason,
-		AuditOnly: true,
-	}
-	p.dirty.Store(true)
 }
 
 // clearRoutingModelCooldownsLocked 删除参与选号豁免的模型冷却，保留 AuditOnly 台账。

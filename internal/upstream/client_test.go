@@ -41,6 +41,13 @@ func TestClassify(t *testing.T) {
 		{400, `Illegal API invocation from an unapproved channel`, ErrContentBlocked},
 		{400, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
 		{400, `unapproved channel`, ErrContentBlocked},
+		// 11140 的第二种形态：内容安全审核（官方会打断会话的那条文案）。
+		// 未收录时落 ErrClient：只换号不罚号、也不走降级重试，客户端拿到必然失败的答复。
+		{400, `{"code":11140,"msg":"Content failed safety review. Please revise it"}`, ErrContentBlocked},
+		// 14003 RateLimitError：模型忙（官方文案「当前模型请求繁忙，请切换模型」），
+		// 不是额度耗尽；200 信封形态也必须归软限流（否则账号不会被停车）。
+		{429, `{"code":14003,"msg":"too many requests","displayMsg":{"zh":"请求过于频繁，请稍后重试。"}}`, ErrSoftRate},
+		{200, `{"code":14003,"msg":"too many requests","displayMsg":{"zh":"请求过于频繁，请稍后重试。"}}`, ErrSoftRate},
 		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。
 		{400, `bad request`, ErrClient},
 		// ErrBadParams：请求体解析失败（HTTP 400 + Unmarshal chat params failed / code 11101）。
@@ -648,5 +655,28 @@ func TestFetchModelsOverlaysV3ConfigCapabilities(t *testing.T) {
 	}
 	if got := strings.Join(mi.Efforts, ","); got != "low,high,max" {
 		t.Errorf("Efforts=%v want low,high,max", mi.Efforts)
+	}
+}
+
+// TestIsModelRateLimitCodes 模型级限流的 code 集合：6004（已有）与 14003（模型忙）。
+// 14003 若漏收，槽位会落到账号级冷却——一个模型抖动就能冷掉整池（同类实现的线上事故形态）。
+func TestIsModelRateLimitCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"6004 完整形态", `{"code":6004,"msg":"将在 2026-10-05 20:00:00 重置"}`, true},
+		{"6004 带空格", `{"code": 6004}`, true},
+		{"14003 模型忙", `{"code":14003,"msg":"too many requests"}`, true},
+		{"14003 字符串码", `{"code":"14003"}`, true},
+		{"14018 额度耗尽不算模型级", `{"code":14018,"msg":"credits exhausted"}`, false},
+		{"11140 账号风控不算模型级", `{"code":11140,"msg":"request illegal"}`, false},
+		{"无 code", `{"msg":"too many requests"}`, false},
+	}
+	for _, c := range cases {
+		if got := IsModelRateLimit(c.body); got != c.want {
+			t.Errorf("%s: IsModelRateLimit=%v want %v", c.name, got, c.want)
+		}
 	}
 }

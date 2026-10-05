@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -293,8 +292,13 @@ func TestImagesRetryRotatesAccount(t *testing.T) {
 		t.Fatalf("应恰好 2 次上游调用（坏号 + 好号），实际 %d", calls)
 	}
 	bad, _ := p.Status("bad")
-	if !bad.Cooling || bad.Until.Before(time.Now()) {
-		t.Fatalf("坏号应被冷却（applyErrorPolicy）：%+v", bad)
+	// 上游给的是 6004（模型级）→ 停的是该 (号,模型)，账号本身不被整体冷却。
+	// 轮转照旧发生（换号后成功），两条断言一起钉住「换号 + 只停模型」。
+	if bad.Cooling {
+		t.Fatalf("6004 是模型级限流，账号不得整体冷却：%+v", bad)
+	}
+	if len(bad.RateLimitedModels) != 1 || bad.RateLimitedModels[0].Model != "hunyuan-image-alpha" {
+		t.Fatalf("该 (号,模型) 应被停车：%+v", bad.RateLimitedModels)
 	}
 }
 

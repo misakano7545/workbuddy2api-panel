@@ -174,7 +174,9 @@ type modelCooldown struct {
 	Reason string
 	// Hits 11102 负缓存的累计命中次数（驱动指数退避）。6004 条目 Hits 恒 0。
 	Hits int
-	// AuditOnly 为 true 时仅用于状态展示（例如无重置时间的 6004），
+	// AuditOnly 为 true 时仅用于状态展示（只展示不拦截选号）。
+	// 写入方已随「无重置时间的 6004 改为模型级停车」一并移除（原 RecordModelRateLimitAudit）；
+	// 字段与其读取侧的尊重逻辑保留，供持久化兼容与将来真需要「只展示」的场合。
 	// healthyForModel 与 modelExempt 必须忽略它，避免改变选号行为。
 	AuditOnly bool
 }

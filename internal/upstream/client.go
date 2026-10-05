@@ -147,10 +147,14 @@ var accountFaultMarkers = []string{
 // 注入指令）触发 HTTP 400 + 以下文案。这是「误报」（合法流量被审核误杀），
 // 非账号问题——该账号余额健康、未限流、session 未死，故 ErrContentBlocked
 // 在 applyErrorPolicy 中不罚账号（无冷却/熔断/NoteError），改由网关降级重试。
+// 11140 有**两种**形态：账号级授权风控（msg "request illegal"，见 accountFaultMarkers）
+// 与内容安全审核（msg 见下 "content failed safety review"，官方会打断会话的那个）。
+// 后者是内容问题不是账号问题，收进本表归 ErrContentBlocked（不罚号 + 降级重试）。
 var contentBlockedMarkers = []string{
 	"blocked by security policy",
 	"unapproved channel",
 	"illegal api invocation",
+	"content failed safety review",
 }
 
 // badParamsMarkers 请求体解析失败关键词（issue #41 连带）：HTTP 400 + 上游
@@ -211,7 +215,15 @@ func SoftRateResetLoc() *time.Location { return softRateResetLoc }
 // modelRateLimitCode 明确指向「模型级 429 限流」的业务 code。
 // 上游用它表达"该模型的使用量超限"（code 6004，msg 带「将在 … 重置」），
 // 而不是账号整体被限流——账号健康，只是这个模型此刻被限（issue #31）。
-const modelRateLimitCode = "6004"
+// modelRateLimitCodes 模型级限流的业务 code：
+//   - 6004：该模型额度/用量节流；
+//   - 14003 RateLimitError：官方文案「当前模型请求繁忙，请切换模型或稍后重试」。
+//     实测同号换模型立刻可用，官方 classifyErrorDetail 归 quota_request_limit，
+//     与额度耗尽（14001/14002/14012/…）明确分开——它不是账号问题（xiaofan6ya 线上
+//     事故：按账号级处理时 6 个并发请求 76 秒冷掉整池 → 全站 503 十分钟）。
+//
+// ponytail: 两者共用一套模型级判定与 TTL；实测发现同一 (号,模型) 被反复停车再给 14003 独立短档。
+const modelRateLimitCodes = "6004|14003"
 
 // softRateResetPatternCN/EN 匹配重置文案（CN「将在 … 重置」/ global 域英文
 // "reset at <固定格式时间>"），捕获中间的时间串。
@@ -222,7 +234,7 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 分类、每个限流 body 上调用，函数体内 MustCompile 是纯浪费；错误风暴（429
 // 轰炸）时尤甚。模式串均为纯常量。regexp 并发安全（匹配只读），无需额外锁。
 var (
-	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?(` + modelRateLimitCodes + `)"?`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -230,8 +242,8 @@ var (
 // softRateTimeLayout 上游重置时间的格式（无时区后缀；时区固定 UTC+8）。
 const softRateTimeLayout = "2006-01-02 15:04:05"
 
-// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004）。
-// 用于区分"账号级软限流"（按账号冷却）与"模型级用量限流"（切模型即可用）。
+// IsModelRateLimit 报告 body 是否明确指向模型级限流（业务 code 6004 / 14003）。
+// 用于区分"账号级软限流"（按账号冷却）与"模型级限流"（切模型即可用）。
 func IsModelRateLimit(body string) bool {
 	// `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）。
 	return reModelRateLimit.MatchString(body)
