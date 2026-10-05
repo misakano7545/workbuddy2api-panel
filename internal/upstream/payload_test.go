@@ -473,3 +473,43 @@ func TestNormalizeToolPatterns(t *testing.T) {
 		}
 	})
 }
+
+// TestClampGPTMinMaxTokens GPT 系上游要求 max_tokens ≥ 16（实测 gpt-6-sol/gpt-6-luna/
+// gpt-5.6-sol：15 → 400 code=11133 model_param_invalid，16 → 200，吸收上游 fd3e142）。
+// Claude Code 切模型时的探针请求 max_tokens 极小，全号轮转同样被拒 → 客户端 503。
+// 非 GPT 模型与未携带字段一律不动。
+func TestClampGPTMinMaxTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want any // nil 表示字段不存在
+	}{
+		{"gpt below floor", `{"model":"gpt-6-sol","max_tokens":1,"messages":[]}`, float64(16)},
+		{"gpt global prefix", `{"model":"global:gpt-5.6-sol","max_tokens":15,"messages":[]}`, float64(16)},
+		{"gpt at floor", `{"model":"gpt-6-luna","max_tokens":16,"messages":[]}`, float64(16)},
+		{"gpt above floor", `{"model":"gpt-6-sol","max_tokens":32000,"messages":[]}`, float64(32000)},
+		{"gpt alias translated then clamped", `{"model":"gpt-6-sol","max_completion_tokens":1,"messages":[]}`, float64(16)},
+		{"gpt absent untouched", `{"model":"gpt-6-sol","messages":[]}`, nil},
+		{"gpt zero clamped like unset", `{"model":"gpt-6-sol","max_tokens":0,"messages":[]}`, float64(16)},
+		{"non-gpt untouched", `{"model":"hy4-preview-f","max_tokens":1,"messages":[]}`, float64(1)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := PrepareBodyOptWithEfforts([]byte(c.body), false, nil)
+			var obj map[string]any
+			if err := json.Unmarshal(out, &obj); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, has := obj["max_tokens"]
+			if c.want == nil {
+				if has {
+					t.Fatalf("max_tokens = %v, want absent", got)
+				}
+				return
+			}
+			if got != c.want {
+				t.Fatalf("max_tokens = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
