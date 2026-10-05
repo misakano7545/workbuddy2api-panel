@@ -297,3 +297,60 @@ func TestImagesRetryRotatesAccount(t *testing.T) {
 		t.Fatalf("坏号应被冷却（applyErrorPolicy）：%+v", bad)
 	}
 }
+
+// TestImagesFailFastOnAccountIndependentErrors 出图侧请求级/模型级错误必须立即透传，
+// 不再按账号数换号重试（本轮修复）。
+//
+// 为什么：实测 14401「route config not found」会打满池里每个账号（2 个号 → 2 次上游
+// 调用），客户端还因 502 当瞬时故障反复重试；而它换任何账号都是同一个答复——模型在该
+// 域没有路由是域级配置。11101 同理（body 本身畸形）。所以断言「只打一次上游」。
+func TestImagesFailFastOnAccountIndependentErrors(t *testing.T) {
+	cases := []struct {
+		name  string
+		model string
+		body  string
+		want  string
+		// 两个同域账号，才能证明没换号
+		accts []*auth.Auth
+	}{
+		{
+			name:  "14401 模型在本域无路由",
+			model: "global:hunyuan-image-alpha",
+			body:  `{"code":14401,"msg":"Create image failed with error: Image model [hunyuan-image-alpha] route config not found"}`,
+			want:  "14401",
+			accts: []*auth.Auth{
+				{UID: "g1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"},
+				{UID: "g2", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"},
+			},
+		},
+		{
+			name:  "11101 请求体被上游拒",
+			model: "cn:hunyuan-image-alpha",
+			body:  `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`,
+			want:  "11101",
+			accts: []*auth.Auth{
+				{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+				{UID: "c2", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &imageFake{status: http.StatusBadRequest, body: c.body}
+			h := NewHandler(Config{Pool: testPoolWith(c.accts...), Upstream: f.client()})
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/images/generations",
+				strings.NewReader(`{"model":"`+c.model+`","prompt":"a cat"}`)))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("code=%d body=%s (want 400 透传)", rec.Code, rec.Body)
+			}
+			if !strings.Contains(rec.Body.String(), c.want) {
+				t.Errorf("400 应携带上游原文（%s）：%s", c.want, rec.Body)
+			}
+			if len(f.paths) != 1 {
+				t.Errorf("与账号无关的错误不得换号重试：打了 %d 次上游（want 1）", len(f.paths))
+			}
+		})
+	}
+}

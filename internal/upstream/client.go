@@ -240,10 +240,12 @@ func IsModelRateLimit(body string) bool {
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
 const modelBlockCode = "11102"
 
-// modelBlockMsgMarker 11102 答复的确定性文案（官方 error message 固定短语）。
+// modelBlockMsgMarkers 11102/14401 答复的确定性文案（官方 error message 固定短语）。
+// 14401「route config not found」是图像模型的同族答复：该模型在本域没有路由，
+// 与 11102「该后端无此模型」一样，换号与重试都不可能成功。
 // 只收这个窄短语，不收 "model ... not found" 宽正则——后者会误伤其他业务的
 // not found 措辞。
-const modelBlockMsgMarker = "service info not found"
+var modelBlockMsgMarkers = []string{"service info not found", "route config not found"}
 
 // ModelBlockReason 11102 负缓存条目在 pool.modelCooldowns 里的 reason 前缀。
 // handler 写 BlockModelBackoff；pool.BlockModelClear 按 "11102" 前缀识别条目
@@ -262,7 +264,8 @@ func IsModelBlocked(status int, body string) bool {
 		return false
 	}
 	// 轻量预检：body 既无 "11102" 又无 marker 时直接短路（大多数 4xx 零分配返回）。
-	if !strings.Contains(body, modelBlockCode) && !strings.Contains(strings.ToLower(body), modelBlockMsgMarker) {
+	lower := strings.ToLower(body)
+	if !strings.Contains(body, modelBlockCode) && !containsAnyMarker(lower, modelBlockMsgMarkers) {
 		return false
 	}
 	var root map[string]any
@@ -289,7 +292,17 @@ func IsModelBlocked(status int, body string) bool {
 	if code == modelBlockCode {
 		return true
 	}
-	return strings.Contains(strings.ToLower(msg), modelBlockMsgMarker)
+	return containsAnyMarker(strings.ToLower(msg), modelBlockMsgMarkers)
+}
+
+// containsAnyMarker 任一短语命中即真（文案判定统一走这里，避免各处各写一遍循环）。
+func containsAnyMarker(lower string, markers []string) bool {
+	for _, m := range markers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasBusinessCode reports whether a JSON error envelope contains an exact

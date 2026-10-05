@@ -37,6 +37,10 @@ func TestNonChatModelAndGenerationKind(t *testing.T) {
 // TestStashGenerationModelsMergesPerID 留存按 ID 合并而非覆盖：global 目录是多 UA 并发
 // 探测的，宽/窄两份目录都会落一笔——覆盖式留存会让结果取决于谁先返回（实测表现为
 // 「这次有 gpt-image-2.5-sunburst、下次变成 hunyuan-image-alpha」，seedance-2.5 时有时无）。
+//
+// 另：hunyuan-image-alpha 虽被 global 目录列出（上游目录确实带它），但国际侧**没有出图
+// 路由**（实测 400 code=14401 route config not found），故列表侧按 imageRouteRealm 过滤掉
+// ——这正是 issue 型「模型列出来却必失败」的修复点，故 global 侧只应剩 2 条。
 func TestStashGenerationModelsMergesPerID(t *testing.T) {
 	c := &Client{}
 	c.stashGenerationModels("global", []ModelInfo{
@@ -48,16 +52,18 @@ func TestStashGenerationModelsMergesPerID(t *testing.T) {
 		{ID: "glm-5.2", Tags: []string{"craft"}}, // 非媒体模型不入留存
 	})
 	got := c.GenerationModels("global")
-	if len(got) != 3 {
-		t.Fatalf("留存应合并成 3 条（窄目录不能顶掉宽目录），实际 %d：%+v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("global 留存应合并成 2 条（窄目录不能顶掉宽目录；hunyuan 无本域路由须剔除），实际 %d：%+v", len(got), got)
 	}
 	kinds := map[string]string{}
 	for _, m := range got {
 		kinds[m.ID] = m.GenerationKind
 	}
-	if kinds["gpt-image-2.5-sunburst"] != "image" || kinds["hunyuan-image-alpha"] != "image" ||
-		kinds["seedance-2.5"] != "video" {
+	if kinds["gpt-image-2.5-sunburst"] != "image" || kinds["seedance-2.5"] != "video" {
 		t.Fatalf("kind 标记不对：%+v", kinds)
+	}
+	if _, bad := kinds["hunyuan-image-alpha"]; bad {
+		t.Fatalf("国际侧无路由的 hunyuan-image-alpha 不得出现在 global 列表：%+v", got)
 	}
 	// 顺序稳定（按 ID 排序），重复留存不抖
 	again := c.GenerationModels("global")
@@ -65,5 +71,36 @@ func TestStashGenerationModelsMergesPerID(t *testing.T) {
 		if got[i].ID != again[i].ID {
 			t.Fatalf("留存顺序不稳定：%v vs %v", got, again)
 		}
+	}
+}
+
+// TestGenerationModelsRouteFilter 列表只列本域真有路由的图像模型（吸收本轮修复）：
+// 目录里出现 ≠ 本域能调。实测 hunyuan-image-alpha 只有国内路由、gpt-image-2.5-sunburst
+// 只有国际路由；未知模型不在表里，照旧列出（不猜、不隐藏未实测的能力）。
+func TestGenerationModelsRouteFilter(t *testing.T) {
+	c := &Client{}
+	for _, realm := range []string{"cn", "global"} {
+		c.stashGenerationModels(realm, []ModelInfo{
+			{ID: "hunyuan-image-alpha", Tags: []string{"text-to-image"}},
+			{ID: "gpt-image-2.5-sunburst", Tags: []string{"text-to-image"}},
+			{ID: "brand-new-image-v9", Tags: []string{"text-to-image"}}, // 表里没有 → 照列
+		})
+	}
+	ids := func(realm string) map[string]bool {
+		out := map[string]bool{}
+		for _, m := range c.GenerationModels(realm) {
+			out[m.ID] = true
+		}
+		return out
+	}
+	cn, gl := ids("cn"), ids("global")
+	if !cn["hunyuan-image-alpha"] || cn["gpt-image-2.5-sunburst"] {
+		t.Fatalf("cn 列表应含 hunyuan、不含 gpt-image-sunburst：%v", cn)
+	}
+	if !gl["gpt-image-2.5-sunburst"] || gl["hunyuan-image-alpha"] {
+		t.Fatalf("global 列表应含 gpt-image-sunburst、不含 hunyuan：%v", gl)
+	}
+	if !cn["brand-new-image-v9"] || !gl["brand-new-image-v9"] {
+		t.Fatalf("未实测的模型应照旧列出（不隐藏能力）：cn=%v global=%v", cn, gl)
 	}
 }

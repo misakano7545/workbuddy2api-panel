@@ -103,6 +103,19 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 			if errors.As(err, &ue) {
 				// 与 chat 同一套失败处置（冷却/熔断/模型负缓存/12153 计数）。
 				h.applyErrorPolicy(a.UID, ue.Kind, ue.Msg, bare, ue)
+				// 请求级/模型级错误与账号无关：审核与参数是请求本身的属性，14401/11102 是
+				// 该模型在本域没有路由。换号必然同样失败——实测 14401 会打满全池账号，
+				// 白烧上游调用；客户端还会把 502 当瞬时故障反复重试。立即透传原文回 400。
+				if imageFailFastKind(ue.Kind) {
+					status := ue.Status
+					if status < 400 {
+						status = http.StatusBadRequest
+					}
+					st.status, st.outcome = status, "http_error"
+					log.Printf("images model=%s realm=%s: 请求级错误 kind=%v，不再换号", bare, realm, ue.Kind)
+					writeOpenAIError(w, status, "upstream_error", ue.Msg)
+					return
+				}
 			}
 			log.Printf("images %s model=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), bare, attempt+1, err)
 			continue
@@ -127,6 +140,19 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	st.outcome = ""
 	log.Printf("images model=%s realm=%s: 全部尝试失败（%d 个账号）：%v", bare, realm, len(tried), lastErr)
 	writeOpenAIError(w, status, code, lastErr.Error())
+}
+
+// imageFailFastKind 报告该类上游错误是否与账号无关（换号必然同样失败）。
+//
+// 与 chat 的差别：chat 遇 ErrModelBlocked 仍换号（各账号的模型权限可能不同），出图的
+// 模型路由是**域级**配置（14401），换号无意义且实测会打满全池。
+func imageFailFastKind(kind upstream.ErrKind) bool {
+	switch kind {
+	case upstream.ErrBadParams, upstream.ErrPromptTooLong, upstream.ErrImageInvalid,
+		upstream.ErrContentBlocked, upstream.ErrModelBlocked:
+		return true
+	}
+	return false
 }
 
 // imageMode 流水行的 mode 列。

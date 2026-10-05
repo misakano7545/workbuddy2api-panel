@@ -93,11 +93,33 @@ func sortedInfos(byID map[string]ModelInfo) []ModelInfo {
 	return out
 }
 
+// imageRouteRealm 已实测的「图像模型 → 有路由的域」。
+//
+// 为什么需要：目录里出现的媒体模型不一定在本域有出图路由——实测 global 目录同样列着
+// hunyuan-image-alpha，但国际侧调它必回 400 code=14401「route config not found」。列进
+// /v1/models 等于引诱客户端选一个必然失败的模型（客户端枚举列表即踩）。
+//
+// ponytail: 只写实测过的组合，未知模型照旧列出（不猜）；图像模型变多时改成探测一次路由
+// 并缓存——现在只有两个模型，加探测是白花钱。
+var imageRouteRealm = map[string]string{
+	"hunyuan-image-alpha":    "cn",
+	"gpt-image-2.5-sunburst": "global",
+}
+
 // GenerationModels 最近一次目录解析留存的出图/出视频模型（空 = 尚未探测过该域）。
 // 目录把这些模型从**对话**列表剔掉（客户端拿它发对话会 11102），留存只供 /v1/models
 // 与面板以 image_generation 标记列出（视频不列：网关没有视频端点）。
 func (c *Client) GenerationModels(realm string) []ModelInfo {
 	c.imageMu.Lock()
 	defer c.imageMu.Unlock()
-	return c.imageModels[realm]
+	src := c.imageModels[realm]
+	out := make([]ModelInfo, 0, len(src))
+	for _, m := range src {
+		// 已知在别的域才有路由的模型不列（见 imageRouteRealm）。
+		if r, known := imageRouteRealm[m.ID]; known && r != realm {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
