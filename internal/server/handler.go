@@ -272,6 +272,10 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		// model_locks 当前有未过期模型级限流的 (域, 模型) 全清单（移植上游 PR #120）：
+		// accounts 回答「哪些号不能用」，本键回答「哪些模型不能用、锁了几个号、还要锁多久」。
+		// 与 ModelBlocked（请求失败时的单模型判定）互补；无锁时为 null。只增键，零回归。
+		"model_locks": h.cfg.Pool.ModelLockView(),
 		// credit_floor 生效的积分保底值（0 = 关闭）。与 accounts[].credits +
 		// model_costs 对照即可判定「某号为何对某模型不出票」。零值也显式写出
 		// （运维口径：缺失会让人误以为没记录）。

@@ -450,6 +450,34 @@ function renderAccounts(list) {
   }).join('');
 }
 
+// renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。后端已按
+// 「整池不可用 → 此刻没号 → 部分限流」排好序，这里只做展示（移植上游 PR #120）。
+const ML_STATE = { locked: ['bad', '全池锁定'], starved: ['warn', '此刻无号'], partial: ['ok', '部分限流'] };
+function renderModelLocks(rows) {
+  const tb = $('mlBody');
+  const list = Array.isArray(rows) ? rows : [];
+  $('mlNote').textContent = list.length ? list.length + ' 个模型受限' : '';
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">当前没有模型级限流 —— 所有模型均可选</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map(r => {
+    const [cls, label] = ML_STATE[r.state] || ['', r.state || '—'];
+    const unlock = r.unlock_at && !/^0001-/.test(r.unlock_at) ? fmtLocalDateTime(r.unlock_at) : '—';
+    const fully = r.fully_unlock_at && !/^0001-/.test(r.fully_unlock_at) ? fmtLocalDateTime(r.fully_unlock_at) : '—';
+    return '<tr>' +
+      '<td><b>' + esc(r.model) + '</b></td>' +
+      '<td>' + (r.realm === 'global' ? '<span class="realm-tag">国际版</span>' : '国内版') + '</td>' +
+      '<td><span class="tag ' + cls + '">' + label + '</span></td>' +
+      '<td class="num">' + (r.servable || 0) + ' / ' + (r.total || 0) + '</td>' +
+      '<td class="num">' + (r.locked || 0) + '</td>' +
+      '<td class="num">' + esc(unlock) + '</td>' +
+      '<td class="num">' + esc(fully) + '</td>' +
+      '<td title="' + esc(r.reason || '') + '">' + esc(r.reason || '—') + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
 async function loadOverview(quiet) {
   try {
     const d = await api('overview');
@@ -472,6 +500,7 @@ async function loadOverview(quiet) {
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || []);
+    renderModelLocks(d.model_locks);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 

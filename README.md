@@ -538,6 +538,12 @@ curl -s http://localhost:7863/v1/responses \
 
 如果采用「**一次只放开一个账号、用禁用做流量开关**」的轮换方式（同 IP 多号怕触发风控），闲置待命的号恰恰是最需要签到的——把它设为 `true`，禁用号仍会签到 / 保活 / 刷新余额，**但依旧不参与选号**（`pool` 选号侧的 disabled 过滤不受本开关影响）。
 
+#### 模型锁池（账号池下方那张表）
+
+账号池回答「哪些号不能用」，模型锁池回答「**哪些模型不能用、锁了几个号、还要锁多久**」——上游按模型限流（`6004` / `14003`）时账号仍在池里、`/status` 的 `healthy` 也照样是绿的，此前只能发一次真实请求去试（而试错本身会刷新上游的冷却计时）。
+
+一行 = 一个 (域, 模型)，状态三态：`locked`（该域参与选号的号全被这个模型挡住，换模型或等解锁才有用）、`starved`（此刻没号能服务，但不是模型冷却造成的——账号级冷却/熔断/在途占满，等一下就好）、`partial`（还有号能服务，只是部分被锁）。数据与 `/status` 的 `model_locks` 同源（池内现算，只读），与 `ModelBlocked`（请求失败时回 400 `model_unavailable`）互补。禁用与暂停选号的账号不计入分母，`AuditOnly` 台账与已过期的冷却不算锁——口径与选号严格一致。
+
 > 该开关**只覆盖调度器的这四类任务**。猫猫旅行、夜猫子、连登管家（挂在签到末尾的 `RunStreakBonusNow`）与成长任务队列**仍按原样跳过禁用账号**——若也需要，请另行提出。
 
 #### 暂停选号（`paused`，账号行按钮）
@@ -640,7 +646,7 @@ http://127.0.0.1:7863/panel/
 | `POST /v1/responses` | Bearer（`api_key` 非空时） | `codex_responses`：Codex Responses 入站，转成现有 chat 完成并回写 Responses 事件流。不保存 `previous_response_id` / `store` |
 | `POST /v1/messages`、`POST /messages` | Bearer 或 `x-api-key`（`api_key` 非空时） | `anthropic_messages`：Anthropic Messages 入站，转成现有 chat 完成并回写 Messages JSON / SSE。不回传 thinking（上游没有 signature） |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
-| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性） |
+| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（模型级限流全清单，无锁为 null） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 | `GET /metrics` | Bearer（`metrics.enabled` 时才存在） | Prometheus 文本。缺省不注册 |
 | `POST /admin/tasks/{name}/run` | Bearer（`admin.enabled` 时才存在） | 立刻补跑 `checkin` / `activity` / `keepalive` / `travel` / `blackcat`，202，同名在跑则 409 |

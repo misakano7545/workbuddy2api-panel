@@ -269,6 +269,9 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"disabled":        disabled,
 		"in_flight_full":  inFlightFull,
 		"accounts":        p.cfg.Pool.List(),
+		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久，移植上游
+		// PR #120）：与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
+		"model_locks": p.cfg.Pool.ModelLockView(),
 	})
 }
 

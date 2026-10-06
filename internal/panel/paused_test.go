@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -128,6 +129,126 @@ assert.ok(tb.innerHTML.includes('已禁用'), '禁用行仍显示已禁用');
 assert.ok(!tb.innerHTML.includes('data-a="disable"'), '禁用行不再显示「禁用」按钮');
 console.log('account row paused render passed');`
 	path := filepath.Join(t.TempDir(), "accrow.cjs")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, path, "app.js").CombinedOutput(); err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
+// TestAppJSRenderModelLocks 模型锁池表的渲染：空态文案、状态标签、时间与原因转义。
+// 数据来自 /panel/api/overview 的 model_locks（后端已排序，前端只展示）。
+func TestAppJSRenderModelLocks(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; model lock render skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const ML_STATE');
+assert.ok(start >= 0, 'ML_STATE not found');
+const host = { mlBody: { innerHTML: '' }, mlNote: { textContent: '' } };
+const ctx = { Object, Array, String, RegExp,
+  $: id => host[id],
+  esc: s => String(s == null ? '' : s),
+  fmtLocalDateTime: ms => 'T(' + ms + ')' };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, src.indexOf('async function loadOverview(')) + '\nthis.render = renderModelLocks;', ctx);
+// ① 空清单（后端 null）→ 空态文案，不留空表
+ctx.render(null);
+assert.ok(host.mlBody.innerHTML.includes('当前没有模型级限流'), host.mlBody.innerHTML);
+assert.equal(host.mlNote.textContent, '');
+// ② 一行 locked：状态标签 + 可选/总数 + 时间渲染 + 原因
+ctx.render([{ model: 'glm-5.3', realm: 'cn', state: 'locked', servable: 0, total: 3, locked: 3,
+  unlock_at: '2026-10-06T23:00:00+08:00', fully_unlock_at: '2026-10-06T23:17:00+08:00', reason: '6004 model rate limit' }]);
+const html = host.mlBody.innerHTML;
+assert.ok(html.includes('全池锁定') && html.includes('0 / 3') && html.includes('T(2026-10-06T23:00:00+08:00)'), html);
+assert.ok(html.includes('6004 model rate limit'), html);
+assert.equal(host.mlNote.textContent, '1 个模型受限');
+// ③ 零值时间（上游没给重置时刻）→ 破折号，不显示 0001-01-01
+ctx.render([{ model: 'x', realm: 'global', state: 'partial', servable: 1, total: 2, locked: 1,
+  unlock_at: '0001-01-01T00:00:00Z', fully_unlock_at: '0001-01-01T00:00:00Z', reason: '' }]);
+assert.ok(host.mlBody.innerHTML.includes('部分限流') && host.mlBody.innerHTML.includes('—'), host.mlBody.innerHTML);
+assert.ok(!host.mlBody.innerHTML.includes('0001'), '零值时间不得直接显示');
+console.log('model lock render passed');`
+	path := filepath.Join(t.TempDir(), "mlrender.cjs")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, path, "app.js").CombinedOutput(); err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
+// 模型锁池的接线：overview 的 model_locks 必须与池内真实的模型级冷却同源，无锁时为 null。
+func TestOverviewExposesModelLocks(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", Nickname: "A", AccessToken: "at1"})
+	p.Add(&auth.Auth{UID: "u2", Nickname: "B", AccessToken: "at2"})
+	pn := New(Config{Version: "test", Pool: p})
+
+	read := func() []map[string]any {
+		rec := httptest.NewRecorder()
+		pn.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/panel/api/overview", nil))
+		if rec.Code != 200 {
+			t.Fatalf("overview code=%d", rec.Code)
+		}
+		var d struct {
+			ModelLocks []map[string]any `json:"model_locks"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+			t.Fatal(err)
+		}
+		return d.ModelLocks
+	}
+	if got := read(); len(got) != 0 {
+		t.Fatalf("无冷却时 model_locks 应为空，得到 %+v", got)
+	}
+	// 一个号对该模型停车 → 出一个 partial 行（口径与选号一致）。
+	p.CooldownSoftForModel("u1", 10*time.Minute, time.Time{}, "glm-5.3", "model rate limit")
+	rows := read()
+	if len(rows) != 1 || rows[0]["model"] != "glm-5.3" || rows[0]["state"] != "partial" {
+		t.Fatalf("model_locks = %+v want 一行 partial glm-5.3", rows)
+	}
+}
+
+// TestAppJSOverviewWiresModelLocks 接线：loadOverview 必须把 overview 的 model_locks
+// 交给 renderModelLocks。少了这一行，锁池表永远空态——渲染函数本身测不到这个缺口。
+func TestAppJSOverviewWiresModelLocks(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; overview wiring test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('async function loadOverview(');
+const end = src.indexOf("$('accBody').addEventListener");
+assert.ok(start >= 0 && end > start, 'loadOverview not found');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; }, apply() { return inert; },
+});
+let painted = null, accountsPainted = null;
+const fake = { version: 'v-test', total: 2, healthy: 2, cooling: 0, disabled: 0, sticky_sessions: 0,
+  redis_mode: 'memory', in_flight_full: 0, uptime_sec: 60, accounts: [], model_locks: [{ model: 'glm-5.3', realm: 'cn', state: 'locked' }] };
+const ctx = { Math, Object, Array, JSON, Number, String,
+  api: async () => fake, $: () => inert, toast: () => {},
+  renderAccounts: v => { accountsPainted = v; },
+  renderModelLocks: v => { painted = v; } };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.loadOverview = loadOverview;', ctx);
+(async () => {
+  await ctx.loadOverview(true);
+  assert.ok(Array.isArray(accountsPainted), '账号表应被渲染');
+  assert.ok(Array.isArray(painted) && painted[0].model === 'glm-5.3', 'overview 的 model_locks 必须交给 renderModelLocks，得到 ' + JSON.stringify(painted));
+  process.stdout.write('overview wiring passed\n');
+})().catch(e => { console.error(e); process.exit(1); });`
+	path := filepath.Join(t.TempDir(), "mlwire.cjs")
 	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
 		t.Fatal(err)
 	}
