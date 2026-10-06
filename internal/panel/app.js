@@ -217,8 +217,11 @@ function trangeEmit(id) {
 
 // trangeQuery 把当前选择翻译成查询参数。
 //   rolling=true  → 滚动预设发 hours（服务端整点对齐），今天/自定义发 from/to
-//   rolling=false → 一律发 from/to（归档是线性日志，前端算区间更直观）
-// 「全部历史」两者都不发。
+//   rolling=false → 一律发 from/to（归档是线性日志，前端算区间更直观）。
+// 「全部历史」：**用量**必须显式发 hours=0 —— 服务端「不给参数」的默认是 72 小时，
+// 空查询会让「全部历史」静默变成「近 3 天」（issue #121 的形态：全部历史 8903 次请求
+// 与近 3 天一模一样，而真全部历史是 24817 次）。归档接口不认 hours，保持空查询
+// （它的默认是「最近 N 条」，本身就是全量日志的最新一段）。
 function trangeQuery(id, rolling) {
   const st = trangeState(id);
   const q = new URLSearchParams();
@@ -232,7 +235,10 @@ function trangeQuery(id, rolling) {
     q.set('from', sec(trangeMidnight()));
     return q;
   }
-  if (st.preset === '0') return q;
+  if (st.preset === '0') {
+    if (rolling) q.set('hours', '0');
+    return q;
+  }
   if (rolling) { q.set('hours', st.preset); return q; }
   q.set('from', sec(new Date(Date.now() - Number(st.preset) * 3600 * 1000)));
   return q;

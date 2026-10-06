@@ -702,8 +702,10 @@ process.stdout.write(JSON.stringify({
 	local := func(h, m int) string {
 		return strconv.FormatInt(time.Date(2026, 9, 30, h, m, 0, 0, time.Local).Unix(), 10)
 	}
+	// rolling0 曾期望空串——那正是 issue #121：服务端「不给参数」默认 72 小时，空查询让
+	// 「全部历史」退化成「近 3 天」。用量侧必须显式发 hours=0（归档侧仍空查询，见下条）。
 	want := `{"todayIsMidnight":true,"todayNoTo":true,` +
-		`"rolling24":"hours=24","rolling72":"hours=72","rolling0":"",` +
+		`"rolling24":"hours=24","rolling72":"hours=72","rolling0":"hours=0",` +
 		`"log24From":true,"log24HasHours":false,"log7dFrom":true,` +
 		`"custom":"from=` + local(9, 0) + `&to=` + local(18, 30) + `",` +
 		`"labelCustom":"9-30 09:00 → 9-30 18:30","labelToday":"今天"}`
@@ -1084,6 +1086,51 @@ const c = ctx.rateCell({ credits: '' });
 assert.equal(c, '—');
 console.log('rateCell measured fallback passed');`
 	path := filepath.Join(t.TempDir(), "ratecell.cjs")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, path, "app.js").CombinedOutput(); err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
+// TestAppJSTrangeAllHistory 「全部历史」必须给用量接口发 hours=0。
+//
+// 为什么：服务端 /panel/api/usage 的契约是「不给参数 = 默认 72 小时、显式 0 = 全部历史」。
+// 空查询因此让「全部历史」静默退化成「近 3 天」——线上实测同一时刻 全部历史 8903 次请求
+// 与 近 3 天 完全一致，而真全部历史是 24817 次（issue #121 的形态）。
+func TestAppJSTrangeAllHistory(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; trangeQuery test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function trangeQuery(');
+assert.ok(start >= 0, 'trangeQuery not found');
+const st = { preset: '0', from: null, to: null };
+const ctx = { URLSearchParams, Date, Number, String, Object,
+  trangeState: () => st, trangeMidnight: () => new Date('2026-10-06T00:00:00') };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, src.indexOf('function trangeLabel(')) + '\nthis.trangeQuery = trangeQuery;', ctx);
+// ① 用量（rolling）：「全部历史」→ hours=0
+st.preset = '0';
+assert.equal(ctx.trangeQuery('usRange', true).toString(), 'hours=0', '全部历史应发 hours=0');
+// ② 归档（非 rolling）：不认 hours，保持空查询
+assert.equal(ctx.trangeQuery('reqRange', false).toString(), '');
+// ③ 滚动预设照旧发 hours（回归：别把其它档也改了）
+st.preset = '72';
+assert.equal(ctx.trangeQuery('usRange', true).toString(), 'hours=72');
+// ④ 今天 / 自定义走 from/to，不受影响
+st.preset = 'today';
+assert.ok(ctx.trangeQuery('usRange', true).get('from'));
+st.preset = 'custom';
+st.from = new Date('2026-10-01T00:00:00');
+assert.ok(ctx.trangeQuery('usRange', true).get('from'));
+console.log('trange all-history passed');`
+	path := filepath.Join(t.TempDir(), "trange.cjs")
 	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
 		t.Fatal(err)
 	}
