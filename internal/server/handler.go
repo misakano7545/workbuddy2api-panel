@@ -612,6 +612,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek)
 
+	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本（见
+	// upstream/dsml.go），修复层用它做严格判定。名单来自「本请求声明的 tools」与
+	// 「会话历史里出现过的工具名」两个来源——实测 tools 声明会在中转环节丢失，
+	// 只认前者会让修复层在最需要它的场景下失效。
+	// 在提示词/模型名改写之前取（那些改写不动 tools / messages[].tool_calls 子树）。
+	declaredTools := upstream.ToolNameAllowlist(body)
+
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
@@ -1036,9 +1043,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
 			// 组装请求上下文做判定）。
+			// 标记修复：上游在没有 tools 的请求里会把工具调用吐成原生标记文本，
+			// 这里在透传前还原成 delta.tool_calls（见 upstream/dsml.go）。
+			// 第二个参数 true = 名单为空时启用弱判定——tools 声明在链路上丢失是
+			// 实测最常见的泄漏成因，只做严格判定等于对主场景不设防。
+			repair := upstream.NewMarkupRepair(declaredTools, true)
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
-			}))
+			}), upstream.WithMarkupRepair(repair))
 			switch {
 			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
@@ -1064,6 +1076,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 缺字段/NaN/负值不再被当成「免费」或脏数据污染台账（上游 PR #104）。
 			hasCredit = validUsageCost(credit, hasCredit, total, hasTotal)
 			recordAttempt(acct.UID, stats.Usage(), credit, hasCredit, attemptStarted, stats.TTFB())
+			if n := repair.Converted(); n > 0 {
+				// 修复命中：上游本来会把工具调用吐成正文标记，这里已还原成 tool_calls。
+				// 一行日志便于运维确认「这次不再空转」并统计发生率。
+				log.Printf("INFO: [server] stream acct=%s model=%s: repaired %d native tool call(s) from assistant text (tool names known=%d)",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, n, len(declaredTools))
+			} else if m := repair.Seen(); m > 0 {
+				// 识别到标记却没还原：判定没过（工具名不合规 / 块内夹带正文 / 参数畸形）。
+				// 单独一行，排障时能一眼区分「没识别到」与「识别到但拒绝」。
+				log.Printf("WARN: [server] stream acct=%s model=%s: saw %d native tool call block(s) but repaired none (tool names known=%d)",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, m, len(declaredTools))
+			}
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），
 			// 不写入零值——否则「没观测到 usage」被伪造成「测得 0 token」，
@@ -1095,6 +1118,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = http.StatusBadGateway
 			st.outcome = reqlog.OutcomeHTTPError
 			return
+		}
+		// 标记修复（非流式）：把正文里的原生工具调用标记还原成 message.tool_calls。
+		// 只在「没有结构化 tool_calls」且「finish_reason 为 stop」时生效（见 dsml.go）；
+		// 名单为空时走弱判定（tools 声明在中转环节丢失是常态）。
+		mrepair := upstream.RepairAggregatedResponse(resp, declaredTools, true)
+		if n := mrepair.Converted(); n > 0 {
+			log.Printf("INFO: [server] non-stream model=%s: repaired %d native tool call(s) from assistant text (tool names known=%d)",
+				bareModel, n, len(declaredTools))
+		} else if m := mrepair.Seen(); m > 0 {
+			log.Printf("WARN: [server] non-stream model=%s: saw %d native tool call block(s) but repaired none (tool names known=%d)",
+				bareModel, m, len(declaredTools))
 		}
 		ud := usageDeltaFromResponse(resp)
 		credit, total, hasCredit := usageCreditTotal(resp)
