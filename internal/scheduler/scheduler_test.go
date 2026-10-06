@@ -194,6 +194,7 @@ func hasKind(kinds []taskKind, k taskKind) bool {
 type fakeUpstream struct {
 	checkinCalls   atomic.Int32
 	refreshCalls   atomic.Int32
+	travelCalls    atomic.Int32
 	resourceRemain int64
 	resourceEnd    string
 }
@@ -213,6 +214,13 @@ func (f *fakeUpstream) server() *httptest.Server {
 			}
 			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":1000,"CycleCapacityRemain":` +
 				jsonI64(f.resourceRemain) + `,"CycleCapacityUsed":0` + end + `}]}}}}`))
+		case strings.HasSuffix(r.URL.Path, "/buddy/info"):
+			// 有猫 → travelOne 继续查状态（nil 会转去领养流程，测不到状态调用）。
+			w.Write([]byte(`{"code":0,"data":{"buddy":{"id":1,"name":"cat"}}}`))
+		case strings.HasSuffix(r.URL.Path, "/travel/status"):
+			f.travelCalls.Add(1)
+			// traveling：只查状态、不发动作，一次账号一趟恰好一次状态调用。
+			w.Write([]byte(`{"code":0,"data":{"state":"traveling","record_id":7,"daily_limit_reached":false}}`))
 		case strings.HasSuffix(r.URL.Path, "/token/refresh"):
 			f.refreshCalls.Add(1)
 			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
@@ -643,5 +651,49 @@ func TestPausedVsDisabledTaskParticipation(t *testing.T) {
 	// u1（正常）+ u2（暂停）签到；u3（禁用）跳过 ⇒ 2 次
 	if got := f.checkinCalls.Load(); got != 2 {
 		t.Errorf("checkin calls=%d want 2（正常 + 暂停参与；禁用跳过）", got)
+	}
+}
+
+// TestPausedStillTravels 暂停选号账号照常跑旅行：旅行是纯 RPC（状态 / 派出 / 领奖），
+// 不发模型对话，与「让位防风控」不冲突。锁住这条口径——上游曾把 paused 一并跳过，
+// 后在 b1a2284 撤回；本仓按修正后的口径实现。
+func TestPausedStillTravels(t *testing.T) {
+	f := &fakeUpstream{}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	p.Add(&auth.Auth{UID: "u2", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	if !p.Pause("u2") {
+		t.Fatal("Pause 失败")
+	}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.RunTravelNow()
+	if got := f.travelCalls.Load(); got != 2 {
+		t.Errorf("travel status calls=%d want 2（u1 + 暂停号 u2 都照常旅行）", got)
+	}
+}
+
+// TestBlackcatEligibility 夜猫子只跑非禁用、非暂停的账号：RunNightChats 逐条发真实
+// glm-5.2 对话，是任务体系里唯一「整任务都是模型对话」的，与暂停号的「让位防风控」
+// 冲突。判据抽成纯函数后可在 23:00–08:00 窗口外直接测（RunBlackcatNow 有窗口前置判断）。
+func TestBlackcatEligibility(t *testing.T) {
+	cases := []struct {
+		name string
+		st   pool.Status
+		want bool
+	}{
+		{"正常账号", pool.Status{}, true},
+		{"暂停选号跳过", pool.Status{Paused: true}, false},
+		{"禁用跳过", pool.Status{Disabled: true}, false},
+		{"两者兼有", pool.Status{Disabled: true, Paused: true}, false},
+	}
+	for _, c := range cases {
+		if got := blackcatEligible(c.st); got != c.want {
+			t.Errorf("%s: blackcatEligible=%v want %v", c.name, got, c.want)
+		}
 	}
 }
