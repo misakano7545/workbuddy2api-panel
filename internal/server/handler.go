@@ -1265,6 +1265,11 @@ const hardCreditMessage = "all accounts have exhausted upstream credits; retry a
 // 同理，ttfb 不小于总耗时时（时钟粒度、或 TTFB 落在计时终点之后）退回端到端耗时，
 // 避免零/负分母。token 数为负哨兵值（-1 = 观测缺失）时返回 false。
 //
+// 扣除后不足 minGenWindow 也退回端到端（吸收上游 e05edb7，issue #127）：ttfb 量的是
+// 「首个 SSE 帧到达」，当上游把整个响应攒到最后一次性下发（假流式/中间层攒批刷新——
+// 首帧与末帧几乎同时到）时，total−ttfb 只剩几毫秒，拿它当分母会把几百 token 除成
+// 上万 tok/s 的幻数。这种形态下「生成时长」根本不可测，诚实的分母只有端到端。
+//
 // 用量账本（handler）与控制台流水行（logging.go）都走这一个函数：两处各算一遍时
 // 口径漂移过一次（流水行漏扣 TTFB、与面板数字对不上），共用是防再次分叉的唯一办法。
 func tokensPerSecond(completionTokens int64, total, ttfb time.Duration) (float64, bool) {
@@ -1273,12 +1278,18 @@ func tokensPerSecond(completionTokens int64, total, ttfb time.Duration) (float64
 	}
 	gen := total
 	if ttfb > 0 {
-		if g := total - ttfb; g > 0 {
+		if g := total - ttfb; g >= minGenWindow {
 			gen = g
 		}
 	}
 	return float64(completionTokens) / gen.Seconds(), true
 }
+
+// minGenWindow 可信生成窗口的下限：扣除 TTFB 后剩余窗口不足该值即视为「生成时长
+// 不可测」，退回端到端耗时（见 tokensPerSecond 注释，issue #127）。真流式下首帧到
+// 末帧通常铺满剩余窗口，200ms 远低于正常生成时长，不影响真实快速输出（缓存命中后的
+// 爆发）被如实报告。
+const minGenWindow = 200 * time.Millisecond
 
 // promptTooLongMessage 11115 透传 message：上游 body 原文（含真实 token 数/
 // 上限值/requestId，客户端自行排查）；空 body 兜底为可读分类短文案（不编造原文）。
