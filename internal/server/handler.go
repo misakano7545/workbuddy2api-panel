@@ -1262,8 +1262,9 @@ const hardCreditMessage = "all accounts have exhausted upstream credits; retry a
 // 其实只是排队久了（issue #34，维护者也确认速率计算没减首 token 到达时间）。
 //
 // ttfb<=0 表示没有观测：非流式回复天然没有「首个 data 帧」（日志里那一列记的是
-// "-"）。此时不猜、不扣——凭空假定一个 TTFB 会把分母推向零、把速率抬成虚高，
-// 比不扣更糟。只有真测到才扣。
+// "-"），也因此拿不到「生成段」。此时**不报速率**（ok=false）：总时长里混着预填
+// （实测 RikkaHub 那种 35 万 token 提示、60 个输出 token 的请求，端到端口径只有
+// 16~90 tok/s，读起来像模型慢，其实全是在处理提示）。不报比报一个不可比的数诚实。
 //
 // 同理，ttfb 不小于总耗时时（时钟粒度、或 TTFB 落在计时终点之后）退回端到端耗时，
 // 避免零/负分母。token 数为负哨兵值（-1 = 观测缺失）时返回 false。
@@ -1276,14 +1277,12 @@ const hardCreditMessage = "all accounts have exhausted upstream credits; retry a
 // 用量账本（handler）与控制台流水行（logging.go）都走这一个函数：两处各算一遍时
 // 口径漂移过一次（流水行漏扣 TTFB、与面板数字对不上），共用是防再次分叉的唯一办法。
 func tokensPerSecond(completionTokens int64, total, ttfb time.Duration) (float64, bool) {
-	if completionTokens < 0 || total <= 0 {
+	if completionTokens < 0 || total <= 0 || ttfb <= 0 {
 		return 0, false
 	}
 	gen := total
-	if ttfb > 0 {
-		if g := total - ttfb; g >= minGenWindow {
-			gen = g
-		}
+	if g := total - ttfb; g >= minGenWindow {
+		gen = g
 	}
 	return float64(completionTokens) / gen.Seconds(), true
 }

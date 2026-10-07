@@ -22,6 +22,7 @@ type promAcc struct {
 	ttfbN                                int64
 	latSum                               float64
 	genSec                               float64
+	genTok                               int64 // 只统计「有生成段」的行：与 genSec 同一边界，否则均值分子含非流式、分母不含，虚高
 	compTok                              int64
 	cacheHit, cacheMiss                  int64
 	credit                               float64
@@ -59,18 +60,19 @@ func noteProm(s *chatStat, total time.Duration) {
 	}
 	totalMS := float64(total.Milliseconds())
 	mm.latSum += totalMS
+	gen := 0.0
 	if s.ttfb > 0 {
+		// 缺 TTFB 观测（非流式）时刻意不计生成时长：totalMS 含预填，混进均值会把
+		// 平均速率拉成不可比的低值。与 tokensPerSecond 同一条规则。
 		mm.ttfbSum += float64(s.ttfb.Milliseconds())
 		mm.ttfbN++
-	}
-	gen := totalMS
-	if s.ttfb > 0 {
 		gen = totalMS - float64(s.ttfb.Milliseconds())
 	}
 	if s.toks > 0 {
 		mm.compTok += int64(s.toks)
 		if gen > 0 {
 			mm.genSec += gen / 1000
+			mm.genTok += int64(s.toks)
 		}
 	}
 	if s.hasCache {
@@ -119,6 +121,7 @@ func MetricsSnapshotOf() MetricsSnapshot {
 		tot.ttfbN += mm.ttfbN
 		tot.latSum += mm.latSum
 		tot.genSec += mm.genSec
+		tot.genTok += mm.genTok
 		tot.compTok += mm.compTok
 		tot.credit += mm.credit
 	}
@@ -140,7 +143,9 @@ func deriveProm(name string, mm *promAcc) ModelStatPayload {
 		p.AvgLatencyMS = mm.latSum / float64(mm.requests)
 	}
 	if mm.genSec > 0 {
-		p.TokensPerSec = float64(mm.compTok) / mm.genSec
+		// 分子用 genTok（只含有生成段的行），与 genSec 同一批样本：用 compTok 会把
+		// 非流式行的 token 计进分子却不算时间，均值虚高。
+		p.TokensPerSec = float64(mm.genTok) / mm.genSec
 	}
 	return p
 }

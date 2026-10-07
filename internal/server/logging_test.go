@@ -363,6 +363,21 @@ func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 	}
 }
 
+// 非流式行（无 TTFB 观测）：即便有 token 数也不报速率——分母只能是端到端耗时，
+// 里面混着预填，与流式行不可比（实测 35 万 token 提示的非流式请求只有 16~90 tok/s）。
+func TestLogChatRowNoRateWithoutTTFB(t *testing.T) {
+	withChatLog(t)
+	out := captureStdout(t, func() {
+		logChatRow(0, 9*time.Second, "glm-5.2", "sync", "u1", "", http.StatusOK, 100, 0, 0, false)
+	})
+	if !strings.Contains(out, "tok=100") {
+		t.Fatalf("行缺 token 数：\n%s", out)
+	}
+	if strings.Contains(out, "tok/s") {
+		t.Errorf("无 TTFB 观测不应报速率：\n%s", out)
+	}
+}
+
 func TestLogChatRowExtendedFields(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {

@@ -230,7 +230,12 @@ func TestChatNonStreamAggregates(t *testing.T) {
 		st.TokenUsage.PromptTokens != 1 || st.TokenUsage.CompletionTokens != 1 || st.TokenUsage.TotalTokens != 2 {
 		t.Errorf("token usage=%+v", st.TokenUsage)
 	}
-	if st.TokenUsage.LastLatencyMs < 1 || st.TokenUsage.LastTokensPerSecond == nil || *st.TokenUsage.LastTokensPerSecond <= 0 {
+	// 非流式没有「首个 data 帧」，也就没有生成段可测：不报速率（端到端口径含预填，
+	// 与流式行不可比）。token 计数本身照记。
+	if st.TokenUsage.LastTokensPerSecond != nil {
+		t.Errorf("非流式不应报速率: %v", *st.TokenUsage.LastTokensPerSecond)
+	}
+	if st.TokenUsage.LastLatencyMs < 1 {
 		t.Errorf("latest performance=%+v", st.TokenUsage)
 	}
 }
