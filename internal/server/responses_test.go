@@ -95,6 +95,78 @@ func TestResponsesToChat(t *testing.T) {
 	}
 }
 
+func TestResponsesOrphanFunctionCallOutput(t *testing.T) {
+	msgsFor := func(input string) []any {
+		t.Helper()
+		got, _, err := responsesToChat([]byte(`{"model":"m","input":` + input + `}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(got, &obj); err != nil {
+			t.Fatal(err)
+		}
+		msgs, _ := obj["messages"].([]any)
+		return msgs
+	}
+
+	// 带图：孤儿回执必须整段保留 parts，前缀是独立 text part（图不能丢）。
+	t.Run("image_parts_kept", func(t *testing.T) {
+		m := msgsFor(`[{"type":"function_call_output","output":[
+			{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}]}]`)
+		if len(m) != 1 {
+			t.Fatalf("len=%d %#v", len(m), m)
+		}
+		msg := m[0].(map[string]any)
+		if msg["role"] != "user" {
+			t.Fatalf("role=%v", msg["role"])
+		}
+		parts, ok := msg["content"].([]any)
+		if !ok || len(parts) != 2 {
+			t.Fatalf("content=%#v", msg["content"])
+		}
+		if p0 := parts[0].(map[string]any); !strings.HasPrefix(asString(p0["text"]), "[Message from another task") {
+			t.Fatalf("prefix part=%v", p0)
+		}
+		p1 := parts[1].(map[string]any)
+		if p1["type"] != "image_url" {
+			t.Fatalf("image part=%v", p1)
+		}
+	})
+
+	t.Run("text_only_flattens", func(t *testing.T) {
+		m := msgsFor(`[{"type":"function_call_output","output":[{"type":"output_text","text":"done"}]}]`)
+		msg := m[0].(map[string]any)
+		if msg["role"] != "user" || !strings.Contains(asString(msg["content"]), "done") {
+			t.Fatalf("got=%v", msg)
+		}
+	})
+
+	t.Run("dict_output_serialized", func(t *testing.T) {
+		m := msgsFor(`[{"type":"function_call_output","output":{"type":"output_text","text":"done"}}]`)
+		msg := m[0].(map[string]any)
+		if msg["role"] != "user" || !strings.Contains(asString(msg["content"]), "done") {
+			t.Fatalf("got=%v", msg)
+		}
+	})
+
+	// 有 call_id：仍是标准工具结果，一行不许变。
+	t.Run("with_call_id_unchanged", func(t *testing.T) {
+		m := msgsFor(`[{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":[{"type":"output_text","text":"done"}]}]`)
+		if len(m) != 2 {
+			t.Fatalf("len=%d %#v", len(m), m)
+		}
+		if m[0].(map[string]any)["role"] != "assistant" {
+			t.Fatalf("msgs[0]=%v", m[0])
+		}
+		msg := m[1].(map[string]any)
+		if msg["role"] != "tool" || msg["tool_call_id"] != "call_1" || msg["content"] != "done" {
+			t.Fatalf("tool msg=%v", msg)
+		}
+	})
+}
+
 func TestResponsesToChatStringInput(t *testing.T) {
 	got, _, err := responsesToChat([]byte(`{"model":"m","input":"hi","stream":true}`))
 	if err != nil {

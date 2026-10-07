@@ -481,11 +481,31 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			continue
 		case "function_call_output", "custom_tool_call_output":
 			flush()
-			out = append(out, map[string]any{
-				"role":         "tool",
-				"tool_call_id": asString(m["call_id"]),
-				"content":      asContentString(m["output"]),
-			})
+			if id := asString(m["call_id"]); id != "" {
+				out = append(out, map[string]any{
+					"role":         "tool",
+					"tool_call_id": id,
+					"content":      asContentString(m["output"]),
+				})
+				continue
+			}
+			// 无 call_id 的孤儿回执（来自其他任务）：同 agent_message 注入成用户指令，
+			// 不伪装成工具结果——空 tool_call_id 到上游只会撞 11148 配对失败。
+			// 带图时 convertContent 返回结构化 parts，必须整段保留：只取 text part 会把图
+			// 悄悄丢掉（移植上游 #145，那里该分支按字符串处理，客户端每次重试都成裸 502）。
+			c := convertContent(m["output"])
+			if parts, ok := c.([]any); ok {
+				out = append(out, map[string]any{
+					"role": "user",
+					"content": append([]any{map[string]any{
+						"type": "text", "text": agentMessagePrefix,
+					}}, parts...),
+				})
+				continue
+			}
+			if txt, _ := c.(string); strings.TrimSpace(txt) != "" {
+				out = append(out, map[string]any{"role": "user", "content": agentMessagePrefix + txt})
+			}
 			continue
 		case "agent_message":
 			// 来自其他任务（子代理）的消息：按用户指令注入，别伪装成工具结果。
