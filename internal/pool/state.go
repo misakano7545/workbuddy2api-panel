@@ -429,29 +429,48 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 // 注意：healthy 口径不含 inFlight 维度（是状态机权威判定，只看 disabled/until/breakerUntil）；
 // inFlightFull 是 healthy 的子集——healthy 里已达在途上限的账号数，供 /status 透出满载度。
 // 与 ServableNow 的区别见该函数注释。
+//
+// **口径**：paused（暂停选号）并入 disabled = /status 的「不可用」语义。监控与脚本只关心
+// 「还能不能用」，这是它们的稳定契约，不因面板展示需要而改变。面板概况要分开计数，用
+// CountsDetailedWithPaused（吸收上游 PR #130 的修法：拆分点只留一处，调用方各自声明口径）。
 func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled, inFlightFull int) {
+	t, h, c, d, pz, f := p.countsDetailedForRealm("")
+	return t, h, c, d + pz, f
+}
+
+// CountsDetailedWithPaused 同 CountsDetailed，但 paused 与 disabled 分开返回。
+//
+// 面板概况要回答「禁用几个、暂停几个」：暂停只关选号、照常签到/活跃/保活/刷余额，与
+// 禁用是两种运维状态，混成一个数字会让人误判池子的真实状况（issue #125）。
+func (p *Pool) CountsDetailedWithPaused() (total, healthy, cooling, disabled, paused, inFlightFull int) {
 	return p.countsDetailedForRealm("")
 }
 
 // CountsDetailedForRealm 同 CountsDetailed，但仅统计 Realm()==realm 的账号；
 // realm=="" 不加谓词（= CountsDetailed）。供 /status 按域分组透出。
 func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, disabled, inFlightFull int) {
-	return p.countsDetailedForRealm(realm)
+	t, h, c, d, pz, f := p.countsDetailedForRealm(realm)
+	return t, h, c, d + pz, f
 }
 
 // countsDetailedForRealm 委托 RealmHealth，避免 /status 与 /metrics 各算一套。
-func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, disabled, inFlightFull int) {
+// paused 单独返回、不并进 disabled：调用方按自己的口径决定合不合并（/status 合，
+// 面板分）。两种口径都合理，所以选择权留在调用方，而不是让共享遍历替所有人决定。
+func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, disabled, paused, inFlightFull int) {
 	h := p.RealmHealth(realm)
-	return h.Total, h.Healthy, h.Cooling, h.Disabled, h.InFlightFull
+	return h.Total, h.Healthy, h.Cooling, h.Disabled, h.Paused, h.InFlightFull
 }
 
 // RealmHealth 现算，不另存计数器。
 // Breaker/Degraded 与 Cooling 有交集。ManualDisabled 本面板没有单独标志，恒 0。
 type RealmHealth struct {
-	Total          int
-	Healthy        int
-	Cooling        int
+	Total   int
+	Healthy int
+	Cooling int
+	// Disabled 仅统计**已禁用**；Paused（暂停选号）单列——两者对监控口径不同：
+	// /status 与 /metrics 的「不可用」要合并（d+p）由调用方各自加，见 countsDetailedForRealm。
 	Disabled       int
+	Paused         int
 	InFlightFull   int
 	Breaker        int
 	Degraded       int
@@ -472,9 +491,14 @@ func (p *Pool) RealmHealth(realm string) RealmHealth {
 		h.Total++
 		switch {
 		case e.disabled || e.paused:
-			// paused（暂停选号）与 disabled 同样不可选，合并计入 disabled 类
-			//（/status 的「不可用」口径）；细粒度区分由 Status.Paused 透出。
-			h.Disabled++
+			// 两者都不可选，但分开计数：disabled 是「判死」（需人工解冻），paused 是
+			// 「临时让位」（照常保号）。合并口径由调用方声明（/status、/metrics 合并；
+			// 面板概况分开，见 CountsDetailedWithPaused）。
+			if e.disabled {
+				h.Disabled++
+			} else {
+				h.Paused++
+			}
 		case !e.healthy(now):
 			h.Cooling++
 		default:

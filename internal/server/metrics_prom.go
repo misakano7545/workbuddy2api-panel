@@ -223,7 +223,10 @@ func promPoolStateValue(h pool.RealmHealth, state string) int {
 	case "cooling":
 		return h.Cooling
 	case "disabled":
-		return h.Disabled
+		// 口径 = 「不可用」：禁用 + 暂停选号（暂停只关选号、照常保号，但对抓指标的
+		// 使用者而言同样是「这个号现在不接流量」）。RealmHealth 把两者分开计，这里
+		// 显式合并，保持既有 metrics 契约逐位不变。
+		return h.Disabled + h.Paused
 	case "in_flight_full":
 		return h.InFlightFull
 	case "breaker":

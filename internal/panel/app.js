@@ -486,6 +486,8 @@ async function loadOverview(quiet) {
     $('sHealthy').textContent = d.healthy;
     $('sCooling').textContent = d.cooling;
     $('sDisabled').textContent = d.disabled;
+    // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
+    if ($('sPaused')) $('sPaused').textContent = d.paused == null ? '-' : d.paused;
     const remSum = (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0);
   const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
   $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;

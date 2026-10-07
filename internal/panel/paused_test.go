@@ -74,6 +74,7 @@ func TestOverviewExposesPausedFlag(t *testing.T) {
 	}
 	var d struct {
 		Disabled int `json:"disabled"`
+		Paused   int `json:"paused"`
 		Accounts []struct {
 			UID    string `json:"uid"`
 			Paused bool   `json:"paused"`
@@ -85,8 +86,13 @@ func TestOverviewExposesPausedFlag(t *testing.T) {
 	if len(d.Accounts) != 1 || !d.Accounts[0].Paused {
 		t.Fatalf("overview 未透出 paused: %s", rec.Body)
 	}
-	if d.Disabled != 1 {
-		t.Errorf("暂停号应计入不可用数（disabled=%d want 1）", d.Disabled)
+	// 概况卡片分开计数（吸收上游 PR #130 / issue #125）：暂停只关选号、照常签到保活，
+	// 与禁用是两种运维状态。此前这里断言 paused 计入 disabled——那正是被修掉的口径。
+	if d.Paused != 1 {
+		t.Errorf("overview.paused=%d want 1（暂停单独计数）", d.Paused)
+	}
+	if d.Disabled != 0 {
+		t.Errorf("overview.disabled=%d want 0（暂停不得算进已禁用）", d.Disabled)
 	}
 }
 

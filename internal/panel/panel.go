@@ -252,7 +252,9 @@ func (p *Panel) expiringSoonWindow() time.Duration {
 
 // overview 总览：池计数 + 每账号状态 + 面板元信息。
 func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
-	total, healthy, cooling, disabled, inFlightFull := p.cfg.Pool.CountsDetailed()
+	// 用 WithPaused 而不是 CountsDetailed：后者把暂停号并进 disabled（/status 的「不可用」
+	// 口径），而面板概况卡片要分开展示（吸收上游 PR #130，issue #125）。
+	total, healthy, cooling, disabled, paused, inFlightFull := p.cfg.Pool.CountsDetailedWithPaused()
 	sticky := 0
 	if p.cfg.StickyCount != nil {
 		sticky = p.cfg.StickyCount()
@@ -267,6 +269,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"healthy":         healthy,
 		"cooling":         cooling,
 		"disabled":        disabled,
+		"paused":          paused,
 		"in_flight_full":  inFlightFull,
 		"accounts":        p.cfg.Pool.List(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久，移植上游
