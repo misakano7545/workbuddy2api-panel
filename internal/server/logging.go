@@ -43,13 +43,16 @@ func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
-	start     time.Time
-	model     string
-	mode      string // "stream" | "sync"
-	uid       string // 完整 uid，展示时只取前 8 位
-	nick      string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
-	ttfb      time.Duration
-	toks      int // <0 表示 usage 缺失 → 显示 "-"
+	start time.Time
+	model string
+	mode  string // "stream" | "sync"
+	uid   string // 完整 uid，展示时只取前 8 位
+	nick  string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
+	ttfb  time.Duration
+	toks  int // <0 表示 usage 缺失 → 显示 "-"
+	// think：本次 completion_tokens 里有多少是思考 token（上游把思考算进 completion）。
+	// <0 = 上游没给该字段（非推理模型/旧形态），此时行里不显示 think=。
+	think     int
 	status    int
 	requestID string
 	outcome   string
@@ -79,7 +82,7 @@ func newChatStat(now time.Time, body []byte, stream bool, budget *dailyBudget) *
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1, budget: budget}
+	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1, think: -1, budget: budget}
 }
 
 // done 幂等落一行表格日志。
@@ -90,7 +93,7 @@ func (s *chatStat) done() {
 	s.logged = true
 	total := time.Since(s.start)
 	logChatRowFull(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks,
-		s.cacheHit, s.cacheMiss, s.hasCache,
+		s.think, s.cacheHit, s.cacheMiss, s.hasCache,
 		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit,
 		s.clientIP, s.userAgent)
 	s.budget.add(s.credit, s.hasCredit)
@@ -119,8 +122,13 @@ type chatStatsReader struct {
 	hasCache     bool
 	hasCacheHit  bool
 	hasCacheMiss bool
-	errorFrame   bool
-	pend         []byte // 已读未返回的行缓存
+	// thinkTokens 末帧 usage 里的**思考 token 数**（上游把思考算进 completion_tokens：
+	// 实测 completion=100 里 91 是思考）。用于解释「速率看着慢」——Codex 这类高推理档
+	// 流量的 completion 里思考占七到八成，正文只占小头。
+	thinkTokens int
+	hasThink    bool
+	errorFrame  bool
+	pend        []byte // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -130,6 +138,10 @@ func newChatStatsReaderSince(r io.Reader, since time.Time) *chatStatsReader {
 
 // TTFB 返回首个 data 帧到达耗时；无帧时为 0。
 func (s *chatStatsReader) TTFB() time.Duration { return s.ttfb }
+
+// Thinking 返回末帧 usage 里的思考 token 数（上游字段 completion_thinking_tokens，
+// 兼容 completion_tokens_details.reasoning_tokens）；两个都缺时 ok=false。
+func (s *chatStatsReader) Thinking() (int, bool) { return s.thinkTokens, s.hasThink }
 
 // Tokens 返回末帧 usage.completion_tokens 与是否缺失；无 usage 时 ok=false。
 func (s *chatStatsReader) Tokens() (int, bool) { return s.completionTokens, s.hasCompletionTokens }
@@ -193,8 +205,14 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	var chunk struct {
 		Error json.RawMessage `json:"error"`
 		Usage *struct {
-			PromptTokens          *int            `json:"prompt_tokens"`
-			CompletionTokens      *int            `json:"completion_tokens"`
+			PromptTokens     *int `json:"prompt_tokens"`
+			CompletionTokens *int `json:"completion_tokens"`
+			// 思考 token：上游两个字段都出现过（顶层 completion_thinking_tokens 与
+			// 嵌套 completion_tokens_details.reasoning_tokens），取到哪个用哪个。
+			CompletionThinkingTokens *int `json:"completion_thinking_tokens"`
+			CompletionTokensDetails  *struct {
+				ReasoningTokens *int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 			TotalTokens           json.RawMessage `json:"total_tokens"`
 			Credit                json.RawMessage `json:"credit"`
 			PromptCacheHitTokens  *int            `json:"prompt_cache_hit_tokens"`
@@ -217,6 +235,14 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	if chunk.Usage.CompletionTokens != nil {
 		s.hasCompletionTokens = true
 		s.completionTokens = *chunk.Usage.CompletionTokens
+	}
+	// 思考 token（两个字段都在就取顶层，上游顶层口径更直接）。
+	if v := chunk.Usage.CompletionThinkingTokens; v != nil {
+		s.hasThink = true
+		s.thinkTokens = *v
+	} else if d := chunk.Usage.CompletionTokensDetails; d != nil && d.ReasoningTokens != nil {
+		s.hasThink = true
+		s.thinkTokens = *d.ReasoningTokens
 	}
 	// total_tokens / credit 走「先判合法性再采信」：上游偶发小数字段或负值
 	// （旧版直接断言 *int / *float64 会静默截断/采信脏值）。非法值置为「未知」
@@ -548,7 +574,7 @@ const (
 //
 // logChatRow 旧形态（带缓存命中率、无请求 ID）；新代码请用 logChatRowFull。
 func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int, cacheHit, cacheMiss int, hasCache bool) {
-	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, cacheHit, cacheMiss, hasCache, "", "", 0, 0, false, "", "")
+	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, -1, cacheHit, cacheMiss, hasCache, "", "", 0, 0, false, "", "")
 }
 
 // logChatRowEx 带请求 ID、结果、重试、积分与调用来源字段的扩展形态；缓存列不传
@@ -556,13 +582,13 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int,
 	requestID, outcome string, attempts int, credit float64, hasCredit bool,
 	clientIP, userAgent string) {
-	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, 0, 0, false,
+	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, -1, 0, 0, false,
 		requestID, outcome, attempts, credit, hasCredit, clientIP, userAgent)
 }
 
 // logChatRowFull 是本文件唯一的行输出点：宽表字段 + 缓存列 + 可选请求 ID/结果/重试/积分尾段 + 调用来源段。
 func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int,
-	cacheHit, cacheMiss int, hasCache bool,
+	think int, cacheHit, cacheMiss int, hasCache bool,
 	requestID, outcome string, attempts int, credit float64, hasCredit bool,
 	clientIP, userAgent string) {
 	if !chatLogEnabled {
@@ -576,6 +602,11 @@ func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, st
 	tokpsField := "-"
 	if toks >= 0 {
 		tokField = fmt.Sprintf("%d", toks)
+		// 思考 token 单列：上游把思考算进 completion_tokens（实测 521 里 431 是思考），
+		// 不分开看就分不清「模型慢」和「模型在想」——Codex 这类高推理档流量尤其明显。
+		if think >= 0 {
+			tokField += fmt.Sprintf(" think=%d", think)
+		}
 		// 速率与用量账本走同一个函数（扣掉 TTFB）。此前这里自己除 total，漏扣首
 		// token 等待，于是控制台流水行的 tok/s 与面板数字对不上（吸收上游 8b18ab8）
 		// ——本函数本来就收到了 ttfb，只是没拿它算速率。

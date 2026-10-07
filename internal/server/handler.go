@@ -1076,6 +1076,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 缺字段/NaN/负值不再被当成「免费」或脏数据污染台账（上游 PR #104）。
 			hasCredit = validUsageCost(credit, hasCredit, total, hasTotal)
 			recordAttempt(acct.UID, stats.Usage(), credit, hasCredit, attemptStarted, stats.TTFB())
+			if n, ok := stats.Thinking(); ok {
+				st.think = n
+			}
 			if n := repair.Converted(); n > 0 {
 				// 修复命中：上游本来会把工具调用吐成正文标记，这里已还原成 tool_calls。
 				// 一行日志便于运维确认「这次不再空转」并统计发生率。

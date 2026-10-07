@@ -525,3 +525,51 @@ func TestHealthzDoesNotLogTableRow(t *testing.T) {
 		t.Errorf("healthz/models/status must not emit table rows:\n%s", out)
 	}
 }
+
+// 思考 token 单列（think=）：上游把思考算进 completion_tokens，不分开看就分不清
+// 「模型慢」和「模型在想」——Codex 这类高推理档流量的 completion 里思考占七到八成。
+// 上游没给该字段时保持旧行格式（不出现 think=）。
+func TestLogChatRowShowsThinkingTokens(t *testing.T) {
+	withChatLog(t)
+	out := captureStdout(t, func() {
+		logChatRowFull(1200*time.Millisecond, 8*time.Second, "deepseek-v4.1-flash", "stream",
+			"u123456789", "示例号", http.StatusOK, 1450, 1255, 0, 0, false,
+			"req-x", reqlog.OutcomeSuccess, 1, 0.02, true, "", "")
+	})
+	if !strings.Contains(out, "tok=1450 think=1255") {
+		t.Errorf("row should show thinking tokens: %s", out)
+	}
+	out2 := captureStdout(t, func() {
+		logChatRow(1200*time.Millisecond, 8*time.Second, "deepseek-v4.1-flash", "stream",
+			"u123456789", "示例号", http.StatusOK, 1450, 0, 0, false)
+	})
+	if strings.Contains(out2, "think=") {
+		t.Errorf("think= 不该出现在没有该观测的行里: %s", out2)
+	}
+}
+
+// 思考 token 的**采集**（不只是行渲染）：上游两个字段形态都要认，都没有时 ok=false。
+// 为什么重要：Codex 这类高推理档流量的 completion_tokens 里思考占七到八成，采集不到就
+// 分不清「模型慢」与「模型在想」（本次排查的真问题）。
+func TestChatStatsReaderThinkingTokens(t *testing.T) {
+	// ① 顶层字段（实测形态：completion_thinking_tokens 与 completion_tokens_details 同时出现）
+	s := newChatStatsReaderSince(strings.NewReader(""), time.Now())
+	feedStatsLines(s,
+		`data: {"usage":{"prompt_tokens":66,"completion_tokens":100,"total_tokens":166,`+
+			`"completion_thinking_tokens":91,"completion_tokens_details":{"reasoning_tokens":91}}}`)
+	if n, ok := s.Thinking(); !ok || n != 91 {
+		t.Fatalf("thinking=%d ok=%v want 91/true（顶层字段）", n, ok)
+	}
+	// ② 只有嵌套字段时的回落
+	s2 := newChatStatsReaderSince(strings.NewReader(""), time.Now())
+	feedStatsLines(s2, `data: {"usage":{"completion_tokens":50,"completion_tokens_details":{"reasoning_tokens":40}}}`)
+	if n, ok := s2.Thinking(); !ok || n != 40 {
+		t.Fatalf("thinking=%d ok=%v want 40/true（嵌套回落）", n, ok)
+	}
+	// ③ 非推理响应：没有该字段 → ok=false（行里不出现 think=）
+	s3 := newChatStatsReaderSince(strings.NewReader(""), time.Now())
+	feedStatsLines(s3, `data: {"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	if n, ok := s3.Thinking(); ok || n != 0 {
+		t.Fatalf("thinking=%d ok=%v want 0/false（无该观测）", n, ok)
+	}
+}
