@@ -477,7 +477,6 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 		toolImgs = nil
 	}
 	flush := func() {
-		flushImgs()
 		if len(pending) == 0 {
 			return
 		}
@@ -490,6 +489,14 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			continue
 		}
 		typ, _ := m["type"].(string)
+		// 图片的落点是「这一轮工具到此为止」的那个项，**不能挂在 flush() 里**：
+		// flush() 在每条 function_call_output 开头都会跑，于是并行工具调用
+		// （assistant 一条带多个 tool_calls）处理第二条结果时，会先把第一条结果的图
+		// 落下去，正好插进 c1 与 c2 两条 tool 消息之间 —— 后面那条 tool_call_id 就此
+		// 失去应答。Anthropic 侧的 hasToolResult(blocks) 是同一个判据（message 级）。
+		if typ != "function_call_output" && typ != "custom_tool_call_output" {
+			flushImgs()
+		}
 		switch typ {
 		case "reasoning", "item_reference":
 			flush()

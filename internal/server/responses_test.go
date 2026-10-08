@@ -978,6 +978,21 @@ func TestResponsesToolOutputImagesMoveToUserMessage(t *testing.T) {
 		t.Fatalf("roles=%v want=%s", roles, want)
 	}
 
+	// 并行工具调用：assistant 一条带两个 tool_calls，两条结果必须紧挨着 ——
+	// 图不许插进 c1 与 c2 之间（后面的 tool_call_id 会失去应答）。判据挂在
+	// 「非工具结果项」上，不是挂在 flush() 里。
+	m = msgsFor(`[{"type":"function_call","call_id":"c1","name":"view_image","arguments":"{}"},
+		{"type":"function_call","call_id":"c2","name":"Bash","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":[` + img + `]},
+		{"type":"function_call_output","call_id":"c2","output":[{"type":"input_text","text":"ok"}]}]`)
+	roles = roles[:0]
+	for _, x := range m {
+		roles = append(roles, asString(x.(map[string]any)["role"]))
+	}
+	if want := "assistant,tool,tool,user"; strings.Join(roles, ",") != want {
+		t.Fatalf("并行工具调用被图片插断：roles=%v want=%s %#v", roles, want, m)
+	}
+
 	// 纯文本不受影响：不留空 user 消息、正文照旧合并
 	m = msgsFor(`[{"type":"function_call","call_id":"c1","name":"Bash","arguments":"{}"},
 		{"type":"function_call_output","call_id":"c1","output":[
