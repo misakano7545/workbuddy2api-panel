@@ -2,8 +2,13 @@ package upstream
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
 // extractCacheKey 从改写后的 body 里取出 prompt_cache_key 字段值。
@@ -125,6 +130,81 @@ func TestInjectPromptCacheKey_EmptyConversation(t *testing.T) {
 	}
 	if !strings.Contains(got, "user-abc") {
 		t.Fatalf("expected uid8 in key, got=%q", got)
+	}
+}
+
+// TestChatMetaCacheKeySource 缓存槽来源与头部来源分开：无 conversation_id 时缓存槽跟网关
+// 派生的粘性会话键（CacheKeyID），但 X-Conversation-ID 仍然不发（不伪造）；客户端自带
+// conversation_id 时缓存槽仍以客户端声明为准。
+func TestChatMetaCacheKeySource(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		meta      ChatMeta
+		wantKey   string
+		wantConvH string
+	}{
+		{"仅粘性键", ChatMeta{CacheKeyID: "sess-abc"}, buildCacheKey("u1", "sess-abc"), ""},
+		{"客户端会话优先", ChatMeta{ConversationID: "conv-1", CacheKeyID: "sess-abc"}, buildCacheKey("u1", "conv-1"), "conv-1"},
+		{"两源皆空", ChatMeta{}, buildCacheKey("u1", ""), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody []byte
+			var gotConv string
+			c := testClient(func(r *http.Request) (*http.Response, error) {
+				gotBody, _ = io.ReadAll(r.Body)
+				gotConv = r.Header.Get("X-Conversation-ID")
+				return &http.Response{StatusCode: 200,
+					Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:   io.NopCloser(strings.NewReader("data: [DONE]\n\n"))}, nil
+			})
+			a := &auth.Auth{AccessToken: "at", UID: "u1"}
+			rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`), "", tc.meta)
+			if err != nil || status != 200 {
+				t.Fatalf("status=%d err=%v", status, err)
+			}
+			rc.Close()
+			if got := extractCacheKey(t, gotBody); got != tc.wantKey {
+				t.Errorf("prompt_cache_key=%q want %q", got, tc.wantKey)
+			}
+			if gotConv != tc.wantConvH {
+				t.Errorf("X-Conversation-ID=%q want %q（客户端没给就不该伪造）", gotConv, tc.wantConvH)
+			}
+		})
+	}
+}
+
+// TestCacheSlotFromStickySessionKey 无 conversation_id 的客户端：缓存槽按网关派生的
+// 粘性会话键分家 —— 同会话跨轮同槽（历史每轮追加也不换），异会话异槽。
+//
+// 为什么这条链必须钉住：粘性键 session.ExtractKey 是「会话级」（conv id / 客户端
+// prompt_cache_key / system+首条 user 的哈希），而轮级键 TurnKey 每轮都变。若哪天把
+// 轮级键接进缓存槽，每个对话轮都会换一个新 key → 前缀缓存永远冷启动（费用反向）。
+// 下方 TurnKey 断言即本用例的敏感度自证：两个轮级键确实不同。
+func TestCacheSlotFromStickySessionKey(t *testing.T) {
+	body := func(firstUser, second string) []byte {
+		msgs := `{"role":"system","content":"you are X"},{"role":"user","content":"` + firstUser + `"}`
+		if second != "" {
+			msgs += `,{"role":"assistant","content":"ok"},{"role":"user","content":"` + second + `"}`
+		}
+		return []byte(`{"model":"m","messages":[` + msgs + `]}`)
+	}
+	slotFor := func(b []byte) string {
+		t.Helper()
+		sk := session.ExtractKey(b)
+		if sk == "" {
+			t.Fatalf("ExtractKey 应派生出非空粘性键: %s", b)
+		}
+		return buildCacheKey("u1", cacheKeySource(ChatMeta{CacheKeyID: sk}))
+	}
+	turn1, turn2, other := body("hello", ""), body("hello", "next"), body("another topic", "")
+	if a, b := slotFor(turn1), slotFor(turn2); a != b {
+		t.Fatalf("同会话跨轮换了缓存槽：%q → %q", a, b)
+	}
+	if slotFor(turn1) == slotFor(other) {
+		t.Fatalf("异会话共用一个缓存槽：%q", slotFor(turn1))
+	}
+	if session.TurnKey(turn1) == session.TurnKey(turn2) {
+		t.Fatal("敏感度自证失败：轮级键本该逐轮不同")
 	}
 }
 

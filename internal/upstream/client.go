@@ -1056,7 +1056,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	prepared := c.prepareBody(body, a.Realm(), a.UID, cacheKeySource(meta))
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}
