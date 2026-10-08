@@ -1117,6 +1117,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
+			// 与流式空流那条 WARN 对称——此前这条只写响应不落日志，运维侧只能看到
+			// 一行 sync 502，无从判断是上游空体还是别的（同一失败在流式路径有 WARN）。
+			log.Printf("WARN: [server] sync acct=%s model=%s: upstream parse failed: %v", logfmt.Label(acct.UID, acct.Nickname), bareModel, err)
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
 			st.outcome = reqlog.OutcomeHTTPError

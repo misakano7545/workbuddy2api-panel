@@ -240,6 +240,26 @@ func TestChatNonStreamAggregates(t *testing.T) {
 	}
 }
 
+// TestChatSyncEmptyUpstreamBodyIs502 钉住非流式 502 分支：上游 200 但空体 → Aggregate
+// 报错 → 502 upstream_parse（并落一条 WARN，与流式空流那条对称）。此分支曾经只写响应
+// 不打日志，线上只留下一行 sync 502、无从归因。
+func TestChatSyncEmptyUpstreamBodyIs502(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, "", true })
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream: up,
+	})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "upstream_parse") {
+		t.Fatalf("502 应说明 upstream_parse: %s", rec.Body)
+	}
+}
+
 func TestChatStreamPassthrough(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 200, sseOK, true
