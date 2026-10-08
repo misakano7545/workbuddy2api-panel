@@ -444,3 +444,59 @@ func TestMessagesEndpointNonStreamError(t *testing.T) {
 		t.Fatalf("code=%d body=%v", rec.Code, obj)
 	}
 }
+
+// Anthropic 入站：tool_result 里的图片不能留在 tool 消息里，也不能继续拼进正文 ——
+// 拼进去等于把 base64 当正文分词（Claude Code 读截图、MCP 的截图类工具都把图放在
+// tool_result.content）：模型其实看不到图，token 却按字符数涨。图片另起一条 user
+// 消息，且要等这批工具结果全部落地（插在 assistant.tool_calls 与 tool 之间判 11148）。
+func TestAnthropicToolResultImagesMoveToUserMessage(t *testing.T) {
+	msgsFor := func(messages string) []any {
+		t.Helper()
+		got, err := messagesToChat([]byte(`{"model":"m","max_tokens":16,"messages":` + messages + `}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(got, &obj); err != nil {
+			t.Fatal(err)
+		}
+		msgs, _ := obj["messages"].([]any)
+		return msgs
+	}
+	img := `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}`
+
+	m := msgsFor(`[
+		{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"shot","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[
+			{"type":"text","text":"done"},` + img + `]}]},
+		{"role":"assistant","content":[{"type":"text","text":"next"}]}]`)
+	var roles []string
+	for _, x := range m {
+		roles = append(roles, asString(x.(map[string]any)["role"]))
+	}
+	if want := "assistant,tool,user,assistant"; strings.Join(roles, ",") != want {
+		t.Fatalf("roles=%v want=%s", roles, want)
+	}
+	if c := asString(m[1].(map[string]any)["content"]); c != "done" || strings.Contains(c, "base64") {
+		t.Fatalf("tool content 不该带图/不该焊 base64: %q", c)
+	}
+	parts, _ := m[2].(map[string]any)["content"].([]any)
+	if len(parts) != 2 || asString(parts[0].(map[string]any)["text"]) != toolImagePlaceholder {
+		t.Fatalf("user msg=%v", m[2])
+	}
+	iu, _ := parts[1].(map[string]any)["image_url"].(map[string]any)
+	if asString(iu["url"]) != "data:image/png;base64,QUJD" {
+		t.Fatalf("image part=%v", parts[1])
+	}
+
+	// 只有图、且 is_error：不能焊成 "error: data:image…"
+	m = msgsFor(`[
+		{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"shot","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[` + img + `]}]}]`)
+	if c := asString(m[1].(map[string]any)["content"]); c != "error: " {
+		t.Fatalf("tool content=%q", c)
+	}
+	if len(m) != 3 || asString(m[2].(map[string]any)["role"]) != "user" {
+		t.Fatalf("msgs=%#v", m)
+	}
+}

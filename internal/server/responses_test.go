@@ -920,3 +920,69 @@ func TestResponsesToolContractDetails(t *testing.T) {
 		t.Fatalf("非流式截断 custom 应按不可执行下发：%v", truncIt)
 	}
 }
+
+// Responses→Chat：工具结果里的图片必须活下来，且只能落在紧随工具消息之后的合成 user
+// 消息里 —— Chat 的 tool 消息不许带图（OpenAI 直接 400）；插早一步会打断
+// assistant.tool_calls 与 tool 消息的配对（并行工具调用判 11148）。
+// 改前：asContentString 只读 text part，Codex 的 view_image 把图放在
+// function_call_output.output 数组里 → 图整块静默丢掉，模型看不到图照上下文编答案。
+func TestResponsesToolOutputImagesMoveToUserMessage(t *testing.T) {
+	msgsFor := func(input string) []any {
+		t.Helper()
+		got, _, err := responsesToChat([]byte(`{"model":"m","input":` + input + `}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(got, &obj); err != nil {
+			t.Fatal(err)
+		}
+		msgs, _ := obj["messages"].([]any)
+		return msgs
+	}
+	img := `{"type":"input_image","image_url":"data:image/png;base64,QUJD"}`
+
+	// 单轮：tool 消息只留正文，图落在紧随其后的 user 消息
+	m := msgsFor(`[{"type":"function_call","call_id":"c1","name":"view_image","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":[
+			{"type":"input_text","text":"shot"},` + img + `]}]`)
+	if len(m) != 3 {
+		t.Fatalf("len=%d %#v", len(m), m)
+	}
+	if tool := m[1].(map[string]any); tool["role"] != "tool" || asString(tool["content"]) != "shot" {
+		t.Fatalf("tool msg=%v", tool)
+	}
+	um := m[2].(map[string]any)
+	parts, _ := um["content"].([]any)
+	if um["role"] != "user" || len(parts) != 2 {
+		t.Fatalf("user msg=%v", um)
+	}
+	if p0 := parts[0].(map[string]any); asString(p0["text"]) != toolImagePlaceholder {
+		t.Fatalf("占位正文=%v", p0)
+	}
+	iu, _ := parts[1].(map[string]any)["image_url"].(map[string]any)
+	if asString(iu["url"]) != "data:image/png;base64,QUJD" {
+		t.Fatalf("image part=%v", parts[1])
+	}
+
+	// 两轮：上一轮的图必须先于下一轮 assistant 落地，且不能插进 assistant↔tool 之间
+	m = msgsFor(`[{"type":"function_call","call_id":"c1","name":"view_image","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":[` + img + `]},
+		{"type":"function_call","call_id":"c2","name":"Bash","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c2","output":[{"type":"input_text","text":"ok"}]}]`)
+	var roles []string
+	for _, x := range m {
+		roles = append(roles, asString(x.(map[string]any)["role"]))
+	}
+	if want := "assistant,tool,user,assistant,tool"; strings.Join(roles, ",") != want {
+		t.Fatalf("roles=%v want=%s", roles, want)
+	}
+
+	// 纯文本不受影响：不留空 user 消息、正文照旧合并
+	m = msgsFor(`[{"type":"function_call","call_id":"c1","name":"Bash","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":[
+			{"type":"output_text","text":"a"},{"type":"output_text","text":"b"}]}]`)
+	if len(m) != 2 || asString(m[1].(map[string]any)["content"]) != "ab" {
+		t.Fatalf("纯文本=%#v", m)
+	}
+}
