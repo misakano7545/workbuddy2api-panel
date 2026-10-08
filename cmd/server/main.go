@@ -490,6 +490,25 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
+// writeConfigInPlace 原地重写配置（O_TRUNC），给两种「原子替换做不到」的部署形态复用：
+// 单文件 bind mount 不能被 rename 覆盖（EBUSY）；配置目录不可写但文件可写（EACCES，
+// Docker 以 PUID 运行而 /app 属主是镜像内的 app，见 issue #134）。代价是失去原子性：
+// 写失败时文件可能只剩半截 —— 这两种形态下本来也没有可用 tmp 的目录。
+func writeConfigInPlace(path string, out []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(out)
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	return werr
+}
+
 func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, gw *server.Handler, pn *panel.Panel, running ...*Config) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
@@ -534,9 +553,17 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return nil, fmt.Errorf("write config: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
+		// 配置所在目录不可写：Docker 里 /app 属主是镜像内的 app(10001)，而 compose 让
+		// 容器以 PUID(如 1000) 运行 —— 挂载进去的 config.json 可写、目录不行，于是原子
+		// 替换连 tmp 都建不出来（issue #134：write config: open /app/config.json.tmp:
+		// permission denied）。文件本身可写就退回原地重写，不再要求目录可写。
+		if !errors.Is(err, fs.ErrPermission) {
+			return nil, fmt.Errorf("write config: %w", err)
+		}
+		if inPlaceErr := writeConfigInPlace(path, out); inPlaceErr != nil {
+			return nil, fmt.Errorf("write config (目录不可写，原地重写也失败): %w", inPlaceErr)
+		}
+	} else if err := os.Rename(tmp, path); err != nil {
 		// A single-file Docker bind mount cannot be renamed over its mount
 		// target (Linux returns EBUSY / "device or resource busy"). Keep the
 		// atomic path for regular files, but update the mounted file in place
@@ -544,25 +571,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		if !errors.Is(err, syscall.EBUSY) {
 			return nil, fmt.Errorf("replace config: %w", err)
 		}
-		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-		if openErr != nil {
-			_ = os.Remove(tmp)
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", openErr)
-		}
-		_, writeErr := f.Write(out)
-		if writeErr == nil {
-			writeErr = f.Sync()
-		}
-		closeErr := f.Close()
-		// 写失败时保留 tmp（挂载文件已被 O_TRUNC 破坏，tmp 里是完整新内容，
-		// 可手工恢复）；写成功才清理。
-		if writeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
+		if inPlaceErr := writeConfigInPlace(path, out); inPlaceErr != nil {
+			return nil, fmt.Errorf("replace config (bind mount fallback): %w", inPlaceErr)
 		}
 		_ = os.Remove(tmp)
-		if closeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
-		}
 	}
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。

@@ -59,6 +59,58 @@ func TestSaveConfigReportsActualAndPendingRestarts(t *testing.T) {
 	}
 }
 
+// TestSaveConfigWhenDirNotWritable 目录不可写但 config.json 可写时仍要能保存：Docker 里
+// /app 属主是镜像内的 app(10001)，而 compose 让容器以 PUID 运行 —— 原子替换的 tmp 建不
+// 出来（issue #134），必须退回原地重写。
+//
+// root 不受目录权限位约束（CAP_DAC_OVERRIDE），所以本机 root 下 skip；CI 以普通用户跑，
+// 这条才真的会红/绿。
+func TestSaveConfigWhenDirNotWritable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("目录权限位对 root 无效，需非 root 运行才有牙齿（CI 生效）")
+	}
+	cfg := Default()
+	if err := cfg.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(cfg)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil { // 目录不可写：tmp 建不出来
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o755)
+
+	live := livecfg.New(livecfg.Snapshot{})
+	p := pool.New("")
+	defer p.Close()
+	up := upstream.New()
+	sch := scheduler.New(scheduler.Config{Pool: p, Upstream: up})
+	if _, err := saveConfig([]byte(`{"api_key":"changed-in-place"}`), path, live, p, up, sch, nil, nil, cfg); err != nil {
+		t.Fatalf("目录不可写时应原地重写而不是报错: %v", err)
+	}
+	if live.Load().APIKey != "changed-in-place" {
+		t.Fatal("key was not applied immediately")
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(saved, &got); err != nil {
+		t.Fatalf("落盘内容不是完整 JSON（原地重写写坏了？）: %v", err)
+	}
+	if got["api_key"] != "changed-in-place" {
+		t.Fatalf("api_key=%v", got["api_key"])
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Error("不应残留 config.json.tmp")
+	}
+}
+
 // TestRestartRequiredIncludesAllAssemblyFields 装配期字段（监听/身份/双域/提示词/
 // 会话粘性/upstash）逐族抽查：变化必须被 restartRequiredFields 报告。
 func TestRestartRequiredIncludesAllAssemblyFields(t *testing.T) {
