@@ -21,6 +21,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -283,6 +284,14 @@ func main() {
 	// configSaveMu 串行化面板配置保存（并发两次保存会在读-改-写文件与热应用之间互踩）。
 	var configSaveMu sync.Mutex
 	// pn 先声明再赋值：SaveConfig 闭包要在同一条语句里捕获它（:= 的作用域从语句结束才开始）。
+	// 积分历史：把每次真实查到的余额与上一次比对，变动即留痕（新账号首次只建
+	// 基线）。挂载在余额查询路径上（upstream 的余额观察者），签到 / 活跃上报 /
+	// 旅行 / 保活 / 面板手动刷新全覆盖——上游只在少数渠道落金额日志，比对余额
+	// 是唯一可靠的口径。与 state/usage/request-logs 同目录，随 state_file 搬移。
+	creditHist := credithist.New(stateSibling(cfg.StateFile, "credit-history.json"), 2000)
+	up.SetCreditObserver(creditHist.Observe)
+	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
+
 	var pn *panel.Panel
 	pn = panel.New(panel.Config{
 		Pool:       p,
@@ -310,6 +319,8 @@ func main() {
 			defer configSaveMu.Unlock()
 			return saveConfig(raw, *cfgPath, live, p, up, sch, gw, pn, cfg)
 		},
+		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
+		CreditHistory: creditHist,
 	})
 	// 任务频道日志落盘（重启后任务结果可回溯）；失败只 WARN，不阻塞启动。
 	if err := pn.Logs().SetTaskArchive(stateSibling(cfg.StateFile, "task-logs.json")); err != nil {
