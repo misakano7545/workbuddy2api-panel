@@ -172,6 +172,63 @@ func TestChatBadParamsFailsFastWithoutPenalty(t *testing.T) {
 	}
 }
 
+// TestChatModelParamInvalidFailsFastWithoutPenalty 上游 400 + code 11133
+// （model_param_invalid / 「the request parameters were rejected by the model provider」，
+// 实测形态：缺 messages、空 messages、模型不支持图片）→ 请求级错误：不罚账号，
+// **且不轮转**——同一 body 换任何账号都会被同一处拒绝（payload.go 实测上游 GPT 系
+// max_tokens<16 时「全号轮转同样被拒」）。端到端断言只打一次上游、直接回 400、
+// 且绝不落回 503 no_healthy_account（那会把必然失败的请求伪装成"稍后重试"）。
+func TestChatModelParamInvalidFailsFastWithoutPenalty(t *testing.T) {
+	const upstreamBody = `{"code":11133,"msg":"the request parameters were rejected by the model provider","requestId":"b260844bf07a4a4e9f8c26e69111fd72","extError":{"code":"400002","message":"the request parameters were rejected by the model provider","param":"messages","type":"invalid_request_error","StatusCode":400}}`
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 400, upstreamBody, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000, 0) // 权重更高（确定性源 r=0 → 首个请求先选它；池在请求间换号）
+	p.SetCredits("good", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	// 连打 6 次（> degradeThreshold=5），每次断言：只打一次上游（不轮转）、回 400、
+	// 不落 no_healthy_account。池本身会在请求间换号（公平性），故按「每轮增量」断言，
+	// 不假定固定先选哪一号。
+	// 若该错误被当 ErrClient：每轮会轮转 3 个号（6 轮 = 18 次上游调用）并喂连败计数，
+	// 第 5 轮达阈把号打到降权——正是「客户端本地 bug 循环把健康号逐轮打到降权」的机制。
+	for i := 1; i <= 6; i++ {
+		before := calls["Bearer at-bad"] + calls["Bearer at-good"]
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2"}`)))
+		if got := calls["Bearer at-bad"] + calls["Bearer at-good"] - before; got != 1 {
+			t.Fatalf("run %d: 上游调用 %d 次 want 1（不轮转）calls=%v", i, got, calls)
+		}
+		if rec.Code != 400 {
+			t.Fatalf("run %d: code=%d body=%s (want 400 fail-fast)", i, rec.Code, rec.Body)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "11133") {
+			t.Errorf("run %d: 400 body should carry upstream 11133 body: %s", i, body)
+		}
+		if strings.Contains(body, "no_healthy_account") {
+			t.Errorf("run %d: 11133 must not fall back to no_healthy_account: %s", i, body)
+		}
+		if !strings.Contains(body, "model_param_invalid") {
+			t.Errorf("run %d: 400 body should carry the model_param_invalid code: %s", i, body)
+		}
+	}
+	// 两个账号都完好：不罚号——连败计数是 ErrClient（未知 4xx）的待遇，请求级错误
+	// 不得喂（喂了第 5 轮就会 DegradeUntil 非零）。
+	for _, uid := range []string{"bad", "good"} {
+		st, _ := p.Status(uid)
+		if st.Cooling || st.Disabled || st.ErrTotal != 0 || st.BreakerFails != 0 ||
+			st.ConsecutiveFails != 0 || !st.DegradeUntil.IsZero() {
+			t.Errorf("%s: ErrModelParamInvalid must not penalize account: %+v", uid, st)
+		}
+	}
+}
+
 // TestChatBadParams400CarriesUpstreamBody 全部账号都 11101 时回 400 并携带上游原文
 // （不再落回 503 + 空洞的 no_healthy_account）。
 func TestChatBadParams400CarriesUpstreamBody(t *testing.T) {

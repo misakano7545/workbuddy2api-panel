@@ -149,6 +149,7 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 func imageFailFastKind(kind upstream.ErrKind) bool {
 	switch kind {
 	case upstream.ErrBadParams, upstream.ErrPromptTooLong, upstream.ErrImageInvalid,
+		upstream.ErrModelParamInvalid,
 		upstream.ErrContentBlocked, upstream.ErrModelBlocked:
 		return true
 	}

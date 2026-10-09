@@ -990,21 +990,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
-			// 请求体解析失败（11101）：与 11115 / 图片无效同一哲学——同一 body 换任何
-			// 账号都是同样的解析结果，轮转只会放大无效请求（每号一次上游调用 +
-			// rotateBackoff 占用在途名额）。更要紧的是：继续轮转后末端会落到
-			// 「其余保持 503」，把确定失败的请求伪装成"账号不可用、稍后再试"，
-			// 客户端于是对必然失败的请求无限重试。立即透传上游原文回 400。
-			// （吸收上游 fd5c5a6）
-			if kind == upstream.ErrBadParams {
+			// 请求级参数拒绝（11101 请求体解析失败 / 11133 模型供应商拒绝参数）：与
+			// 11115 / 图片无效同一哲学——同一 body 换任何账号都是同样的拒绝，轮转只会
+			// 放大无效请求（每号一次上游调用 + rotateBackoff 占用在途名额）。更要紧的
+			// 是：继续轮转后末端会落到「其余保持 503」，把确定失败的请求伪装成
+			// "账号不可用、稍后再试"，客户端于是对必然失败的请求无限重试。立即透传
+			// 上游原文回 400。（11101 吸收上游 fd5c5a6；11133 见 payload.go 实测
+			// 「全号轮转同样被拒」）
+			if kind == upstream.ErrBadParams || kind == upstream.ErrModelParamInvalid {
+				code, fallback := "bad_params", "chat request body was rejected by upstream"
+				if kind == upstream.ErrModelParamInvalid {
+					code, fallback = "model_param_invalid", "request parameters were rejected by the upstream model provider"
+				}
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
-					msg = "chat request body was rejected by upstream"
+					msg = fallback
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "bad_params", msg,
-					h.hintOf(upstream.ErrBadParams, string(respBody), bareModel, reqHasImage, uerr))
+				writeOpenAIErrorHint(w, http.StatusBadRequest, code, msg,
+					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
 				return
@@ -1394,6 +1399,7 @@ func rotateBackoff(i int, ctx context.Context) bool {
 //   - ErrBadParams → 11101：不罚账号，且与 ErrPromptTooLong/ErrImageInvalid 同待遇：
 //     不冷却/不熔断/不 NoteError/不喂连败；换号必然同样失败，故 chatCompletions
 //     在轮转循环内即刻 400 透传上游原文终止（吸收上游 fd5c5a6）。
+//   - ErrModelParamInvalid → 11133：同上（请求级），零动作 + 循环内即刻 400 终止。
 //   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11102 负缓存避让。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
 //     达到 breakerThreshold 触发熔断（指数退避）。
@@ -1488,6 +1494,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 有问题（网关侧不再截断，均为客户端畸形 JSON）。换上任何账号照样 400，
 		// 故零动作（无冷却/熔断/NoteError/连败喂养）；终止轮转与 400 透传原文由
 		// chatCompletions 的 ErrBadParams 分支负责（吸收上游 fd5c5a6）。
+	case upstream.ErrModelParamInvalid:
+		// 11133「参数被模型供应商拒绝」（缺/空 messages、模型不支持图片等）：请求级
+		// 错误，与 ErrBadParams/ErrPromptTooLong/ErrImageInvalid 同待遇——零动作
+		// （不冷却/不熔断/不 NoteError/**不喂连败计数**：连败降权是 ErrClient 这种
+		// 「不知道原因的失败」的兜底，有权威分类的请求级错误不该重复计罚）。
+		// 终止轮转与 400 透传原文由 chatCompletions 的请求级参数分支负责。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
 		// （与 6004 同域），选号侧 healthyForModel 对该账号自动避开该模型。

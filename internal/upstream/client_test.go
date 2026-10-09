@@ -63,8 +63,17 @@ func TestClassify(t *testing.T) {
 		// 11135 业务码须容忍 JSON 空白（5d5223d：字面量 marker 只覆盖紧凑形态）。
 		{400, `{"code": 11135, "msg":"image data invalid"}`, ErrImageInvalid},
 		{400, `{"error":{"code": "11135", "message":"image invalid"}}`, ErrImageInvalid},
-		// 防过宽：11133（模型不支持图片）不进 image_invalid。
-		{400, `{"code": 11133, "msg":"model does not support image"}`, ErrClient},
+		// 防过宽：11133（模型不支持图片）不进 image_invalid——它自成一类确定性请求级
+		// 错误（ErrModelParamInvalid），与 11135/11115 同待遇：不轮转、不罚号、末端 400 透传。
+		{400, `{"code": 11133, "msg":"model does not support image"}`, ErrModelParamInvalid},
+		// 11133 家族实测形态（缺/空 messages）：extError.param=messages + StatusCode 400。
+		{400, `{"code":11133,"msg":"the request parameters were rejected by the model provider","extError":{"code":"400002","param":"messages","type":"invalid_request_error","StatusCode":400}}`, ErrModelParamInvalid},
+		{400, `{"code":"11133","msg":"model_param_invalid"}`, ErrModelParamInvalid},
+		{400, `invalid request parameters`, ErrModelParamInvalid},
+		{400, `the request parameters do not meet the current model requirements`, ErrModelParamInvalid},
+		// 状态码先于业务码：429/5xx 上的 11133 不得抢走限流/服务端语义。
+		{429, `{"code":11133,"msg":"the request parameters were rejected"}`, ErrSoftRate},
+		{503, `{"code":11133,"msg":"the request parameters were rejected"}`, ErrServer},
 		{200, `quota exceeded`, ErrHardCredit},
 		// session 死亡优先于限流文案（401+12153 需人工重登，短冷却无意义）。
 		{401, `{"code":12153,"msg":"Offline user session not found, rate limit"}`, ErrSessionDead},
