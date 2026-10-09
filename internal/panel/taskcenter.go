@@ -46,6 +46,13 @@ func (p *Panel) scanAccountGrowth(a *auth.Auth) scanAccountItem {
 		it.SkipReason = "国际区任务仅支持查询，不执行国内区成长任务"
 		return it
 	}
+	// 企业版门控：企业版无个人成长体系（GET /v2/activity/growth/tasks 上游 403
+	// 「growth system is only available for personal users」），不发任何上游调用。
+	if a.IsEnterprise() {
+		it.Skipped = true
+		it.SkipReason = "企业版无个人成长体系（任务端点上游 403）"
+		return it
+	}
 
 	var errors []string
 	if tasks, err := p.cfg.Upstream.ListTasks(a); err != nil {

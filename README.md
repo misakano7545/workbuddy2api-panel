@@ -590,6 +590,28 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 这就是「一次只放开一个号、其余让位」想要的粒度：让位的号不再承接**选号流量**，也避开夜间的对话补足；其余养号动作照常。账号行「任务」按钮的**手动**执行不受限。
 
+#### 企业版账号（自动识别，无需配置）
+
+> **本仓说明：这是预留功能。** 本部署**没有企业版账号**，因此企业版相关能力（能力门控 + 企业额度展示）在本仓**未经真实企业号验证**——代码路径与单测齐备，但下方实测数据来自上游 PR #129 作者 yuzunyue 的 A/B 对照，不是本仓的实测结论。
+>
+> **如果你有企业版账号可以提供给我测试，我愿意配合验证**，实测结果会回填到本节。
+
+`auth` 文件带非空 `enterpriseId` 的账号被识别为**企业版**（面板账号名旁显示「企业版」标签）。企业版**没有个人成长体系**——上游对这些端点一律拒绝（实测 2026-10-07，同一时刻与个人号 A/B 对照）：
+
+| 端点 | 企业版响应 |
+|---|---|
+| `POST /v2/billing/meter/daily-checkin`（签到） | `400 code 10001`「企业账号不支持该操作」 |
+| `POST /billing/meter/claim-gift` / `claim-compensation`（夜猫子领奖） | `400 code 10001` 同上 |
+| `GET /activity/growth/*`（连登 / 旅行 / 热力图 / 抽奖）与 `GET /v2/activity/growth/tasks`（成长任务） | `403`「growth system is only available for personal users」 |
+
+因此网关对企业号**不发起**这五类调用（签到 / 活跃上报 / 猫猫旅行 / 夜猫子 / 连登管家），面板也不渲染「签到」「任务」按钮（只留「额度」）。判定（`auth.Auth.IsEnterprise()`）与既有 `IsGlobal()`（D4 门控）在**同一批引用处并列书写**，`upstream` 侧零改动。
+
+**企业版照常的能力**：选号派发、保活（token 刷新仍必需——不刷新同样会过期失效）、额度查询。
+
+企业额度不在个人「资源包」体系内（`get-user-resource*` 对 `enterpriseId` 账号恒返回空 `Accounts`，面板因此长期显示 0），故额度改走 `POST /v2/billing/meter/get-enterprise-user-usage`：上游 `credit` 是**本周期已用**（与个人口径「剩余」语义相反），`limitNum` 是**分配给该账号的额度**，网关据此换算 `剩余 = limitNum - credit`；`limitNum = -1` 为不限量（面板显示「不限」，且不参与周期分桶）。企业配额按周期重置（`cycleResetTime`），未用完即作废，故周期末会参与 `prefer_expiring` 优先消耗。
+
+> 成员账号**无权查询企业池总额度**（实测：池端点在成员 token 下返回 `403 not_authorized`，`/console/accounts` 显示 `isAdmin=false`）。面板展示的只是**该账号被分配的额度**；企业池余额只有企业管理员在管理后台可见。
+
 #### 连登管家（签到排程末尾自动执行）
 
 成长中心的连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。管家在每日签到后自动跑一遍闭环（幂等，未解锁静默跳过）：

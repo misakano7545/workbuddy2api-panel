@@ -644,10 +644,6 @@ func TestUpgRestartContinuesBaseline(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestUpgEnterpriseQuotaDelta(t *testing.T) {
-	// ponytail: 本仓未吸收上游 #129（企业版额度通道）——UserResourceDetailedWithExpiry
-	// 没有 IsEnterprise 分支，get-enterprise-user-usage 永不被调用，企业号余额恒 0，
-	// 这条用例在本地只能测出「没有通道」。吸收 #129 后去掉这个 Skip。
-	t.Skip("本仓无企业版额度通道（未吸收上游 #129）")
 	e := upgNewEnv(t, upgSeed{uid: "ue", nickname: "企业号", enterpriseID: "ent-1", credits: 2000})
 	e.fake.registerEnterprise("ue", 0, 2000) // credit=0, limitNum=2000 → remain=2000
 
@@ -672,7 +668,6 @@ func TestUpgEnterpriseQuotaDelta(t *testing.T) {
 }
 
 func TestUpgEnterpriseUnlimitedSentinelNoFakeEntry(t *testing.T) {
-	t.Skip("本仓无企业版额度通道（未吸收上游 #129）") // 同上
 	e := upgNewEnv(t, upgSeed{uid: "uu", enterpriseID: "ent-2", credits: 0})
 	e.fake.registerEnterprise("uu", 0, -1) // limitNum=-1 → remain=1<<40 哨兵
 
