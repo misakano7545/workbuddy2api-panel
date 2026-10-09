@@ -1197,3 +1197,65 @@ func TestConfigFormMatchesCFGMap(t *testing.T) {
 		}
 	}
 }
+
+// TestAppJSTaskCenterScanNotOverwritten 任务中心：切到「扫描/队列」结果后，5 秒定时
+// 刷新不能把列表抢回后台任务视图。
+//
+// 为什么需要：refreshVisible()（每 5s）在 taskscenter 视图下调 reattachQueueView()，
+// 而它无条件 taskCenterOwner='jobs' + loadTaskJobs() —— 用户刚点「扫描待办」查出来的
+// 结果会在下一个 tick 被 renderQueue(空) 冲成空白，表现为「查完就自己消失，按好几次
+// 才又有」。闸门只挡抢视图那一步，尾部「本页队列仍在跑就恢复轮询」不受影响。
+func TestAppJSTaskCenterScanNotOverwritten(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; task center reattach test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const s = src.indexOf('function reattachQueueView');
+const e = src.indexOf('/* ── 用量');
+assert.ok(s >= 0 && e > s, 'reattachQueueView not found');
+const calls = [];
+const ctx = {
+  String, Number, Object, Array, Promise, JSON, console, setTimeout,
+  api: async () => ({ started: false }),
+  $: () => ({ hidden: false, textContent: '', style: {} }),
+  loadTaskJobs: () => calls.push('jobs'),
+  startQueuePolling: () => calls.push('polling'),
+};
+vm.createContext(ctx);
+vm.runInContext('let queueTimer = null, lastQueueSeq = 0; let taskCenterOwner = "jobs";\n' +
+  src.slice(s, e) +
+  '\nthis.setOwner = v => { taskCenterOwner = v; }; this.owner = () => taskCenterOwner;' +
+  '\nthis.reattach = reattachQueueView;', ctx);
+(async () => {
+  // ① 扫描结果占着列表：定时刷新不得抢视图、不得渲染后台任务
+  ctx.setOwner('queue');
+  ctx.reattach();
+  await new Promise(r => setTimeout(r, 30));
+  const held = { owner: ctx.owner(), calls: calls.slice() };
+  // ② 明确回到后台任务视图（点「刷新进度」那条路）时照旧渲染
+  ctx.setOwner('jobs');
+  ctx.reattach();
+  await new Promise(r => setTimeout(r, 30));
+  process.stdout.write(JSON.stringify({ held: held, afterJobs: calls.slice() }));
+})();`
+	f, err := os.CreateTemp(t.TempDir(), "task-center-reattach-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("task center reattach node test failed: %v\n%s", err, out)
+	}
+	want := `{"held":{"owner":"queue","calls":[]},"afterJobs":["jobs"]}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("scan results not protected from periodic refresh: got=%s want=%s", out, want)
+	}
+}

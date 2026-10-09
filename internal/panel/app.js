@@ -1719,9 +1719,14 @@ function startQueuePolling() {
 // reattachQueueView 切回任务中心视图时恢复队列进度：仅当本页启动的队列仍在
 // 执行才重新开轮询（残留态/别页队列不接管——视图不被旧结果冲掉）。
 function reattachQueueView() {
-  // 默认显示后台自动任务的进展；本页启动的队列仍在跑时改由队列状态接管列表。
-  taskCenterOwner = 'jobs';
-  loadTaskJobs();
+  // 扫描/队列结果占着列表时不抢视图（同 loadTaskJobs 里的归属闸门）。本函数也被
+  // 5s 定时刷新调用，无条件改 owner + 渲染后台任务，会把用户刚查出来的扫描结果
+  // 冲成空白（表现为「查完就自己消失」）。切回「后台任务」仍是显式动作：刷新进度
+  // 按钮、或本页队列确实在跑时由下面的尾部接管。
+  if (taskCenterOwner !== 'queue') {
+    taskCenterOwner = 'jobs';
+    loadTaskJobs();
+  }
   // 全程异步：go() 在顶层（app.js ~143 行）被调用时，本文件下方 let/const
   //（queueTimer/lastQueueSeq 等）尚未初始化——同步读取即 TDZ ReferenceError
   // 使整个脚本中断。await 之后才碰它们（旧 pollQueueOnce 正是靠开头的 await
