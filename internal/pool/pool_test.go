@@ -1891,7 +1891,7 @@ func TestPreferExpiringDisabledRestoresWeight(t *testing.T) {
 		t.Fatalf("enabled expiring weight=%v want %v", we, wn*expiringVirtualSlots)
 	}
 
-	p.SetPreferExpiring(false)
+	p.SetPreferExpiring(false, 0)
 
 	p.mu.Lock()
 	wa := p.routingWeightOf(p.byUID["a"], 100, now)

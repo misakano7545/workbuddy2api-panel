@@ -444,12 +444,38 @@ func expiringNow(e *entry, now time.Time) bool {
 		e.creditsEarliestExpiry.After(now)
 }
 
-// routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量。prefer_expiring=false
-// 或账号无有效快过期批次时，实例数恒为 1，结果与旧 weightOf 完全一致。
+// expiringUrgency 快过期账号的紧迫度倍率（1 = 不加权）。
+//
+// 与固定倍率（expiringVirtualSlots）的差别：刚进窗口只有 expiringUrgencyMin，
+// 越逼近到期越接近 expiringUrgencyMax —— 「今天到期」因此真正优先于「下周到期」，而
+// 不是两者等价（灵感：上游 issue #140）。
+//
+// 软偏好语义不变：始终只是权重上的一个有限倍率（≤ Max），不会把流量全压到单一账号。
+// 未注入窗口（expiringWindow <= 0，如单测/嵌入方未给第二参）时退回旧的固定倍率，
+// 结果与旧实现逐字节一致。
+func (p *Pool) expiringUrgency(e *entry, now time.Time) float64 {
+	if e == nil || !expiringNow(e, now) {
+		return 1
+	}
+	if p.expiringWindow <= 0 {
+		return expiringVirtualSlots // ponytail: 无窗口信息 → 保持旧口径
+	}
+	remain := e.creditsEarliestExpiry.Sub(now)
+	if remain >= p.expiringWindow {
+		return expiringUrgencyMin
+	}
+	frac := float64(remain) / float64(p.expiringWindow) // (0,1)
+	return expiringUrgencyMin + (expiringUrgencyMax-expiringUrgencyMin)*(1-frac)
+}
+
+// routingWeightOf 在普通账号权重上叠加紧迫度倍率。prefer_expiring=false 或账号无
+// 有效快过期批次时倍率为 1，结果与旧 weightOf 完全一致。
 func (p *Pool) routingWeightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	w := p.weightOf(e, maxCredits, now)
-	if p.preferExpiring && expiringNow(e, now) {
-		return w * expiringVirtualSlots
+	if p.preferExpiring {
+		if u := p.expiringUrgency(e, now); u != 1 {
+			return w * u
+		}
 	}
 	return w
 }

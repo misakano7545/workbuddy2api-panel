@@ -58,6 +58,9 @@ type Pool struct {
 	// 加权路由的闲置补偿调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
+	// expiringWindow 快过期窗口（pool.expiring_soon，main 注入）。0 = 未注入 → 紧迫度
+	// 退回旧的固定倍率（见 expiringUrgency）。
+	expiringWindow time.Duration
 	// preferExpiring 最早到期优先路由开关（默认 true）。开启且快过期窗口内存在有效
 	// 批次时，选号在成本层内先按最早到期排序；关闭后只使用普通加权路由。
 	preferExpiring bool
@@ -213,11 +216,13 @@ func (p *Pool) SetReserveCredits(v int64) {
 	p.reserveCredits = v
 }
 
-// SetPreferExpiring 注入最早到期优先路由开关（main 从 config 解析后调用）。
-func (p *Pool) SetPreferExpiring(enabled bool) {
+// SetPreferExpiring 注入最早到期优先路由开关与快过期窗口（main 从 config 解析后调用）。
+// window <= 0 = 未注入 → 紧迫度退回旧的固定倍率（不引入梯度），便于嵌入方/单测保持旧行为。
+func (p *Pool) SetPreferExpiring(enabled bool, window time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.preferExpiring = enabled
+	p.expiringWindow = window
 }
 
 // SetAccountPriority 注入账号优先级表（uid → 正整数，小 = 先消耗；issue #62）。

@@ -2,13 +2,24 @@
 package pool
 
 import (
+	"math"
 	"sort"
 	"time"
 )
 
-// expiringVirtualSlots 快过期账号在新会话候选集中的虚拟实例权重。
-// 3:1 是温和偏好，不是固定比例：账号组成变化会自然改变最终占比。
+// expiringVirtualSlots 快过期账号在新会话候选集中的虚拟实例权重（**未注入窗口时的
+// 兼容口径**，见 expiringUrgency）。3:1 是温和偏好，不是固定比例：账号组成变化会
+// 自然改变最终占比。
 const expiringVirtualSlots = 3
+
+// expiringUrgencyMin / expiringUrgencyMax 平滑紧迫度倍率的两端（灵感：上游 issue #140
+// ——固定倍率让「还剩 6 天」与「还剩 6 小时」权重完全相等，命悬一线的号拿不到优先级）。
+// 窗口边缘取 Min，越逼近到期越攀升到 Max。
+// ponytail: 先作常量；要按部署调档再升级为 pool.* 配置项。
+const (
+	expiringUrgencyMin = 1.5
+	expiringUrgencyMax = 5.0
+)
 
 // AvailableUIDsForRealm 同 AvailableUIDs，但仅返回 Realm()==realm 的账号。
 // realm=="" 退化为 AvailableUIDs（现状语义）。
@@ -64,8 +75,8 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 	for _, uid := range uids {
 		slots := 1
 		if p.preferExpiring {
-			if e := p.byUID[uid]; expiringNow(e, now) {
-				slots = expiringVirtualSlots
+			if u := p.expiringUrgency(p.byUID[uid], now); u > 1 {
+				slots = int(math.Round(u))
 			}
 		}
 		for i := 0; i < slots; i++ {

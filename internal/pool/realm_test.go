@@ -97,7 +97,7 @@ func TestWeightedAvailableUIDsForModelRealm(t *testing.T) {
 	}
 
 	// 关闭总开关后逐账号只出现一次，旧行为完全恢复。
-	p.SetPreferExpiring(false)
+	p.SetPreferExpiring(false, 0)
 	got = p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn")
 	want = []string{"cn1", "cn2"}
 	if !reflect.DeepEqual(got, want) {
