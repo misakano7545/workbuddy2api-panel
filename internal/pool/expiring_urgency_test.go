@@ -22,7 +22,7 @@ func TestExpiringUrgencyGradient(t *testing.T) {
 	p.SetPreferExpiring(true, w)
 	// near=还剩 1h（逼近到期）、mid=还剩 84h（窗口中点）、far=还剩 167h（窗口边缘）、
 	// none=有余额但无有效快过期批次。
-	p.SetCreditsDetailed("near", 100, 100, 100, now.Add(time.Hour), 100)
+	p.SetCreditsDetailed("near", 100, 100, 100, now.Add(time.Minute), 100)
 	p.SetCreditsDetailed("mid", 100, 100, 100, now.Add(84*time.Hour), 100)
 	p.SetCreditsDetailed("far", 100, 100, 100, now.Add(167*time.Hour), 100)
 	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
@@ -56,8 +56,39 @@ func TestExpiringUrgencyGradient(t *testing.T) {
 	if near < expiringUrgencyMax-band {
 		t.Fatalf("逼近到期应≈%v，得到 %v", expiringUrgencyMax, near)
 	}
-	if want := (expiringUrgencyMin + expiringUrgencyMax) / 2; mid < want-band || mid > want+band {
-		t.Fatalf("窗口中点应≈%v，得到 %v", want, mid)
+	// sqrt 形状：窗口中点的紧迫度**低于**算术中点——「尾部才陡」正是它能压过 credits 基数的
+	// 原因（改回线性 T/W 会让 near/mid/far 挤成一团，本条即红）。
+	if arith := (expiringUrgencyMin + expiringUrgencyMax) / 2; mid >= arith {
+		t.Fatalf("窗口中点应明显低于算术中点 %v（尾部陡升形状），得到 %v", arith, mid)
+	}
+}
+
+// issue #140 第 2 点的验收：**快到期的低余额号压过下周到期的高余额号**。
+// 两号闲置状态相同（都「刚用过」，无闲置补偿）以隔离出 credits 基数 vs 紧迫度这一对变量：
+// 高余额号余量 500（池内最大 → credits 项拿满 10）、剩 6 天；低余额号余量 50、剩 1 天。
+func TestExpiringUrgencyFlipsHighCreditAccount(t *testing.T) {
+	const w = 168 * time.Hour
+	now := time.Now()
+	p := New("")
+	p.Add(&auth.Auth{UID: "hi"})
+	p.Add(&auth.Auth{UID: "lo"})
+	p.SetPreferExpiring(true, w)
+	p.SetCreditsDetailed("hi", 500, 500, 500, now.Add(6*24*time.Hour), 500)
+	p.SetCreditsDetailed("lo", 50, 50, 50, now.Add(24*time.Hour), 50)
+
+	p.mu.Lock()
+	p.byUID["hi"].lastUsed = now // 两号都刚用过 → 闲置项同为 0，只剩 credits 项之差
+	p.byUID["lo"].lastUsed = now
+	hi := p.routingWeightOf(p.byUID["hi"], 500, now)
+	lo := p.routingWeightOf(p.byUID["lo"], 500, now)
+	p.mu.Unlock()
+
+	if lo <= hi {
+		t.Fatalf("快到期的低余额号应压过高余额号: lo=%v hi=%v", lo, hi)
+	}
+	// 不是「勉强高一点」：差距要够大才算「压过」（余额差 10 倍、到期差 6 天，实测 ≈1.8×）。
+	if lo <= hi*1.5 {
+		t.Fatalf("压过幅度过小（应 ≥1.5×）: lo=%v hi=%v", lo, hi)
 	}
 }
 

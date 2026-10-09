@@ -3,6 +3,7 @@ package pool
 
 import (
 	"log"
+	"math"
 	"math/rand/v2"
 	"sort"
 	"strconv"
@@ -411,10 +412,16 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 
 // weightOf 计算单个账号的普通加权分值。
 func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
+	return p.weightOfScaled(e, maxCredits, now, 1)
+}
+
+// weightOfScaled 同 weightOf，但 credits 项乘 creditScale（1 = 原口径）。
+// 窗口内账号传 expiringCreditScale，把余额从主轴降为次轴（见该常量）。
+func (p *Pool) weightOfScaled(e *entry, maxCredits int64, now time.Time, creditScale float64) float64 {
 	w := 1.0
 	// 1. credits 比例 ×10（会计入 mid-credit 锚点，避免全员 0 时 credits 项为 0）。
 	if maxCredits > 0 {
-		w += float64(e.credits) / float64(maxCredits) * 10
+		w += float64(e.credits) / float64(maxCredits) * 10 * creditScale
 	}
 	// 2. 闲置补偿。
 	if e.lastUsed.IsZero() {
@@ -448,7 +455,12 @@ func expiringNow(e *entry, now time.Time) bool {
 //
 // 与固定倍率（expiringVirtualSlots）的差别：刚进窗口只有 expiringUrgencyMin，
 // 越逼近到期越接近 expiringUrgencyMax —— 「今天到期」因此真正优先于「下周到期」，而
-// 不是两者等价（灵感：上游 issue #140）。
+// 不是两者等价（灵感：上游 issue #140 第 1、2 点）。
+//
+// 形状用 sqrt(T/W) 而非 T/W（线性）：窗口默认 168h，线性下「还剩 6 天」已走到 86% 的
+// 紧迫度，「还剩 1 天」是 99% —— 两者只差 1.16 倍，永远翻不过 credits 基数（实测：线性
+// 下把 Max 调到 100 也压不过）。sqrt 让最后几小时才陡升：6 天 → 7% 行程、1 天 → 92%，差距
+// 拉到 ~12 倍，才够压过「余量 10 倍差」。
 //
 // 软偏好语义不变：始终只是权重上的一个有限倍率（≤ Max），不会把流量全压到单一账号。
 // 未注入窗口（expiringWindow <= 0，如单测/嵌入方未给第二参）时退回旧的固定倍率，
@@ -464,20 +476,26 @@ func (p *Pool) expiringUrgency(e *entry, now time.Time) float64 {
 	if remain >= p.expiringWindow {
 		return expiringUrgencyMin
 	}
-	frac := float64(remain) / float64(p.expiringWindow) // (0,1)
+	frac := math.Sqrt(float64(remain) / float64(p.expiringWindow)) // T/W ∈ (0,1)
 	return expiringUrgencyMin + (expiringUrgencyMax-expiringUrgencyMin)*(1-frac)
 }
 
 // routingWeightOf 在普通账号权重上叠加紧迫度倍率。prefer_expiring=false 或账号无
-// 有效快过期批次时倍率为 1，结果与旧 weightOf 完全一致。
+// 有效快过期批次时，结果与旧 weightOf 完全一致（不降权、不叠倍率）。
 func (p *Pool) routingWeightOf(e *entry, maxCredits int64, now time.Time) float64 {
-	w := p.weightOf(e, maxCredits, now)
-	if p.preferExpiring {
-		if u := p.expiringUrgency(e, now); u != 1 {
-			return w * u
-		}
+	if !p.preferExpiring {
+		return p.weightOf(e, maxCredits, now)
 	}
-	return w
+	u := p.expiringUrgency(e, now)
+	if u == 1 {
+		return p.weightOf(e, maxCredits, now)
+	}
+	// 未注入窗口（u 走固定倍率回退）= 兼容口径：只叠倍率、不降权，与旧实现逐字节一致。
+	scale := 1.0
+	if p.expiringWindow > 0 {
+		scale = expiringCreditScale // 梯度生效：紧迫度为主轴、余额为次轴
+	}
+	return p.weightOfScaled(e, maxCredits, now, scale) * u
 }
 
 // weightScale 权重定点放大：int64 累加后抽签，保持随机源注入（randInt64N）语义不变。
