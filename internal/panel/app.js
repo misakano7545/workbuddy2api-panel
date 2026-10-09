@@ -2767,7 +2767,17 @@ if ($('pkDetail')) $('pkDetail').addEventListener('click', ev => {
   }
 });
 
-async function loadPackages() {
+// 按需拉取（移植上游 8391a05）：packages 是**逐账号实时查上游**，切进本视图就打一次，
+// 账号一多既慢又压上游。有缓存先直接渲染（标注数据年龄），只有首次进入或显式刷新生效。
+let lastPackages = null, lastPackagesAt = 0, lastPkLimit = 0;
+
+async function loadPackages(force) {
+  if (!force && lastPackages) {
+    renderPackages(lastPackages, lastPkLimit);
+    const ageMin = Math.floor((Date.now() - lastPackagesAt) / 60000);
+    if (ageMin > 0) $('pkNote').textContent = lastPackages.accounts.length + ' 个账号 · ' + ageMin + ' 分钟前的数据，点「刷新」更新';
+    return;
+  }
   $('pkSummary').innerHTML = '<div class="empty">查询中…（逐账号向上游实时查询）</div>';
   $('pkDetail').innerHTML = '';
   $('pkExpiry').innerHTML = '<div class="pk-expiry-empty">查询中…</div>';
@@ -2776,11 +2786,15 @@ async function loadPackages() {
       api('packages'),
       api('config').catch(() => null),
     ]);
-    renderPackages(d, pkDetailLimit(c && c.config));
+    lastPackages = d;
+    lastPackagesAt = Date.now();
+    lastPkLimit = pkDetailLimit(c && c.config);
+    renderPackages(d, lastPkLimit);
   } catch (e) {
     $('pkSummary').innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
     $('pkExpiry').innerHTML = '<div class="pk-expiry-empty">读取失败：' + esc(e.message) + '</div>';
   }
 }
 
-if ($('btnPk')) $('btnPk').onclick = loadPackages;
+// 「刷新」始终实时查：必须显式 force —— 直接 `onclick = loadPackages` 会把事件对象当真值传进去，恒等于强刷。
+if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);

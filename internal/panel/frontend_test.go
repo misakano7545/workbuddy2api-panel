@@ -1306,3 +1306,82 @@ vm.runInContext('let queueTimer = null, lastQueueSeq = 0; let taskCenterOwner = 
 		t.Fatalf("scan results not protected from periodic refresh: got=%s want=%s", out, want)
 	}
 }
+
+// 积分构成「按需拉取」（移植上游 8391a05）：packages 是逐账号实时查上游，切进视图就打一次
+// 会在账号多时既慢又压上游。断言四件事：冷缓存才打上游、热缓存直接渲染并标注数据年龄、
+// 「刷新」按钮始终实时查（且不依赖事件对象真值）、失败不污染缓存（下次仍会重试）。
+func TestAppJSPackagesCacheFirst(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; packages cache test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('let lastPackages');
+if (start < 0) throw new Error('packages cache not found in app.js');
+let fakeNow = 1700000000000;
+class FakeDate extends Date { static now() { return fakeNow; } }
+const els = {}, calls = [], rendered = [];
+const el = (id) => (els[id] = els[id] || { textContent: '', innerHTML: '' });
+let failNext = false;
+const ctx = {
+  Date: FakeDate, Math, JSON, Promise, Number, String,
+  $: el,
+  api: async (p) => {
+    calls.push(p);
+    if (p === 'packages' && failNext) { failNext = false; throw new Error('boom'); }
+    return p === 'packages' ? { accounts: [{ uid: 'u1' }], stamp: calls.length } : { config: {} };
+  },
+  renderPackages: (d, limit) => rendered.push([d.stamp, limit]),
+  pkDetailLimit: () => 7,
+  esc: (s) => String(s),
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start) + '\nthis.loadPackages = loadPackages;', ctx);
+(async () => {
+  await ctx.loadPackages();                       // 冷：首次进入 → 打上游
+  const cold = { calls: calls.length, rendered: rendered.slice() };
+  fakeNow += 3 * 60000;                           // 过 3 分钟
+  el('pkNote').textContent = 'sentinel';
+  await ctx.loadPackages();                       // 热：切回视图 → 不打上游，渲染缓存
+  const warm = { calls: calls.length, rendered: rendered.slice(), note: el('pkNote').textContent };
+  await ctx.loadPackages(true);                   // 显式强刷
+  const forced = { calls: calls.length, rendered: rendered.slice() };
+  el('pkNote').textContent = 'sentinel';
+  await el('btnPk').onclick();                      // 按钮：无事件参数也必须强刷
+  const viaBtn = { calls: calls.length, rendered: rendered.slice(), note: el('pkNote').textContent };
+  failNext = true;                                // 上游失败：不得写进缓存
+  await ctx.loadPackages(true);
+  const failed = { calls: calls.length, rendered: rendered.length };
+  await ctx.loadPackages();                       // 失败后仍吃旧缓存（即失败响应没被存进去）
+  const retry = { calls: calls.length, last: rendered[rendered.length - 1] };
+  process.stdout.write(JSON.stringify({
+    cold: cold, warm: warm, forced: forced, viaBtn: viaBtn, failed: failed, retry: retry,
+  }));
+})();`
+	f, err := os.CreateTemp(t.TempDir(), "packages-cache-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("packages cache node test failed: %v\n%s", err, out)
+	}
+	// calls 每轮 +2（packages + config）；渲染里的 stamp = 取自第几次调用，用来判「渲染的是哪一份数据」。
+	// 末段：强刷失败后**再进入视图仍吃上一次成功的缓存**（stamp 仍是 5，不是失败那轮的 7）——
+	// 失败响应若被写进缓存，这里就会渲染 7。
+	want := `{"cold":{"calls":2,"rendered":[[1,7]]},` +
+		`"warm":{"calls":2,"rendered":[[1,7],[1,7]],"note":` + strconv.Quote("1 个账号 · 3 分钟前的数据，点「刷新」更新") + `},` +
+		`"forced":{"calls":4,"rendered":[[1,7],[1,7],[3,7]]},` +
+		`"viaBtn":{"calls":6,"rendered":[[1,7],[1,7],[3,7],[5,7]],"note":"sentinel"},` +
+		`"failed":{"calls":8,"rendered":4},` +
+		`"retry":{"calls":8,"last":[5,7]}}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("packages 按需拉取行为不符:\n got=%s\nwant=%s", out, want)
+	}
+}
