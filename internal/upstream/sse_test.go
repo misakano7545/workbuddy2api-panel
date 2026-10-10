@@ -174,12 +174,12 @@ func TestStripToolCallNames(t *testing.T) {
 	getFn := func(f map[string]any) map[string]any {
 		return f["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
 	}
-	seen := map[int]bool{}
+	seen := map[string]bool{}
 
 	// 首片带 name：保留，seen 建立
 	f0 := mkFrame(0, "lookup", "")
 	stripToolCallNames(f0, seen)
-	if !seen[0] {
+	if !seen["i:0"] {
 		t.Fatal("index 0 should be marked seen after first chunk")
 	}
 	if getFn(f0)["name"] != "lookup" {
@@ -212,7 +212,7 @@ func TestStripToolCallNames(t *testing.T) {
 	if getFn(f3)["name"] != "other" {
 		t.Errorf("index 1 first name=%v want other", getFn(f3)["name"])
 	}
-	if !seen[1] {
+	if !seen["i:1"] {
 		t.Error("index 1 should be marked seen")
 	}
 

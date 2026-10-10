@@ -97,8 +97,10 @@ func (p *Pool) startFlusher() {
 			select {
 			case <-t.C:
 				p.mu.Lock()
-				if p.dirty.Swap(false) {
-					p.saveLocked()
+				// 落盘失败 → 把 dirty 置回：变更仍待写，下一 tick 重试（失败日志由
+				// notePersistFail 节流）。此前 dirty 在写盘前就被清掉，一败即永久搁置。
+				if p.dirty.Swap(false) && !p.saveLocked() {
+					p.dirty.Store(true)
 				}
 				p.mu.Unlock()
 			case <-stopCh:
@@ -111,8 +113,8 @@ func (p *Pool) startFlusher() {
 // Flush 同步把内存状态落盘（幂等：无变更不写盘）。供进程退出前调用。
 func (p *Pool) Flush() {
 	p.mu.Lock()
-	if p.dirty.Swap(false) {
-		p.saveLocked()
+	if p.dirty.Swap(false) && !p.saveLocked() {
+		p.dirty.Store(true) // 同上：失败置回，留给下一次 Flush/后台 tick 重试
 	}
 	p.mu.Unlock()
 }
@@ -124,7 +126,12 @@ func (p *Pool) load() {
 		return
 	}
 	var sf stateFile
-	if json.Unmarshal(raw, &sf) != nil {
+	if err := json.Unmarshal(raw, &sf); err != nil {
+		// 损坏/截断的 state.json（写盘中途崩溃、磁盘满、手工改坏）此前被静默丢弃：
+		// 池子以 0 账号启动、credits/冷却/熔断计数全丢，而日志里一个字都没有——运维
+		// 只能看到"账号全没了"。原文件保留（供人工恢复），但必须留一条痕迹；
+		// 与 credithist 对同类解析失败的处理对齐。
+		log.Printf("pool: state.json 解析失败（%v），跳过本地状态恢复，原文件保留待人工处理: %s", err, p.stateFp)
 		return
 	}
 	p.applyAccountsLocked(sf.Accounts)
@@ -245,15 +252,19 @@ func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.byUID = map[string]*entry{}
 	p.applyAccountsLocked(s.Accounts)
 }
-func (p *Pool) saveLocked() {
+
+// saveLocked 落盘当前状态（调用方须持 p.mu）。返回是否成功：调用方在"先清 dirty
+// 再写盘"的路径上必须依据返回值把 dirty 置回，否则写盘失败后 dirty 已被清掉、磁盘
+// 恢复也不会补写，这段内存变更要等到下一次状态变更才碰巧落盘（进程在此期间退出就丢）。
+func (p *Pool) saveLocked() bool {
 	if p.stateFp == "" {
-		return
+		return true
 	}
 	sf := p.stateOverviewLocked()
 	raw, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
 		p.notePersistFail(err)
-		return
+		return false
 	}
 	if dir := filepath.Dir(p.stateFp); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
@@ -261,11 +272,11 @@ func (p *Pool) saveLocked() {
 	tmp := p.stateFp + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		p.notePersistFail(err)
-		return
+		return false
 	}
 	if err := os.Rename(tmp, p.stateFp); err != nil {
 		p.notePersistFail(err)
-		return
+		return false
 	}
 	if p.persistFails > 0 {
 		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。
@@ -279,6 +290,7 @@ func (p *Pool) saveLocked() {
 			p.store.SaveState(snapRaw)
 		}
 	}
+	return true
 }
 
 // notePersistFail 记录一次本地 state.json 落盘失败，并按节流规则决定是否打日志：

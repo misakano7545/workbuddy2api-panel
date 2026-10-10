@@ -33,7 +33,8 @@ const hourlyKeep = 90 * 24 * time.Hour
 const flushInterval = 30 * time.Second
 
 // maxBuckets 桶数硬上限。超过时立即触发一次折叠，避免异常流量把内存/文件撑爆。
-const maxBuckets = 400_000
+// var 而非 const：测试要把它调小才能覆盖该守卫。
+var maxBuckets = 400_000
 
 // hourLayout / dayLayout 分片键的时间格式（本地时区，与用户直觉一致）。
 const (
@@ -233,7 +234,8 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	r.dirty = true
 }
 
-// Rollup 把超出 hourlyKeep 的小时桶折叠为日桶（按本地日历日）。
+// Rollup 把超出 hourlyKeep 的小时桶折叠为日桶（按本地日历日）；桶数超 maxBuckets
+// 时额外从最旧的小时桶开始折（否则那个硬上限是空转，见下）。
 // 幂等：同一小时反复折叠不会重复计数（先累加再删源桶）。
 func (r *Recorder) Rollup(now time.Time) {
 	if r == nil {
@@ -244,22 +246,37 @@ func (r *Recorder) Rollup(now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	type move struct{ from, to string }
-	var moves []move
+	type move struct {
+		from, to string
+		ts       time.Time
+	}
+	// 候选 = 全部小时桶（该不该折在下面的应用循环里判：年龄达标 或 桶数超硬上限）。
+	// 上限是硬性的：Start 的守卫超限时调的就是本函数，只折 90 天前的桶在异常流量下
+	// 永远折不下来（新桶都在保留窗口内）——那守卫等于空转。
+	// 天花板：若每个 (账号,模型,倍率) 每小时都唯一，折叠无损但降不下来，这种情况
+	// 只能靠保留策略兜（无损折叠换不来更小的上界）。
+	var cand []move
 	for k, b := range r.buckets {
 		if !strings.HasPrefix(b.Scope, "h:") {
 			continue
 		}
 		ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local)
-		if err != nil || !ts.Before(cutoff) {
+		if err != nil {
 			continue
 		}
 		day := "d:" + ts.Format(dayLayout)
-		moves = append(moves, move{from: k, to: day + "|" + b.Realm + "|" + b.UID + "|" + b.Model + "|" + b.Rate})
+		cand = append(cand, move{k, day + "|" + b.Realm + "|" + b.UID + "|" + b.Model + "|" + b.Rate, ts})
 	}
-	for _, m := range moves {
+	sort.Slice(cand, func(i, j int) bool { return cand[i].ts.Before(cand[j].ts) })
+	folded := 0
+	for _, m := range cand {
 		src := r.buckets[m.from]
 		if src == nil {
+			continue
+		}
+		// 没到龄且桶数没超限 → 保留细粒度；超限时逐个折最旧的，直到回到上限内
+		// （折一个不一定减少总量：目标日桶可能是新建的，所以按当前桶数判而非折叠次数）。
+		if !m.ts.Before(cutoff) && len(r.buckets) <= maxBuckets {
 			continue
 		}
 		dst := r.buckets[m.to]
@@ -285,10 +302,11 @@ func (r *Recorder) Rollup(now time.Time) {
 			dst.CRT += src.CRT
 		}
 		delete(r.buckets, m.from)
+		folded++
 	}
-	if len(moves) > 0 {
+	if folded > 0 {
 		r.dirty = true
-		log.Printf("[usage] 折叠 %d 个小时桶为日桶（保留 %v 细粒度）", len(moves), hourlyKeep)
+		log.Printf("[usage] 折叠 %d 个小时桶为日桶（保留 %v 细粒度，现 %d 桶）", folded, hourlyKeep, len(r.buckets))
 	}
 }
 

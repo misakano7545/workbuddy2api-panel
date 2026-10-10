@@ -961,7 +961,10 @@ func (w *messagesWriter) onTools(tcs []any) error {
 			}
 			args = asString(fn["arguments"])
 		}
-		if !acc.opened && (acc.id != "" || acc.name != "" || args != "") {
+		// 无名调用不是合法 tool_use：块一旦开出，content_block_start 里的 name:"" 就
+		// 定死了，客户端拿到也派发不了。等 name 到达再开块（responses 侧对无名调用
+		// 同样直接丢弃）。注释见其 closeOpenItems 的同名守卫。
+		if !acc.opened && acc.name != "" && (acc.id != "" || args != "") {
 			if err := w.openTool(acc); err != nil {
 				return err
 			}
@@ -1029,6 +1032,11 @@ func (w *messagesWriter) closeAndStop() error {
 	}
 	for _, idx := range w.x.toolOrder {
 		acc := w.x.tools[idx]
+		if acc.name == "" {
+			// 名字始终没到：不是合法 tool_use，连块都不开（与 responses 侧
+			// closeOpenItems 的同名守卫一致）。
+			continue
+		}
 		if !acc.opened {
 			if err := w.openTool(acc); err != nil {
 				return err

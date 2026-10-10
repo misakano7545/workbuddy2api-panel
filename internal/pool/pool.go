@@ -414,8 +414,8 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 			changed = true
 		}
 	}
-	if changed {
-		p.saveLocked()
+	if changed && !p.saveLocked() {
+		p.dirty.Store(true) // 剔除结果没落盘：交给 flusher 重试，否则已删账号下次启动复活
 	}
 }
 

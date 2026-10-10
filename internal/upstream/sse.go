@@ -375,8 +375,10 @@ func mergeToolCallDelta(merged, delta map[string]any) {
 //     而对空串，`??` 会误判为重设并清空工具名。
 //
 // seen 记录每个 index 是否已发过首片（与 name 是否非空无关）；删除是幂等的。
+// 键为 index 的文本形式；无 index 字段的上游改用调用 id（见下），无 id 则作为
+// 单一匿名调用处理。
 // 只动 function.name 键，id/type/arguments 原样透传。
-func stripToolCallNames(obj map[string]any, seen map[int]bool) {
+func stripToolCallNames(obj map[string]any, seen map[string]bool) {
 	choices, _ := obj["choices"].([]any)
 	for _, ci := range choices {
 		c, _ := ci.(map[string]any)
@@ -393,11 +395,16 @@ func stripToolCallNames(obj map[string]any, seen map[int]bool) {
 			if tc == nil {
 				continue
 			}
-			idx := 0
+			// 键：上游给了 index 就用它；没给 index 的中转（与 mergeToolCallsChunk 同族）
+			// 改用调用 id——否则同帧里多个无 index 的调用会全挤进同一个键，第二个调用的
+			// name 被当"重复分片"删掉，客户端拿到没名字的调用、派发不了。
+			key := "i:0"
 			if v, ok := tc["index"].(float64); ok {
-				idx = int(v)
+				key = fmt.Sprintf("i:%d", int(v))
+			} else if id, ok := tc["id"].(string); ok && id != "" {
+				key = "id:" + id
 			}
-			if seen[idx] {
+			if seen[key] {
 				// 已发过首片：删除本分片的 name 键（存在即删，幂等）。
 				if fn, _ := tc["function"].(map[string]any); fn != nil {
 					delete(fn, "name")
@@ -406,7 +413,7 @@ func stripToolCallNames(obj map[string]any, seen map[int]bool) {
 			}
 			// 首现：保留 name 键原样（上游首片通常带非空 name；空 name 也照发，
 			// 与 OpenAI 对「首帧无 name」的容忍一致），随后分片统一删除。
-			seen[idx] = true
+			seen[key] = true
 		}
 	}
 }
@@ -587,7 +594,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 
 	// toolCallSeen 跨帧记录 delta.tool_calls 里已发过首片的 index，
 	// 供逐 chunk 透传时收敛 name 为「每 index 一次」（对齐 OpenAI 官方流）。
-	toolCallSeen := map[int]bool{}
+	toolCallSeen := map[string]bool{}
 
 	// firstID 透传流的消息级 id 基准：缓存首个非空上游 id，后续帧缺失/空串时复用
 	// （issue #35：同一条 SSE 消息所有帧共用一个真实 id，后台按 id 归并；此前中间帧
@@ -599,11 +606,13 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	//   - repair：修复器本身；
 	//   - synthIdx：本流已还原的调用数（合成 index 接在上游最大 index 之后）；
 	//   - maxToolIdx：上游已用过的最大 tool_call index，避免合成 index 撞车；
-	//   - toolFinishSent：是否已发出过 finish_reason: tool_calls（供流尾兜底）。
+	//   - toolFinishSent：是否已发出过 finish_reason: tool_calls（供流尾兜底）；
+	//   - finishSeen：本流是否已向客户端写出过任一终态帧（finish_reason 非空）。
 	repair := o.markup
 	synthIdx := 0
 	maxToolIdx := -1
 	toolFinishSent := false
+	finishSeen := false
 
 	// writeSSE 原样写出一帧并 flush。
 	writeSSE := func(payload string) error {
@@ -637,6 +646,11 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 				c, _ := ci.(map[string]any)
 				if c == nil {
 					continue
+				}
+				// 终态记账：任何带非空 finish_reason 的帧都算「客户端已收到终态」
+				// （含 continue 层合成的 length 截断终态——它同样经此处透传）。
+				if fr, _ := c["finish_reason"].(string); fr != "" {
+					finishSeen = true
 				}
 				d, _ := c["delta"].(map[string]any)
 				if d == nil {
@@ -829,7 +843,10 @@ readLoop:
 			}
 			validFrames++
 		}
-		if synthIdx > 0 && !toolFinishSent {
+		// 只在「本流一个终态都没发过」时兜底：补了就是一条流两个 finish_reason，
+		// 而后一个会把前一个洗掉——最典型是 continue 层刚补的 length 截断终态被
+		// 后补的 tool_calls 覆盖，客户端把中断的回合读成正常收尾。
+		if synthIdx > 0 && !toolFinishSent && !finishSeen {
 			if werr := writeChunk(finishOnlyFrame(map[string]any{}, "tool_calls"), ""); werr != nil {
 				return werr
 			}
