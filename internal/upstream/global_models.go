@@ -644,7 +644,13 @@ func parseGlobalModelLoose(obj map[string]any) (ModelInfo, bool) {
 		MaxAllowedSize: num("maxAllowedSize"),
 	}
 	mi.SupportsReasoning, _ = obj["supportsReasoning"].(bool)
-	mi.SupportsImages, _ = obj["supportsImages"].(bool)
+	// ok 必须保留：上游「没声明 supportsImages」与「显式声明 false」是两件事。此前
+	// 丢掉 ok 把两者都折成 false，于是 11133 的 gateway_hint 会对目录里根本没声明
+	// 图片能力的模型断言「不支持图片」（本仓实测 /v1/models 52 个模型 0 个 false，
+	// 即 false 基本只来自「缺声明」）——那是编造能力事实，客户端会照 hint 白换模型。
+	if v, ok := obj["supportsImages"].(bool); ok {
+		mi.SupportsImages, mi.SupportsImagesSet = v, true
+	}
 	if r, ok := obj["reasoning"].(map[string]any); ok {
 		reasonStr := func(key string) string {
 			s, _ := r[key].(string)

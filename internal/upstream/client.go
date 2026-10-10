@@ -1165,7 +1165,11 @@ type ModelInfo struct {
 	SupportsToolCall  bool     // supportsToolCall 是否支持工具调用
 	OnlyReasoning     bool     // onlyReasoning 是否纯推理模型
 	SupportsImages    bool     // 顶层 supportsImages（多模态能力，透出到 /v1/models）
-	MaxAllowedSize    int64    // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
+	// SupportsImagesSet 上游是否**显式**给过 supportsImages。缺失与显式 false 必须分开：
+	// 缺失 = 上游没声明这项能力（多为非对话/旁路模型），据此断言「不支持图片」是编造
+	// 能力事实，gateway_hint 只能退中性文案（见 hint.go）。
+	SupportsImagesSet bool
+	MaxAllowedSize    int64 // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
 	// GenerationKind 媒体生成类型（"image"/"video"），仅由旁路留存设置（见 images.go）：
 	// 这批模型被 nonChatModel 剔出对话列表，靠它单列到 /v1/models 与面板。
 	GenerationKind     string
@@ -1203,7 +1207,7 @@ type dynModelEntry struct {
 	MaxOutputTokens int64    `json:"maxOutputTokens"`
 	MaxAllowedSize  int64    `json:"maxAllowedSize"`
 	Disabled        bool     `json:"disabled"`
-	SupportsImages  bool     `json:"supportsImages"`
+	SupportsImages  *bool    `json:"supportsImages"`
 	SupportsReason  bool     `json:"supportsReasoning"`
 	SupportsTool    bool     `json:"supportsToolCall"`
 	OnlyReasoning   bool     `json:"onlyReasoning"`
@@ -1230,7 +1234,8 @@ func (m dynModelEntry) modelInfo() ModelInfo {
 		MaxTokens:          m.MaxOutputTokens,
 		Efforts:            m.Reasoning.SupportedEfforts,
 		DefaultEffort:      def,
-		SupportsImages:     m.SupportsImages,
+		SupportsImages:     m.SupportsImages != nil && *m.SupportsImages,
+		SupportsImagesSet:  m.SupportsImages != nil,
 		Description:        m.Description,
 		Credits:            m.Credits,
 		Tags:               m.Tags,

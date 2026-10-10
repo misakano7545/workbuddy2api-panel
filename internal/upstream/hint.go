@@ -30,10 +30,11 @@ import (
 // 说明非权威分类，误判代价只是多一条中性补充说明）；其余走 Kind 一对一映射。
 func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	// 11133 model_param_invalid 家族（图片回归实测：不支持图片的模型传图，或任意
-	// 参数被模型供应商拒绝）。只有请求确实带图、且目录能对该模型做出「不支持图片」
-	// 的判定时才给「换模型」指向，否则退中性参数形态（可能是任意参数问题，不点名图片）。
+	// 参数被模型供应商拒绝）。只有请求确实带图、且目录**显式声明**该模型不支持图片
+	// 时才给「换模型」指向——目录只收录而不声明该能力（缺键）时无从判断，退中性
+	// 参数形态（断言「不支持」等于编造能力事实，客户端会照 hint 白换模型）。
 	if isModelParamInvalid(msg) {
-		if ctx.HasImage && ctx.ModelInCatalog && !ctx.ModelSupportsImages {
+		if ctx.HasImage && ctx.ModelInCatalog && ctx.ModelSupportsImagesKnown && !ctx.ModelSupportsImages {
 			return "model " + ctx.Model + " does not support images; pick one with supports_images=true from /v1/models"
 		}
 		return "request parameters were rejected by the model provider; check message format and model capabilities"
@@ -77,7 +78,10 @@ type HintContext struct {
 	Model               string // 请求裸模型名（可空）
 	HasImage            bool   // 请求体是否携带 image_url part
 	ModelSupportsImages bool   // 模型目录 supports_images 声明（仅 ModelInCatalog 时有意义）
-	ModelInCatalog      bool   // 模型目录是否收录该模型（「不支持」判定的前提）
+	// ModelSupportsImagesKnown 目录是否**显式**声明过该能力。缺失时不得断言「不支持
+	// 图片」（那是编造能力事实），只能退中性参数文案。
+	ModelSupportsImagesKnown bool
+	ModelInCatalog           bool // 模型目录是否收录该模型（「不支持」判定的前提）
 }
 
 // noHealthyHint 本地调度类错误（池中无健康号可用/传输层抖动，无上游原文可透传）

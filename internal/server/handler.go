@@ -1618,6 +1618,7 @@ func (h *Handler) hintContext(bareModel string, hasImage bool) upstream.HintCont
 		if mi.ID == bareModel {
 			ctx.ModelInCatalog = true
 			ctx.ModelSupportsImages = mi.SupportsImages
+			ctx.ModelSupportsImagesKnown = mi.SupportsImagesSet
 			return ctx
 		}
 	}

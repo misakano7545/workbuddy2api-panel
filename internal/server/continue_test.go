@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -147,6 +148,188 @@ func TestContinueReaderExplicitLimitNoContinue(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"finish_reason":"length"`) {
 		t.Fatalf("length 终态应原样回放:\n%s", out)
+	}
+}
+
+// TestContinueReaderCutNoFinishEmitsTruncationTerminal 主段断流（有正文、无 finish、
+// 无 [DONE]）→ 补一条截断终态帧：本层契约是「上层看到的永远是一条完整且恰好一个
+// 终态的流」。此前只记 WARN 不落帧，客户端收到裸 [DONE]，把半截内容当完整答案。
+func TestContinueReaderCutNoFinishEmitsTruncationTerminal(t *testing.T) {
+	cut := `data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n" +
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"半截正文"}}]}` + "\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
+	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(cut)))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	s := string(out)
+	if n := strings.Count(s, `"finish_reason":"length"`); n != 1 {
+		t.Fatalf("截断终态帧应恰好一个，got=%d:\n%s", n, s)
+	}
+	if idx := strings.Index(s, `"finish_reason":"length"`); idx < strings.Index(s, "半截正文") {
+		t.Fatalf("终态帧必须在正文之后:\n%s", s)
+	}
+	if len(*reqs) != 0 {
+		t.Fatalf("主段断流不发续写请求（续写资格只给 seg>0），got=%d", len(*reqs))
+	}
+}
+
+// TestContinueReaderCutNoContentNoTerminal 断流但零模型输出（只有 role 帧）→ 不补
+// 终态：补了会让 StreamHint 的 validEvents 从 0 变 1，把空流本该收敛的 502 观测
+// 伪装成「有内容的 200」。空流判据必须留在上游侧。
+func TestContinueReaderCutNoContentNoTerminal(t *testing.T) {
+	onlyRole := `data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n"
+	up, _ := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
+	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(onlyRole)))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(out), "finish_reason") {
+		t.Fatalf("零输出断流不得补终态（会让空流 502 观测失真）:\n%s", out)
+	}
+}
+
+// TestContinueReaderNormalEndNoDuplicateTerminal 正常收尾（finish=stop + [DONE]）：
+// 不得多补一条终态（客户端会看到两个 finish_reason）。
+func TestContinueReaderNormalEndNoDuplicateTerminal(t *testing.T) {
+	up, _ := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
+	r := newTestContinueReader(t, up, `{"model":"m","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(testSeg2Text)))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if n := strings.Count(string(out), "finish_reason"); n != 1 {
+		t.Fatalf("终态帧应恰好一个，got=%d:\n%s", n, out)
+	}
+}
+
+// TestStreamCutTruncatedAcrossAllProtocols 同一份断流，三条适配器都必须如实标截断：
+// 补在 continue 这一处接缝（唯一共用层），三条路径各自把 length 映射到自己的词表。
+// 这是用户报的 bug 的端到端回归：此前 chat 裸 [DONE]、responses 标 completed、
+// messages 标 end_turn——agent 客户端（Codex/CC）把半截回合当正常结束。
+func TestStreamCutTruncatedAcrossAllProtocols(t *testing.T) {
+	cut := `data: {"id":"c1","object":"chat.completion.chunk","model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n" +
+		`data: {"id":"c1","object":"chat.completion.chunk","model":"glm-5.2","choices":[{"index":0,"delta":{"content":"半截"}}]}` + "\n\n"
+	cases := []struct {
+		name, path, body string
+		want             []string
+		reject           []string
+	}{
+		{
+			"chat", "/v1/chat/completions",
+			`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+			[]string{`"finish_reason":"length"`, "data: [DONE]"}, nil,
+		},
+		{
+			"responses", "/v1/responses",
+			`{"model":"glm-5.2","stream":true,"input":"hi"}`,
+			[]string{`"type":"response.incomplete"`, `"reason":"max_output_tokens"`},
+			[]string{`"type":"response.completed"`},
+		},
+		{
+			"messages", "/v1/messages",
+			`{"model":"glm-5.2","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
+			[]string{`"stop_reason":"max_tokens"`},
+			[]string{`"stop_reason":"end_turn"`},
+		},
+	}
+	for _, tc := range cases {
+		up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, cut, true })
+		p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+		h := NewHandler(Config{Pool: p, Upstream: up})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body)))
+		body := rec.Body.String()
+		for _, w := range tc.want {
+			if !strings.Contains(body, w) {
+				t.Errorf("%s: 期望收尾 %s，实际:\n%s", tc.name, w, body)
+			}
+		}
+		for _, r := range tc.reject {
+			if strings.Contains(body, r) {
+				t.Errorf("%s: 断流不得伪装成正常完成（%s）:\n%s", tc.name, r, body)
+			}
+		}
+	}
+}
+
+// TestStreamCutMidToolCallMarksTruncated 断流落在工具调用参数中间（agent 客户端最
+// 常见的形态）：必须仍然补截断终态（guard 里 toolSeen 就是为此），且不与既有工具帧
+// 重复/错序——客户端据此能判断这个调用是残缺的，而不是拿半截 JSON 去执行。
+func TestStreamCutMidToolCallMarksTruncated(t *testing.T) {
+	cut := `data: {"id":"c1","object":"chat.completion.chunk","model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n" +
+		`data: {"id":"c1","object":"chat.completion.chunk","model":"glm-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{\"cmd\":"}}]}}]}` + "\n\n"
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, cut, true })
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+	body := rec.Body.String()
+	if n := strings.Count(body, `"finish_reason":"length"`); n != 1 {
+		t.Fatalf("工具调用中断流应恰好一个截断终态，got=%d:\n%s", n, body)
+	}
+	if !strings.Contains(body, `"tool_calls"`) {
+		t.Fatalf("工具调用帧应保留:\n%s", body)
+	}
+	if strings.Index(body, `"tool_calls"`) > strings.Index(body, `"finish_reason":"length"`) {
+		t.Fatalf("终态必须落在工具调用帧之后:\n%s", body)
+	}
+}
+
+// TestNonStreamCutTruncatedAcrossAllProtocols 同一根因在非流式一侧：客户端不带
+// stream 时，网关向**自己**聚合上游流（上游禁非流式），Aggregate 的 finish_reason
+// 就是客户端看到的那个。responses / messages 的非流式按同一字段推导 status /
+// stop_reason，所以 Aggregate 一处修正三边同时生效——这条测试盯住那条传导链。
+func TestNonStreamCutTruncatedAcrossAllProtocols(t *testing.T) {
+	cut := `data: {"id":"c1","object":"chat.completion.chunk","model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n" +
+		`data: {"id":"c1","object":"chat.completion.chunk","model":"glm-5.2","choices":[{"index":0,"delta":{"content":"半截"}}]}` + "\n\n"
+	cases := []struct {
+		name, path, body string
+		want             []string
+		reject           []string
+	}{
+		{
+			"chat", "/v1/chat/completions",
+			`{"model":"glm-5.2","stream":false,"messages":[{"role":"user","content":"hi"}]}`,
+			[]string{`"finish_reason":"length"`},
+			[]string{`"finish_reason":"stop"`},
+		},
+		{
+			"responses", "/v1/responses",
+			`{"model":"glm-5.2","stream":false,"input":"hi"}`,
+			[]string{`"status":"incomplete"`, `"reason":"max_output_tokens"`},
+			[]string{`"status":"completed"`},
+		},
+		{
+			"messages", "/v1/messages",
+			`{"model":"glm-5.2","stream":false,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
+			[]string{`"stop_reason":"max_tokens"`},
+			[]string{`"stop_reason":"end_turn"`},
+		},
+	}
+	for _, tc := range cases {
+		up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, cut, true })
+		p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+		h := NewHandler(Config{Pool: p, Upstream: up})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body)))
+		body := rec.Body.String()
+		for _, w := range tc.want {
+			if !strings.Contains(body, w) {
+				t.Errorf("%s: 期望 %s，实际:\n%s", tc.name, w, body)
+			}
+		}
+		for _, r := range tc.reject {
+			if strings.Contains(body, r) {
+				t.Errorf("%s: 断流不得伪装成正常完成（%s）:\n%s", tc.name, r, body)
+			}
+		}
 	}
 }
 

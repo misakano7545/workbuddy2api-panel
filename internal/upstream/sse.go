@@ -25,6 +25,22 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
+// TruncationFinishReason 上游没有给出正常收尾时（既无 finish_reason 也无
+// data: [DONE] 就 EOF = 断流）如实上报的截断终态取值。
+//
+// 为什么是 "length"：OpenAI 协议的 finish_reason 词表里没有「上游断流」这一项，
+// 而客户端真正需要知道的事实是「这条输出是残缺的，别当完整结果用」——"length"
+// 是唯一既合法又让三条适配器如实标截断的取值：
+//   - chat：finish_reason="length"（客户端据此提示被截断）；
+//   - responses：response.incomplete + incomplete_details.reason=max_output_tokens；
+//   - messages：stop_reason="max_tokens"。
+//
+// 不给这个取值时，三条路径各自 default 成「正常完成」（空 finish_reason /
+// response.completed / end_turn），客户端把半截内容当完整答案落库——那是静默丢内容。
+// 同一判据（!sawDone）本文件下方处理残缺 tool_calls 时早已在用：代码知道这是截断，
+// 只是此前没让它出现在客户端可见的协议字段里。
+const TruncationFinishReason = "length"
+
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
@@ -41,6 +57,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		gotAnyContent bool
 		validEvents   int
 		sawDone       bool // 上游显式发过 data: [DONE]（正常收尾）
+		sawFinish     bool // 上游显式给过非空 finish_reason（与默认值 "stop" 区分开）
 		toolCalls     = map[int]map[string]any{}
 		toolOrder     []int
 		// toolSeq 缺 index 的 tool_call 的分配序号源：跨帧延续「最近分配」槽位，
@@ -177,6 +194,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 							}
 							if fr, ok := c["finish_reason"].(string); ok && fr != "" {
 								finishReason = fr
+								sawFinish = true
 							}
 							if delta, ok := c["delta"].(map[string]any); ok {
 								if r2, ok := delta["role"].(string); ok && r2 != "" {
@@ -212,6 +230,14 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		// 上游返回 200 但没有任何有效数据事件（空流/只有 [DONE]/只有注释行）：
 		// 不再合成空 content 的假成功响应，直接报错，由 handler 映射为 502 upstream_parse。
 		return nil, errEmptyStream
+	}
+	// 断流如实上报：既没给 finish_reason 也没给 data: [DONE] 就 EOF（上游连接中断），
+	// 此时 finishReason 还是初始默认值 "stop"——直接下发等于告诉客户端「模型正常
+	// 说完了」，而半截正文/残缺 tool_calls 会被当完整结果。同一判据（!sawDone）下方
+	// 处理 tool_calls 时早已在用，这里只是让它同时出现在客户端可见的 finish_reason 上。
+	// 已收到任一正常收尾信号（sawFinish 或 sawDone）则一律不动。
+	if !sawDone && !sawFinish {
+		finishReason = TruncationFinishReason
 	}
 	if id == "" {
 		id = fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())

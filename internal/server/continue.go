@@ -299,10 +299,16 @@ func (r *continueReader) endSegment(sawDone bool) {
 		}
 	}
 	// 段在没有任何 finish 的情况下以 EOF/读错误结束：疑似上游断流（正常收尾都带
-	// finish_reason）。不断言语义，只记一条 WARN 供对账——这类流此前完全无痕，
-	// 客户端却会看到「被标 completed 的中途截断」。
-	if !sawDone && r.finish == "" && !r.errSeen {
+	// finish_reason）。客户端此前会看到「被标 completed 的中途截断」——这里把
+	// 本层早就知道的事实落到客户端可见的协议字段里（本文件开头那条契约：上层看到
+	// 的永远是「一条完整且恰好一个终态」的流；此前只记日志、没落帧）。
+	if r.cutNoFinish(sawDone) {
 		log.Printf("WARN: [continue] 段无 finish 结束（疑似上游断流，按截断终态降级）")
+		// 有真实输出才补终态：零输出段不能补——否则 StreamHint 的 validEvents 从 0
+		// 变 1，空流本该收敛的 502 观测会被伪装成「有内容的 200」。
+		if r.text.Len() > 0 || r.reason.Len() > 0 || r.toolSeen {
+			r.emitTruncationTerminal()
+		}
 	}
 	// 不续/续写失败：回放 tail（含 finish/末端帧，客户端行为与未接线时一致），
 	// 再补一条跨段合计 usage，最后 EOF（[DONE] 由 StreamHint 统一补）。
@@ -317,6 +323,39 @@ func (r *continueReader) endSegment(sawDone bool) {
 	r.done = true
 }
 
+// cutNoFinish 本段是否「没有任何正常收尾就结束」（上游断流）：既没给 finish_reason、
+// 也没发 data: [DONE]，且不是流内 error 帧（那是上游明说失败，客户端已收到 error 帧，
+// 不能再补一条截断终态与之矛盾）。三处共用同一判据：续写资格、终态降级、WARN 日志。
+func (r *continueReader) cutNoFinish(sawDone bool) bool {
+	return !sawDone && r.finish == "" && !r.errSeen
+}
+
+// emitTruncationTerminal 补一条截断终态帧（finish_reason=length）。
+//
+// 本层是三条适配器（chat / responses / messages）共用的唯一接缝，所以补在这一处就能
+// 让三边同时如实标截断——它们各自早已把 length 映射正确（responses →
+// response.incomplete + max_output_tokens，messages → stop_reason=max_tokens），此前
+// 缺的只是「这段没正常收尾」这个事实没被说出来。若在三个适配器各写一份，既重复又
+// 迟早漂移。取值口径见 upstream.TruncationFinishReason。
+//
+// 位置：必须在 tail 回放之后、usage 帧之前（OpenAI 惯例：终态帧在前，纯 usage 帧收尾）。
+// 断流分支下 tail 必为空（tail 只在见到 finish 后填充），故顺序天然正确。
+func (r *continueReader) emitTruncationTerminal() {
+	raw, err := json.Marshal(map[string]any{
+		"id":     r.id,
+		"object": "chat.completion.chunk",
+		"model":  bareModelOf(r.body),
+		"choices": []any{map[string]any{
+			"index":         0,
+			"delta":         map[string]any{},
+			"finish_reason": upstream.TruncationFinishReason,
+		}},
+	})
+	if err == nil {
+		r.emit(string(raw))
+	}
+}
+
 // canContinue 续写资格判定（sawDone=false 表示 EOF/读错误收尾——只有显式
 // finish_reason=length 才续，读错误不续，避免把故障流当截断流续错）。
 func (r *continueReader) canContinue(sawDone bool) bool {
@@ -327,7 +366,7 @@ func (r *continueReader) canContinue(sawDone bool) bool {
 		return false
 	case r.limitSet:
 		return false
-	case !sawDone && r.finish == "":
+	case r.cutNoFinish(sawDone):
 		// 段无 finish 结束 = 上游偶发断流（线上实测：15 次续写里 1 次）。续写段
 		// 允许一次盲重试：重试请求体与断流段逐字节相同、已收内容都在 assistant
 		// 前缀里，幂等不重复。主段不给盲重试（那是请求本身失败，交由既有降级）。
