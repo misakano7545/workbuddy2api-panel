@@ -451,7 +451,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	// 用**我们自己账本里的实扣值**兜底（credit_by_model 的 credits/credit_samples）。
 	// 实测 0.55 credit/张 vs 国内混元目录牌价 x5.00 —— 两个数都不是编的，来源不同故分列：
 	// credits 是牌价，measured_credit 是实测单价（前端加「实测」字样）。
-	// ponytail: 按裸模型名聚合，不区分域（图片模型跨域同名只混元一例，且国际侧无路由）。
+	// 账本行键是「域:模型」，故这里按 realm+":"+模型 id 查（跨域同名模型本就该各算各的）。
 	measured := map[string]string{}
 	if p.cfg.Usage != nil {
 		for _, c := range p.cfg.Usage.Snapshot(0, nil).CreditByModel {
@@ -471,7 +471,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 			e := panelModelEntry(realm, mi, nil, "", p.cfg.Upstream.HTTP)
 			e["image_generation"] = true
 			if e["credits"] == "" {
-				if v, ok := measured[mi.ID]; ok {
+				if v, ok := measured[realm+":"+mi.ID]; ok {
 					e["measured_credit"] = v
 				}
 			}

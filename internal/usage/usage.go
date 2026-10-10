@@ -50,10 +50,10 @@ const fileVersion = 4
 // bucket 一个 (时间片, realm, uid, model, rate) 的累计量。
 // JSON 字段名刻意取短，因为桶数量会随时间增长。
 type bucket struct {
-	Scope string  `json:"s"` // "h:2006-01-02T15" 或 "d:2006-01-02"
-	Realm string  `json:"r"`
-	UID   string  `json:"u"`
-	Model string  `json:"m"`
+	Scope string `json:"s"` // "h:2006-01-02T15" 或 "d:2006-01-02"
+	Realm string `json:"r"`
+	UID   string `json:"u"`
+	Model string `json:"m"`
 	// Rate 请求时生效的积分倍率（规范化数值；旧桶为空）。上游 PR #69 引入：
 	// 同一模型不同倍率档分开聚合，才能算准「这段倍率下的积分/Token」。
 	Rate  string  `json:"x,omitempty"`
@@ -453,8 +453,9 @@ type Point struct {
 	Agg
 }
 
-// CreditAgg 积分扣除统计的一行。Key 在账号维度是 UID，在模型维度是裸模型名；
-// Rate 仅模型维度使用；比例分母只统计与 credit 同时存在的 Token 样本。
+// CreditAgg 积分扣除统计的一行。Key 在账号维度是 UID，在模型维度是「域:模型」
+// （cn:xxx / global:xxx，与 /v1/models 的调用值同形）；行按 (域, 模型, 生效倍率)
+// 分组；Rate 仅模型维度使用；比例分母只统计与 credit 同时存在的 Token 样本。
 type CreditAgg struct {
 	Key                string  `json:"key"`
 	Realm              string  `json:"realm,omitempty"`
@@ -688,10 +689,14 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 					rateCache[cacheKey] = rate
 				}
 			}
-			modelKey := model + "\x00" + rate
+			// 行键带域前缀：cn / global 同名模型的倍率和实扣是两笔账，裸模型名会把它们
+			// 并成一行，也看不出某行属于哪个域。展示口径与 /v1/models 一致——模型 id
+			// 就是调用时要填的那个完整值。
+			label := b.Realm + ":" + model
+			modelKey := label + "\x00" + rate
 			cm := creditModelAgg[modelKey]
 			if cm == nil {
-				cm = &creditAcc{CreditAgg: CreditAgg{Key: model, Rate: rate}}
+				cm = &creditAcc{CreditAgg: CreditAgg{Key: label, Realm: b.Realm, Rate: rate}}
 				creditModelAgg[modelKey] = cm
 			}
 			cm.add(b)

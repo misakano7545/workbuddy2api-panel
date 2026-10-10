@@ -50,9 +50,9 @@ func TestAddAndTotals(t *testing.T) {
 		s.CreditByAccount[0].CreditSamples != 1 || s.CreditByAccount[0].CreditsPer1MTokens != 10000 {
 		t.Fatalf("credit_by_account = %+v, want one uid1 row", s.CreditByAccount)
 	}
-	if len(s.CreditByModel) != 1 || s.CreditByModel[0].Key != "glm-5.2" ||
+	if len(s.CreditByModel) != 1 || s.CreditByModel[0].Key != "cn:glm-5.2" ||
 		s.CreditByModel[0].Rate != "0.05" || s.CreditByModel[0].CreditsPer1MTokens != 10000 {
-		t.Fatalf("credit_by_model = %+v, want one glm-5.2 rate=0.05 row", s.CreditByModel)
+		t.Fatalf("credit_by_model = %+v, want one cn:glm-5.2 rate=0.05 row", s.CreditByModel)
 	}
 }
 
@@ -141,7 +141,7 @@ func TestCreditSurvivesRollup(t *testing.T) {
 	}
 }
 
-// 模型维度按“裸模型名 + 生效倍率”合并；同倍率跨账号/时间合并，不同倍率拆行。
+// 模型维度按“域:模型 + 生效倍率”合并；同倍率跨账号/时间合并，不同倍率拆行。
 func TestCreditDimensionsRateGrouping(t *testing.T) {
 	r := New("")
 	now := time.Now()
@@ -153,12 +153,33 @@ func TestCreditDimensionsRateGrouping(t *testing.T) {
 	if len(s.CreditByAccount) != 2 || len(s.CreditByModel) != 2 {
 		t.Fatalf("dimensions accounts=%+v models=%+v, want 2 accounts and 2 model-rate rows", s.CreditByAccount, s.CreditByModel)
 	}
-	if s.CreditByModel[0].Key != "glm-5.2" || s.CreditByModel[0].Rate != "0.8" ||
+	if s.CreditByModel[0].Key != "cn:glm-5.2" || s.CreditByModel[0].Rate != "0.8" ||
 		s.CreditByModel[0].Credits != 6 || s.CreditByModel[0].CreditTokens != 300 {
 		t.Fatalf("first model row = %+v, want rate=0.8 credits=6 tokens=300", s.CreditByModel[0])
 	}
 	if s.CreditByModel[1].Rate != "0.5" || s.CreditByModel[1].Credits != 3 || s.CreditByModel[1].CreditTokens != 300 {
 		t.Fatalf("merged model row = %+v, want rate=0.5 credits=3 tokens=300", s.CreditByModel[1])
+	}
+}
+
+// 同名模型跨域不合并：cn / global 的倍率与实扣是两笔账，行键带域前缀（面板「按模型」
+// 列显示的就是 cn:/global:）。此前按裸模型名聚合，两域被并成一行、也看不出行属哪个域。
+func TestCreditModelRowsSplitByRealm(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "glm-5.2", Delta{TotalTokens: 100, HasTotal: true, Credit: 1, HasCredit: true, ModelRate: "0.5"}, true)
+	r.Add(now, "global", "g1", "glm-5.2", Delta{TotalTokens: 100, HasTotal: true, Credit: 2, HasCredit: true, ModelRate: "0.5"}, true)
+
+	s := r.Snapshot(24, nil)
+	if len(s.CreditByModel) != 2 {
+		t.Fatalf("credit_by_model = %+v, want 2 rows（同倍率的 cn / global 也不合并）", s.CreditByModel)
+	}
+	got := map[string]float64{}
+	for _, row := range s.CreditByModel {
+		got[row.Key] = row.Credits
+	}
+	if got["cn:glm-5.2"] != 1 || got["global:glm-5.2"] != 2 {
+		t.Fatalf("rows = %+v, want cn:glm-5.2=1 global:glm-5.2=2", s.CreditByModel)
 	}
 }
 
