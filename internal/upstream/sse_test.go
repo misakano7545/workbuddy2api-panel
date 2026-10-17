@@ -1023,6 +1023,52 @@ func TestDeductionEndTimePreferredOverCycleEnd(t *testing.T) {
 	}
 }
 
+// TestUserResourceSnapshotBuckets 快照按自然日聚合：同一自然日的多个包合并成一个桶，
+// 日期取该日、剩余量求和、ExpireAt 取该日最早时刻；earliestRemaining 同步为该日合计。
+// 这是首页「到期提醒」与「积分构成」同口径的关键——旧实现只记最早单包，同日多包被少算。
+func TestUserResourceSnapshotBuckets(t *testing.T) {
+	now := time.Now().In(softRateResetLoc)
+	at := func(offset, hour int) time.Time {
+		return time.Date(now.Year(), now.Month(), now.Day()+offset, hour, 0, 0, 0, softRateResetLoc)
+	}
+	d2a, d2b, d5 := at(2, 9), at(2, 15), at(5, 9)
+	cycle := at(20, 0) // 月度周期边界：快照必须优先 DeductionEndTime，不能落在这里
+	payload := `{"code":0,"data":{"Response":{"Data":{"Accounts":[` +
+		`{"PackageName":"a","CapacitySize":60,"CapacityRemain":60,"CapacityUsed":0,` +
+		`"CycleEndTime":"` + cycle.Format(packageEndLayout) + `","DeductionEndTime":` + fmt.Sprintf("%d", d2a.UnixMilli()) + `},` +
+		`{"PackageName":"b","CapacitySize":40,"CapacityRemain":40,"CapacityUsed":0,` +
+		`"CycleEndTime":"` + cycle.Format(packageEndLayout) + `","DeductionEndTime":` + fmt.Sprintf("%d", d2b.UnixMilli()) + `},` +
+		`{"PackageName":"c","CapacitySize":25,"CapacityRemain":25,"CapacityUsed":0,` +
+		`"CycleEndTime":"` + cycle.Format(packageEndLayout) + `","DeductionEndTime":` + fmt.Sprintf("%d", d5.UnixMilli()) + `}` +
+		`]}}}}`
+	c := testClient(func(r *http.Request) (*http.Response, error) { return jsonResp(200, payload), nil })
+
+	remain, total, _, earliestAt, earliestRemaining, buckets, err := c.UserResourceSnapshot(
+		&auth.Auth{AccessToken: "at", UID: "u1"}, 0,
+	)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if remain != 125 || total != 125 {
+		t.Fatalf("remain/total=%d/%d want 125/125", remain, total)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets=%+v want 2 个自然日", buckets)
+	}
+	if buckets[0].Date != d2a.Format("2006-01-02") || buckets[0].Remain != 100 {
+		t.Fatalf("首桶=%+v want %s/100（同日两包合并）", buckets[0], d2a.Format("2006-01-02"))
+	}
+	if !buckets[0].ExpireAt.Equal(d2a) {
+		t.Fatalf("首桶 ExpireAt=%v want 该日最早 %v", buckets[0].ExpireAt, d2a)
+	}
+	if buckets[1].Date != d5.Format("2006-01-02") || buckets[1].Remain != 25 {
+		t.Fatalf("次桶=%+v want %s/25", buckets[1], d5.Format("2006-01-02"))
+	}
+	if !earliestAt.Equal(d2a) || earliestRemaining != 100 {
+		t.Fatalf("earliest=%v/%d want %v/100", earliestAt, earliestRemaining, d2a)
+	}
+}
+
 // --- 标记修复（流式端到端，见 dsml.go）-------------------------------------
 
 // upstreamSSEWithContent 用给定的正文分片拼一条上游 SSE：role 首帧 + N 个正文帧

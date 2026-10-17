@@ -2200,3 +2200,61 @@ func TestStatusReasonHiddenAfterCooldownExpires(t *testing.T) {
 		t.Fatalf("禁用原因必须继续透出: %+v", st)
 	}
 }
+
+// TestExpiryBucketsFEFOAndPersistence 按日到期批次的三件事：
+//  1. 写入时按日期升序（同一天多包已在 upstream 合并）；
+//  2. NoteModelCost 按 FEFO 从最早桶扣，扣穿后顺延到下一桶，不再「最早一批归零就整行消失」；
+//  3. buckets 随 state.json 持久化，重启后首页快照仍是完整视图。
+func TestExpiryBucketsFEFOAndPersistence(t *testing.T) {
+	fp := filepath.Join(t.TempDir(), "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	at3 := time.Now().Add(3 * 24 * time.Hour)
+	at10 := time.Now().Add(10 * 24 * time.Hour)
+	// 故意乱序写入：SetCreditsSnapshot 必须自己排序。
+	p.SetCreditsSnapshot("u1", CreditsSnapshot{
+		Remain: 250, Total: 250,
+		ExpiryBuckets: []ExpiryBucket{
+			{Date: at10.Format("2006-01-02"), ExpireAt: at10, Remain: 100},
+			{Date: at3.Format("2006-01-02"), ExpireAt: at3, Remain: 150},
+		},
+	})
+	st, ok := p.Status("u1")
+	if !ok || len(st.CreditsExpiryBuckets) != 2 {
+		t.Fatalf("buckets 未透出: %+v", st)
+	}
+	if st.CreditsExpiryBuckets[0].Date != at3.Format("2006-01-02") || st.CreditsEarliestRemaining != 150 {
+		t.Fatalf("首桶/最早剩余=%+v/%d want %s/150", st.CreditsExpiryBuckets[0], st.CreditsEarliestRemaining, at3.Format("2006-01-02"))
+	}
+
+	// 扣 120：首桶 150→30，最早批次仍是 3 天后。
+	p.NoteModelCost("u1", "m", 120, 1000)
+	st, _ = p.Status("u1")
+	if len(st.CreditsExpiryBuckets) != 2 || st.CreditsExpiryBuckets[0].Remain != 30 || st.CreditsEarliestRemaining != 30 {
+		t.Fatalf("第一轮扣减后=%+v 最早=%d want 首桶 30", st.CreditsExpiryBuckets, st.CreditsEarliestRemaining)
+	}
+	// 再扣 50：扣穿首桶（30），余 20 落到第二桶（100→80），最早批次顺延到 10 天后。
+	p.NoteModelCost("u1", "m", 50, 1000)
+	st, _ = p.Status("u1")
+	if len(st.CreditsExpiryBuckets) != 1 {
+		t.Fatalf("首桶应被移除，实得 %+v", st.CreditsExpiryBuckets)
+	}
+	if st.CreditsExpiryBuckets[0].Date != at10.Format("2006-01-02") || st.CreditsExpiryBuckets[0].Remain != 80 {
+		t.Fatalf("顺延后=%+v want %s/80", st.CreditsExpiryBuckets[0], at10.Format("2006-01-02"))
+	}
+	if !st.CreditsEarliestExpiry.Equal(at10) || st.CreditsEarliestRemaining != 80 {
+		t.Fatalf("最早批次未顺延: %v/%d want %v/80", st.CreditsEarliestExpiry, st.CreditsEarliestRemaining, at10)
+	}
+
+	// 落盘 → 重启恢复：批次与最早字段都要回来。
+	p.Flush()
+	p2 := New(fp)
+	defer p2.Close()
+	st2, ok := p2.Status("u1")
+	if !ok || len(st2.CreditsExpiryBuckets) != 1 || st2.CreditsExpiryBuckets[0].Remain != 80 {
+		t.Fatalf("重启后 buckets 丢失: %+v ok=%v", st2.CreditsExpiryBuckets, ok)
+	}
+	if !st2.CreditsEarliestExpiry.Equal(at10) || st2.CreditsEarliestRemaining != 80 {
+		t.Fatalf("重启后最早批次=%v/%d want %v/80", st2.CreditsEarliestExpiry, st2.CreditsEarliestRemaining, at10)
+	}
+}

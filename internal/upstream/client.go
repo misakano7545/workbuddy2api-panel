@@ -2074,6 +2074,17 @@ func packageEndAt(deductionMS int64, expired, cycleEnd string) (time.Time, bool)
 	return parsePackageEndTime(cycleEnd)
 }
 
+// ExpiryBucket 单个自然日到期的积分合计（按真实失效时刻 DeductionEndTime 聚合）。
+// 面板首页「积分到期提醒」快照与「积分构成」（逐包明细）共用同一口径：
+//   - Date 为该日（UTC+8，YYYY-MM-DD），前端按这个日期分组展示；
+//   - ExpireAt 是该日最早一批的精确时刻，供「最早到期优先」选号路由使用；
+//   - Remain 是该日所有正余额包的剩余量之和。
+type ExpiryBucket struct {
+	Date     string    `json:"date"`
+	ExpireAt time.Time `json:"expires_at,omitempty"`
+	Remain   int64     `json:"remain"`
+}
+
 // UserResourceDetailed 在 UserResource 基础上额外返回「快过期」积分子集：
 // soon > 0 且套餐 CycleEndTime 解析成功且到期时刻 ≤ now+soon 的余额计入 expiring
 // （pool 据此优先消耗，避免官方活动赠送的奖励积分到期作废）；soon ≤ 0 时 expiring
@@ -2187,9 +2198,23 @@ func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (remain, t
 }
 
 // UserResourceDetailedWithExpiry 在 UserResourceDetailed 基础上返回最早未来到期批次：
-// earliestAt 是最早的可用到期时刻，earliestRemaining 是同一时刻所有正余额包的剩余量之和。
-// 已过期、剩余为 0、缺少或无法解析到期时间的包都不会成为最早批次；无有效批次时返回零值。
+// earliestAt 是最早的可用到期时刻，earliestRemaining 是该自然日全部正余额包的剩余量
+// 之和（与面板「积分构成」按日汇总的口径一致）。已过期、剩余为 0、缺少或无法解析
+// 到期时间的包都不会成为最早批次；无有效批次时返回零值。
 func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
+	remain, total, expiring, earliestAt, earliestRemaining, _, err = c.UserResourceSnapshot(a, soon)
+	return
+}
+
+// UserResourceSnapshot 在 UserResourceDetailedWithExpiry 基础上额外返回按自然日聚合的
+// 到期批次（buckets）。日期/剩余量口径与面板「积分构成」的逐包按日汇总完全一致，
+// 首页「到期提醒」快照据此可零上游请求渲染出与明细相同的内容——旧快照只存最早单批，
+// 同一天多个包会被少算，且扣穿第一批后整行消失。
+//
+// 到期时刻统一走 packageEndAt（DeductionEndTime 优先）。本函数此前只读 CycleEndTime，
+// 把套餐型包的月度周期重置日当成了到期日（实测：cycle=2026-10-31，deduction=2034-12-24），
+// 首页快照因此长期错报最近到期时间与数量。
+func (c *Client) UserResourceSnapshot(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, buckets []ExpiryBucket, err error) {
 	// 企业版额度不在「个人资源包」体系内：get-user-resource* 对 enterpriseId 非空账号
 	// 恒返回空 Accounts（实测 code 0 且 Accounts null），故分流到企业口径端点。
 	if a.IsEnterprise() {
@@ -2197,6 +2222,13 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 		// 与个人路径同口径：企业额度查询是余额观察者（积分历史）唯一的企业入口——
 		// 企业号没有签到/任务，若此处不通知，它的余额变动将永远无迹可循。
 		c.notifyCredits(a, remain, err)
+		if err == nil && earliestRemaining > 0 && !earliestAt.IsZero() && earliestAt.After(time.Now()) {
+			buckets = []ExpiryBucket{{
+				Date:     earliestAt.In(softRateResetLoc).Format("2006-01-02"),
+				ExpireAt: earliestAt,
+				Remain:   earliestRemaining,
+			}}
+		}
 		return
 	}
 	now := time.Now()
@@ -2217,7 +2249,7 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 		return e
 	})
 	if err != nil {
-		return 0, 0, 0, time.Time{}, 0, err
+		return 0, 0, 0, time.Time{}, 0, nil, err
 	}
 	var resp struct {
 		Response struct {
@@ -2227,6 +2259,7 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 					// DeductionEndTime 真实扣费截止（epoch 毫秒）；CycleEndTime 只是
 					// 月度计量周期（见 packageEndAt 注释）。
 					DeductionEndTime    int64  `json:"DeductionEndTime"`
+					ExpiredTime         string `json:"ExpiredTime"`
 					CycleEndTime        string `json:"CycleEndTime"`
 					CapacitySize        int64  `json:"CapacitySize"`
 					CapacityRemain      int64  `json:"CapacityRemain"`
@@ -2239,8 +2272,9 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 		} `json:"Response"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, 0, 0, time.Time{}, 0, fmt.Errorf("resource parse: %w", err)
+		return 0, 0, 0, time.Time{}, 0, nil, fmt.Errorf("resource parse: %w", err)
 	}
+	byDate := make(map[string]*ExpiryBucket)
 	for _, acct := range resp.Response.Data.Accounts {
 		r, _, size := packageRemainUsed(respAccount{
 			CapacityRemain:      acct.CapacityRemain,
@@ -2261,23 +2295,43 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 		if r <= 0 {
 			continue
 		}
-		end, ok := packageEndAt(acct.DeductionEndTime, "", acct.CycleEndTime)
+		end, ok := packageEndAt(acct.DeductionEndTime, acct.ExpiredTime, acct.CycleEndTime)
 		if !ok || !end.After(now) {
 			continue
 		}
 		if earliestAt.IsZero() || end.Before(earliestAt) {
 			earliestAt = end
-			earliestRemaining = r
-		} else if end.Equal(earliestAt) {
-			earliestRemaining += r
 		}
+		// 按自然日（UTC+8）聚合：与 CreditPackages → 前端 end_time.slice(0,10) 同口径。
+		day := end.In(softRateResetLoc).Format("2006-01-02")
+		b, seen := byDate[day]
+		if !seen {
+			b = &ExpiryBucket{Date: day, ExpireAt: end}
+			byDate[day] = b
+		} else if end.Before(b.ExpireAt) {
+			b.ExpireAt = end
+		}
+		b.Remain += r
 		// 分桶：仅 soon>0 且确实在窗口内 → expiring。
 		if soon > 0 && !end.After(now.Add(soon)) {
 			expiring += r
 		}
 	}
+	dates := make([]string, 0, len(byDate))
+	for d := range byDate {
+		dates = append(dates, d)
+	}
+	sort.Strings(dates)
+	buckets = make([]ExpiryBucket, 0, len(dates))
+	for _, d := range dates {
+		buckets = append(buckets, *byDate[d])
+	}
+	// earliestRemaining 是该自然日全部正余额包的合计（不是单个包的剩余量）。
+	if len(buckets) > 0 {
+		earliestRemaining = buckets[0].Remain
+	}
 	c.notifyCredits(a, remain, nil)
-	return remain, total, expiring, earliestAt, earliestRemaining, nil
+	return remain, total, expiring, earliestAt, earliestRemaining, buckets, nil
 }
 
 // SetCreditObserver 挂载/注销（nil）余额观察者。可在启动后任意时刻调用；

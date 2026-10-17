@@ -1404,7 +1404,7 @@ func TestAppJSExpirySnapshot(t *testing.T) {
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const start = src.indexOf('function renderExpirySnapshot');
+const start = src.indexOf('function expCSTDate');
 const end = src.indexOf('let lastPackages');
 if (start < 0 || end < 0 || end < start) throw new Error('expiry snapshot region not found');
 const els = {};
@@ -1457,9 +1457,9 @@ process.stdout.write(JSON.stringify({
 	// 41 分 2 天后到期 → 日均需耗 21（ceil 20.5）；499 分 20 天 → 25（ceil 24.95）。
 	// 若把 ceil 改成 floor，这里必须变成 20 / 24。
 	want := `{"rows":[["秋千易","2 天","41","21"],["秋","20 天","499","25"]],` +
-		`"note":` + strconv.Quote("2 个账号有未到期批次 · 只列最早一批，全部批次见「积分构成」") + `,` +
+		`"note":` + strconv.Quote("2 个账号有未到期批次 · 未开启后台刷新 · 明细见「积分构成」") + `,` +
 		// 收纳：只展开最近到期的 3 个（A1/A2/A3 按到期升序），其余 2 个 hidden。
-		`"head":[["A1","1 天"],["A2","2 天"],["A3","3 天"]],"restHidden":2,"label":"其余 2 个账号，展开"}`
+		`"head":[["A1","明天"],["A2","2 天"],["A3","3 天"]],"restHidden":2,"label":"其余 2 个账号，展开"}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("到期快照渲染不符:\n got=%s\nwant=%s", out, want)
 	}
@@ -1766,5 +1766,83 @@ process.stdout.write(JSON.stringify({
 	const want = `{"congestedBad":true,"busyWarn":true,"idleQuiet":true,"normalQuiet":true,"noneQuiet":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("繁忙度标签渲染不符:\n got=%s\nwant=%s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSExpirySnapshotBuckets 到期提醒快照必须消费 credits_expiry_buckets：
+// 同日多包取聚合后的该日合计、后续批次列在日期下方、7 天内合计可读、排序稳定，
+// 并在旧 state 无 buckets 时退回最早一批兜底。节奏标注必须来自 overview 的
+// balance_refresh_sec/balance_refreshed_at，而不是界面轮询间隔。
+func TestAppJSExpirySnapshotBuckets(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry snapshot test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function expCSTDate');
+const end = src.indexOf('// 收纳行展开/收起');
+if (start < 0 || end < 0) throw new Error('expiry snapshot helpers not found');
+const ctx = {
+  Number, String, Array, Date, Math, JSON, PK_DAY_MS: 86400000,
+  expBody: { innerHTML: '' }, expNote: { textContent: '' },
+  esc: s => String(s), fmtTok: n => String(n),
+  pkExpiryDateTime: ms => new Date(ms).toISOString(),
+};
+ctx.$ = id => ctx[id];
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot=renderExpirySnapshot;', ctx);
+const day = n => {
+  const d = new Date(Date.now() + n * 86400000);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(d);
+  const p = t => (parts.find(x => x.type === t) || {}).value;
+  return p('year') + '-' + p('month') + '-' + p('day');
+};
+ctx.renderExpirySnapshot({
+  balance_refresh_sec: 300,
+  balance_refreshed_at: new Date().toISOString(),
+  accounts: [
+    { uid: 'b', nickname: 'B', credits_expiry_buckets: [
+      { date: day(5), remain: 300 }, { date: day(3), remain: 120 }] },
+    { uid: 'a', nickname: 'A', credits_expiry_buckets: [{ date: day(3), remain: 150 }] },
+  ],
+});
+const buckets = { html: ctx.expBody.innerHTML, note: ctx.expNote.textContent };
+ctx.renderExpirySnapshot({
+  accounts: [{ uid: 'c', nickname: 'C',
+    credits_earliest_expiry: new Date(Date.now() + 3 * 86400000).toISOString(),
+    credits_earliest_remaining: 77 }],
+});
+process.stdout.write(JSON.stringify({
+  order: buckets.html.indexOf('>A<') >= 0 && buckets.html.indexOf('>A<') < buckets.html.indexOf('>B<'),
+  hasRest: buckets.html.includes('随后'),
+  weekSum: buckets.html.includes('7 天内合计 420'),
+  dayLabel: buckets.html.includes('3 天'),
+  note: buckets.note,
+  fallback: ctx.expBody.innerHTML.includes('77'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expiry-snapshot-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry snapshot node test failed: %v\n%s", err, out)
+	}
+	got := strings.TrimSpace(string(out))
+	for _, want := range []string{
+		`"order":true`, `"hasRest":true`, `"weekSum":true`, `"dayLabel":true`, `"fallback":true`,
+		`每 5 分钟后台刷新`, `2 个账号有未到期批次`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expiry snapshot 输出缺少 %q: %s", want, got)
+		}
 	}
 }

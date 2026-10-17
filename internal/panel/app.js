@@ -2825,32 +2825,95 @@ if ($('pkDetail')) $('pkDetail').addEventListener('click', ev => {
   }
 });
 
-/* 到期提醒快照（零上游请求）：吃 /overview 里已有的 credits_earliest_expiry /
-   credits_earliest_remaining —— 由签到与余额后台刷新写进 state.json，随首页统计
-   一起到。此前账号池页对「谁快到期」一个字都不显示，要看得切进「积分构成」页打
-   一轮逐账号实时查询（本部署 20 个号约 2.7s）。
-   快照只有**最早一批**，完整批次仍看那一页；剩余天数口径与 pkExpiryText 一致
-   （ceil 到天），否则同一条批次两页会各说一个数。
-   默认只展开最近到期的 3 个账号，其余收纳（20 个号一屏铺不下）。 */
+/* 到期提醒快照（零上游请求）：吃 /overview 里已有的 credits_expiry_buckets ——
+   由签到与余额后台刷新按自然日聚合后写进 state.json，随首页统计一起到。
+   此前快照只有「最早一批」，同一天多个包会被少算，扣穿第一批后整行消失；
+   现在批次由后端聚合（date/expires_at/remain），与「积分构成」的逐包按日汇总同口径。
+
+   旧 state（升级后尚未跑过一轮余额刷新，或 Redis 快照来自旧版本）没有 buckets，
+   退回 credits_earliest_expiry / credits_earliest_remaining 只显示最早一批，保证卡片
+   不空白；下一轮刷新后自动变成完整视图。
+
+   剩余天数按自然日算（不再对精确时间戳 ceil——后者会把明天/今天多算一天，
+   日均需耗随之偏小）。默认只展开最近到期的 3 个账号，其余收纳。 */
+// expCSTDate 把时间戳格式化成 UTC+8 的自然日（YYYY-MM-DD）。上游到期字段与后端
+// credits_expiry_buckets.date 都是 +08 口径，前端不能拿浏览器本地时区去截日期。
+function expCSTDate(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(d);
+  const part = t => (parts.find(x => x.type === t) || {}).value || '';
+  return part('year') + '-' + part('month') + '-' + part('day');
+}
+
+function expBucketList(a) {
+  const raw = Array.isArray(a && a.credits_expiry_buckets) ? a.credits_expiry_buckets : [];
+  const out = [];
+  for (const b of raw) {
+    const date = String((b && b.date) || '').slice(0, 10);
+    const remain = Number((b && b.remain) || 0);
+    if (date && remain > 0) out.push({ date, remain });
+  }
+  if (out.length) {
+    out.sort((x, y) => (x.date < y.date ? -1 : x.date > y.date ? 1 : 0));
+    return out;
+  }
+  // 旧 state 兜底：只有最早一批。
+  const ms = a && a.credits_earliest_expiry ? new Date(a.credits_earliest_expiry).getTime() : NaN;
+  const remain = Number((a && a.credits_earliest_remaining) || 0);
+  if (Number.isFinite(ms) && remain > 0) {
+    return [{ date: expCSTDate(ms), remain }];
+  }
+  return [];
+}
+
+// expDayDiff 按 UTC+8 自然日算剩余天数：今天=0、明天=1。不拿精确时间戳 ceil——
+// 那会把明天/今天多算一天，日均需耗随之偏小（旧快照的口径问题）。
+function expDayDiff(dateStr) {
+  const ms = Date.parse(dateStr + 'T00:00:00+08:00');
+  const base = Date.parse(expCSTDate(Date.now()) + 'T00:00:00+08:00');
+  if (!Number.isFinite(ms) || !Number.isFinite(base)) return null;
+  return Math.round((ms - base) / PK_DAY_MS);
+}
+
 function renderExpirySnapshot(d) {
   const rows = [];
   for (const a of (d && d.accounts) || []) {
-    const remain = Number(a.credits_earliest_remaining || 0);
-    const ms = a.credits_earliest_expiry ? new Date(a.credits_earliest_expiry).getTime() : NaN;
-    if (!Number.isFinite(ms) || remain <= 0) continue;  // 无未来批次（长期包/已清空）不入表
-    rows.push({ a, ms, remain });
+    const bs = expBucketList(a).filter(b => {
+      const days = expDayDiff(b.date);
+      return days !== null && days >= 0;
+    });
+    if (!bs.length) continue;  // 无未来批次（长期包/已清空）不入表
+    rows.push({ a, bs });
   }
-  rows.sort((x, y) => x.ms - y.ms);
+  // 按最早到期日升序；同一天按昵称/uid 兜底，保证多次刷新顺序稳定。
+  rows.sort((x, y) => {
+    if (x.bs[0].date !== y.bs[0].date) return x.bs[0].date < y.bs[0].date ? -1 : 1;
+    const ax = String(x.a.nickname || x.a.uid || '');
+    const ay = String(y.a.nickname || y.a.uid || '');
+    return ax < ay ? -1 : ax > ay ? 1 : 0;
+  });
   const EXP_HEAD = 3;  // 默认只展开最近到期的 3 个账号，其余收纳成一行
-  const rowOf = ({ a, ms, remain }, hidden) => {
-    const days = Math.max(0, Math.ceil((ms - Date.now()) / PK_DAY_MS));
+  const rowOf = ({ a, bs }, hidden) => {
+    const first = bs[0];
+    const days = expDayDiff(first.date);
+    const daily = Math.ceil(first.remain / Math.max(1, days));
+    const week = bs.filter(b => expDayDiff(b.date) <= 7).reduce((s, b) => s + b.remain, 0);
     const color = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
+    const more = bs.length > 4 ? '　等 ' + bs.length + ' 批' : '';
+    const rest = bs.slice(1, 4).map(b =>
+      '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　') + more;
+    const sub = (rest ? '<div class="note">' + rest + '</div>' : '') +
+      (week > first.remain ? '<div class="note">7 天内合计 ' + fmtTok(week) + '</div>' : '');
     return '<tr' + (hidden ? ' data-exp-row="rest" hidden' : '') + '>' +
       '<td>' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</td>' +
-      '<td>' + esc(pkExpiryDateTime(ms).slice(0, 10)) + '</td>' +
-      '<td class="num" style="color:' + color + '">' + (days === 0 ? '今天' : days + ' 天') + '</td>' +
-      '<td class="num">' + fmtTok(remain) + '</td>' +
-      '<td class="num">' + fmtTok(Math.ceil(remain / Math.max(1, days))) + '</td>' +
+      '<td>' + esc(first.date) + sub + '</td>' +
+      '<td class="num" style="color:' + color + '">' +
+        (days === 0 ? '今天' : days === 1 ? '明天' : days + ' 天') + '</td>' +
+      '<td class="num">' + fmtTok(first.remain) + '</td>' +
+      '<td class="num">' + fmtTok(daily) + '</td>' +
       '</tr>';
   };
   // 收纳行沿用「积分构成」页的分组行样式（pk-group-summary / pk-group-toggle）。
@@ -2861,8 +2924,19 @@ function renderExpirySnapshot(d) {
         '<button type="button" class="pk-group-toggle" data-exp-rest="' + rest.length +
         '" aria-expanded="false">其余 ' + rest.length + ' 个账号，展开</button></td></tr>' +
         rest.map(r => rowOf(r, true)).join('') : '');
+  // 数据节奏透明化：界面 5 秒轮询，但卡片只随余额后台刷新更新（默认每 5 分钟）。
+  const iv = Number(d && d.balance_refresh_sec) || 0;
+  const at = d && d.balance_refreshed_at ? new Date(d.balance_refreshed_at).getTime() : 0;
+  let cadence = '未开启后台刷新';
+  if (iv > 0) {
+    cadence = '每 ' + (iv % 60 === 0 ? iv / 60 + ' 分钟' : iv + ' 秒') + '后台刷新';
+    if (Number.isFinite(at) && at > 0) {
+      const min = Math.floor((Date.now() - at) / 60000);
+      cadence += '，' + (min < 1 ? '刚刚更新' : min + ' 分钟前更新');
+    }
+  }
   $('expNote').textContent = rows.length
-    ? rows.length + ' 个账号有未到期批次 · 只列最早一批，全部批次见「积分构成」'
+    ? rows.length + ' 个账号有未到期批次 · ' + cadence + ' · 明细见「积分构成」'
     : '暂无未来到期批次';
 }
 

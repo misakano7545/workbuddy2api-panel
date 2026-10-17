@@ -673,11 +673,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
       </div>
 
-      <!-- 到期提醒：数据取 /overview 的 credits_earliest_expiry（签到与余额后台刷新
-           写入 state.json），打开页面零上游请求。只报最早一批，完整批次在「积分构成」页。 -->
+      <!-- 到期提醒：数据取 /overview 的 credits_expiry_buckets（签到与余额后台刷新
+           按自然日聚合后写入 state.json），打开页面零上游请求。同日多个包合并为一行，
+           后续批次在日期下方列出；完整逐包明细在「积分构成」页。 -->
       <div class="box">
         <header>
-          <h3>积分到期提醒 <span class="hint">按最近到期批次估算 · 日均需耗 = 该批剩余 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
+          <h3>积分到期提醒 <span class="hint">按自然日聚合 · 日均需耗 = 该日到期积分 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
           <span class="grow"></span>
           <span class="note" id="expNote"></span>
         </header>
@@ -685,7 +686,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <table class="acc">
           <thead><tr>
             <th>账号</th><th>最近到期</th><th class="num">距到期</th>
-            <th class="num">该批剩余</th><th class="num">日均需耗</th>
+            <th class="num">该日到期</th><th class="num">日均需耗</th>
           </tr></thead>
           <tbody id="expBody"></tbody>
         </table>
