@@ -192,15 +192,9 @@ func rates(m map[string]map[string]string) func(realm, model string) string {
 	return func(realm, model string) string { return m[realm][model] }
 }
 
-// TestCreditFloorBlocksUnobservedPaidModelByCatalogRate 实案回归（kimi-k3-1）：
-// 某模型**全池无实测观测**（tier 1）时，仅看本地台账会恒判「放行」——而该模型
-// 在上游目录里是明确收费的（x1.62），两笔就能把 100 分的号打穿到 0 并硬冷却
-// 到次日 04:00。目录倍率必须堵住这个洞。
-//
-// 用**单账号**断言而非「多账号看选中谁」：后者会被权重/随机源干扰——即便 floor
-// 失效，rich 也可能因为权重高而被选中，测试假绿（实测踩到过）。单账号池里
-// 「返回 nil」与「返回 poor」是 floor 生效与否的干净二分。
-func TestCreditFloorBlocksUnobservedPaidModelByCatalogRate(t *testing.T) {
+// TestCreditFloorAllowsUnobservedModelEvenWithCatalogRate 未建立本地账本时，
+// 即使模型目录带有收费倍率，也不能把首个请求拦掉；首个成功请求负责建立账本。
+func TestCreditFloorAllowsUnobservedModelEvenWithCatalogRate(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
@@ -216,14 +210,8 @@ func TestCreditFloorBlocksUnobservedPaidModelByCatalogRate(t *testing.T) {
 	p.SetCredits("poor", 30, 0) // 触底
 	// 刻意**不**调 NoteModelCost：无实测观测（实案形态）。
 
-	if a := p.PickExcludingForRealm(nil, "kimi-k3-1", "global"); a != nil {
-		t.Fatalf("触底号应被目录倍率 x1.62 拦住（无观测不得等同放行），got %v", a)
-	}
-
-	// 对照：回血越过 floor 即恢复可选（证明拦截确实由 floor 触发，而非模型被禁）。
-	p.SetCredits("poor", 500, 0)
-	if a := p.PickExcludingForRealm(nil, "kimi-k3-1", "global"); a == nil {
-		t.Fatal("回血越过 floor 后应恢复可选，got nil")
+	if a := p.PickExcludingForRealm(nil, "kimi-k3-1", "global"); a == nil || a.UID != "poor" {
+		t.Fatalf("账本缺失时目录倍率不得阻断调用，got %v", a)
 	}
 }
 
@@ -316,9 +304,9 @@ func TestCreditFloorLocalLedgerFreeBeatsCatalogPaid(t *testing.T) {
 	}
 }
 
-// TestCreditFloorStickyBlockedByCatalogRate 粘性路径同判据：粘性号触底 + 目录判
-// 收费 → PickByUIDForModel 返回 nil，handler 解绑换号（避免钉在打穿的号上）。
-func TestCreditFloorStickyBlockedByCatalogRate(t *testing.T) {
+// TestCreditFloorStickyAllowsUnobservedCatalogModel 粘性路径同样不能因目录倍率
+// 而阻断未建立本地成本账本的首个请求。
+func TestCreditFloorStickyAllowsUnobservedCatalogModel(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
@@ -332,13 +320,8 @@ func TestCreditFloorStickyBlockedByCatalogRate(t *testing.T) {
 	p.Add(g)
 	p.SetCredits("poor", 30, 0)
 
-	if a := p.PickByUIDForModel("poor", "kimi-k3-1"); a != nil {
-		t.Fatalf("粘性号触底且目录判收费应返回 nil（解绑换号），got %v", a)
-	}
-	// 回血后恢复：越过 floor 即放行。
-	p.SetCredits("poor", 500, 0)
-	if a := p.PickByUIDForModel("poor", "kimi-k3-1"); a == nil {
-		t.Fatal("回血越过 floor 后粘性号应恢复可选，got nil")
+	if a := p.PickByUIDForModel("poor", "kimi-k3-1"); a == nil || a.UID != "poor" {
+		t.Fatalf("粘性号首个调用不应被目录倍率阻断，got %v", a)
 	}
 }
 
@@ -352,12 +335,12 @@ func TestCreditFloorBlocksFallbackPath(t *testing.T) {
 	p := New("")
 	p.SetCostExploreInterval(0)
 	p.SetCreditFloor(150)
-	p.SetModelRateOf(rates(map[string]map[string]string{"global": {"kimi-k3": "1.62"}}))
 
 	poor := &auth.Auth{UID: "poor"}
 	auth.BackfillRealmFor(poor, "global")
 	p.Add(poor)
 	p.SetCredits("poor", 1, 0)
+	p.NoteModelCost("poor", "kimi-k3", 1.62, 1000)
 	// 置入软冷却：让 healthy 候选为空，强制走兜底路径。
 	p.Cooldown("poor", CoolSoft, 2*time.Minute, "test")
 
@@ -373,12 +356,12 @@ func TestCreditFloorFallbackAllowsFreeModel(t *testing.T) {
 	p := New("")
 	p.SetCostExploreInterval(0)
 	p.SetCreditFloor(150)
-	p.SetModelRateOf(rates(map[string]map[string]string{"global": {"hy3": "0.00"}}))
 
 	poor := &auth.Auth{UID: "poor"}
 	auth.BackfillRealmFor(poor, "global")
 	p.Add(poor)
 	p.SetCredits("poor", 1, 0)
+	p.NoteModelCost("poor", "hy3", 0, 1000)
 	p.Cooldown("poor", CoolSoft, 2*time.Minute, "test")
 
 	if a := p.PickExcludingForRealm(nil, "hy3", "global"); a == nil {

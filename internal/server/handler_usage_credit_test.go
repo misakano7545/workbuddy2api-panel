@@ -50,12 +50,6 @@ func TestUsageCreditTotalMissingCreditDoesNotCreateFreeModelObservation(t *testi
 	defer p.Close()
 	p.SetCostExploreInterval(0)
 	p.SetCreditFloor(100)
-	p.SetModelRateOf(func(realm, model string) string {
-		if realm == "global" && model == "deepseek-v4.1-flash" {
-			return "0.03"
-		}
-		return ""
-	})
 
 	oldGlobal := auth.GlobalEnabled()
 	auth.SetGlobalEnabled(true)
@@ -73,8 +67,8 @@ func TestUsageCreditTotalMissingCreditDoesNotCreateFreeModelObservation(t *testi
 	if !ok || len(status.ModelCosts) != 0 {
 		t.Fatalf("missing credit must not create a free observation: status=%+v ok=%v", status, ok)
 	}
-	if got := p.PickExcludingForRealm(nil, "deepseek-v4.1-flash", "global"); got != nil {
-		t.Fatalf("catalog-paid model below credit floor must remain blocked, got %v", got.UID)
+	if got := p.PickExcludingForRealm(nil, "deepseek-v4.1-flash", "global"); got == nil {
+		t.Fatal("missing credit must not block the first call needed to establish the cost ledger")
 	}
 }
 
@@ -85,7 +79,6 @@ func TestUsageCreditTotalAcceptsAndRecordsConfirmedZero(t *testing.T) {
 	defer p.Close()
 	p.SetCostExploreInterval(0)
 	p.SetCreditFloor(100)
-	p.SetModelRateOf(func(realm, model string) string { return "0.03" })
 	p.Add(&auth.Auth{UID: "poor"})
 	p.SetCredits("poor", 99, 0)
 

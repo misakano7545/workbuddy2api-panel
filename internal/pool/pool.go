@@ -47,13 +47,11 @@ type Pool struct {
 	// 账号 credits < floor 时不再参与选号——防止收费请求把余额打穿、连免费模型都
 	// 402 冷却到次日签到。签到回血（SetCreditsDetailed）越过 floor 即自动恢复。
 	// 全池触底且无免费模型可接时选号返回 nil（硬语义：宁 503 不打穿）。
-	// 收费与否的判据见 floorBlockedForModel：本地实测台账优先，缺失时用上游目录
-	// 倍率（modelRateOf 注入）兜底，避免「无观测的高价新模型」绕过保底。
+	// 收费与否的判据见 floorBlockedForModel：仅使用本地有效实测台账。
+	// 没有有效成本账本的模型必须保持可调用，成功请求后再建立观测。
 	creditFloor int64
-	// modelRateOf 按 (realm, 模型) 查上游目录积分倍率（"0.79" / "" = 未知）。
-	// 由 main 用 upstream.Client.ModelRate 注入——pool 不依赖 upstream 包（避免
-	// 循环依赖与分层破坏），nil 时倍率兜底不生效（退化为仅本地台账判定）。
-	// 仅在持 p.mu 时由 floorBlockedForRealmModel 调用；回调不得反向调用 Pool 方法。
+	// modelRateOf 保留用于兼容旧装配和测试注入，但不参与选号保底判定。
+	// 目录倍率不是本地成本账本，不能把“未建立账本”变成跳过调用的条件。
 	modelRateOf func(realm, model string) string
 	// 加权路由的闲置补偿调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
@@ -285,11 +283,9 @@ func (p *Pool) SetCreditFloor(n int64) {
 	}
 }
 
-// SetModelRateOf 注入上游目录积分倍率查表（main 用 upstream.Client.ModelRate 装配）。
-// 供积分保底兜底判定「未实测过的模型是否收费」——本地台账无观测时，不能因为
-// 「没学过」就放行，否则高价新模型会把触底号一次性打穿（kimi-k3-1 实案：
-// 全池无观测 → 保底全部放行 → 两笔扣 111 分打穿到 0 并硬冷却到次日 04:00）。
-// fn 可为 nil（清注入）；回调只在持 p.mu 时被调用，不得反向调用 Pool 方法。
+// SetModelRateOf 保留旧版装配兼容性，但目录倍率不再参与积分保底判定。
+// 未建立有效本地成本账本的模型必须允许首个请求通过，以便成功后建立账本。
+// fn 可为 nil（清注入）。
 func (p *Pool) SetModelRateOf(fn func(realm, model string) string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
