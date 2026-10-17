@@ -712,7 +712,7 @@ func (s *Scheduler) RunKeepaliveNow() {
 			continue
 		}
 		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
-		if err := a.SaveAtomic(); err != nil {
+		if err := a.SaveAtomicRetry(); err != nil {
 			log.Printf("WARN: keepalive %s save: %v", logfmt.Label(st.UID, st.Nickname), err)
 		}
 	}
