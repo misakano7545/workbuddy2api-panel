@@ -1192,15 +1192,23 @@ func (c *Client) webBase(a *auth.Auth) string {
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
+	ctx := req.Context()
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
+		// 传输层失败（EOF / reset / 握手超时）→ 出口坏，喂熔断
+		reportProxyResult(ctx, false)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
+		// 响应体读到一半断流，同样归出口问题
+		reportProxyResult(ctx, false)
 		return nil, fmt.Errorf("read body: %w", err)
 	}
+	// 到这里 TCP + HTTP 往返已完整：出口是通的。下面即便 4xx/5xx 也是上游
+	// 对账号的业务判定，不该让出口背锅。
+	reportProxyResult(ctx, true)
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
 		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
@@ -1571,6 +1579,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			timing.Do += max(time.Since(doStart), time.Nanosecond)
 		}
 		if err != nil {
+			reportProxyResult(reqCtx, false) // 传输层失败 → 出口坏
 			cancel()
 			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
 			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固）：失败连接可能仍
@@ -1586,9 +1595,11 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			// body 读失败（掐流/截断）→ 传输层错误：半截 raw 不交回调用方进 Classify，
 			// 否则 handler 侧 applyErrorPolicy 会按误判分类罚号。
 			if rerr != nil {
+				reportProxyResult(reqCtx, false) // 断流读失败 → 出口坏
 				log.Printf("ERR: [upstream] chat_stream acct=%s: read body: %v", logfmt.Label(a.UID, a.Nickname), rerr)
 				return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
 			}
+			reportProxyResult(reqCtx, true) // HTTP 往返完整：出口健康，业务错误不背锅
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
@@ -1614,6 +1625,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
+		reportProxyResult(reqCtx, true) // 2xx 建流成功 → 出口健康
 		body := c.dumpUpstream(monitorBody(resp.Body, c.IdleTimeout, cancel), prepared, a)
 		return body, resp.StatusCode, nil, nil
 	}

@@ -225,6 +225,26 @@ func (p *Pool) pickHealthyLocked() *entry {
 	return nil
 }
 
+// Peek 返回 uid 当前已绑定的出口 raw，**不做任何分配**（未绑定返回空串）。
+//
+// 用途：Transport.Proxy 只负责选路，拿不到请求成败；健康度必须在请求出口处
+// （doJSON / ChatStreamContext）回写。那里只有 *http.Request，只能靠 uid 反查
+// 「本次实际走的哪个出口」——用 Pick 反查会连带做分配，属副作用，故单列 Peek。
+//
+// 仅 per_account 模式有绑定表，round_robin / off 恒返回空串（该模式不统计健康度）。
+func (p *Pool) Peek(uid string) string {
+	if uid == "" {
+		return ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.assign[uid]
+	if !ok || e == nil {
+		return ""
+	}
+	return e.raw
+}
+
 // Report 上报一次出口使用结果。成功清零失败计数；失败累加，达阈值标记 dead。
 func (p *Pool) Report(raw string, ok bool) {
 	if raw == "" {

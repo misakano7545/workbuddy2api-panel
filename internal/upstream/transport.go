@@ -164,6 +164,34 @@ func newTransport() *http.Transport {
 	}
 }
 
+// reportProxyResult 把一次出站请求的**链路层**结果回写给代理池健康度。
+//
+// 为什么挂在这里而不是 Transport.Proxy：Proxy 回调只负责「选哪个出口」，
+// 它的返回值在标准库里被 roundTrip 内部消费，业务层拿不到请求成败 ——
+// 想让「连续失败 3 次自动熔断」真正生效，必须在请求出口处（doJSON /
+// ChatStreamContext）显式回写。此前该函数缺失，导致 entry.ok/fail 恒 0、
+// dead 恒 false，整套熔断避让形同虚设（10-19 实测 23:45 单节点 16 号齐刷刷 EOF，
+// 面板节点表 ok/fail 始终显示 0）。
+//
+// 语义边界（关键）：只有**传输层**失败才算出口坏 —— Do 返回错误（EOF /
+// connection reset / 握手超时）、或响应体读到一半断流。HTTP 4xx/5xx 一律算
+// 出口健康：429/401/402 是上游对账号的业务判定，跟出口线路无关；算成失败的话
+// 一次批量限流就能把 22 个出口全熔断，反而更糟。
+//
+// uid 从 ctx 取（BillingHeaders / CommonHeaders / ChatHeaders 注入），出口 raw 用
+// Peek 反查（只查不分配，避免反查本身产生副作用）。非 per_account 模式无绑定表，
+// 静默跳过（round_robin 本就不保证固定出口，统计健康度无意义）。
+func reportProxyResult(ctx context.Context, ok bool) {
+	uid := proxypool.UIDFrom(ctx)
+	if uid == "" {
+		return
+	}
+	p := proxypool.Default()
+	if raw := p.Peek(uid); raw != "" {
+		p.Report(raw, ok)
+	}
+}
+
 // closeIdler 实现该接口的 RoundTripper 支持清空空闲连接池（*http.Transport、
 // http2.Transport 等均满足；测试注入的自定义 RoundTripper 可选择性实现）。
 type closeIdler interface {
