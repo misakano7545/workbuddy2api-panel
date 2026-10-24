@@ -33,6 +33,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/scheduler"
 	"github.com/misakano7545/workbuddy2api-panel/internal/server"
 	"github.com/misakano7545/workbuddy2api-panel/internal/session"
+	"github.com/misakano7545/workbuddy2api-panel/internal/updater"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 	"github.com/misakano7545/workbuddy2api-panel/internal/usage"
 )
@@ -40,6 +41,7 @@ import (
 // appVersion 面板版本，透出到 /panel/api/overview。
 // 本地构建保持 dev。发布构建由 CI 用 -X 注入上海时间（2026.9.26.711），不跟上游 1.x。
 var appVersion = "dev"
+var appRepository = "misakano7545/workbuddy2api-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -56,6 +58,13 @@ func stateSibling(stateFile, name string) string {
 }
 
 func main() {
+	if handled, err := updater.HandleSelfUpdate(os.Args); handled {
+		if err != nil {
+			log.Printf("[updater] %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
 	// 实际生效的配置路径：下面退回「默认+env」时清空，免得启动横幅报了份没读到的文件（issue #155）。
 	loadedFrom := *cfgPath
@@ -348,6 +357,10 @@ func main() {
 	up.SetCreditObserver(creditHist.Observe)
 	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
 
+	updateManager := updater.New(appVersion, appRepository, *cfgPath, updater.Settings{
+		AutoEnabled: cfg.Update.AutoEnabled,
+		AutoTime:    cfg.Update.AutoTime,
+	})
 	var pn *panel.Panel
 	pn = panel.New(panel.Config{
 		Pool:       p,
@@ -366,6 +379,7 @@ func main() {
 		RedisMode:        redisMode,
 		StickyCount:      sessCount,
 		Version:          appVersion,
+		Updater:          updateManager,
 		Live:             live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
@@ -377,7 +391,19 @@ func main() {
 		SaveConfig: func(raw []byte) ([]string, error) {
 			configSaveMu.Lock()
 			defer configSaveMu.Unlock()
-			return saveConfig(raw, *cfgPath, live, p, up, sch, gw, pn, cfg)
+			fields, err := saveConfig(raw, *cfgPath, live, p, up, sch, gw, pn, cfg)
+			if err != nil {
+				return nil, err
+			}
+			if saved, loadErr := Load(*cfgPath); loadErr == nil {
+				updateManager.Configure(updater.Settings{
+					AutoEnabled: saved.Update.AutoEnabled,
+					AutoTime:    saved.Update.AutoTime,
+				})
+			} else if loadErr != nil {
+				log.Printf("WARN: reload update settings: %v", loadErr)
+			}
+			return fields, nil
 		},
 		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
 		CreditHistory: creditHist,
@@ -439,6 +465,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	updateManager.SetRestart(stop)
+	go updateManager.Run(ctx)
 	// 账号后台任务（taskjobs）：状态与主 state 同目录，重启后自动恢复未完成作业。
 	if err := pn.StartTaskJobs(ctx, stateSibling(cfg.StateFile, "task-jobs.json")); err != nil {
 		log.Fatalf("task jobs: %v", err)
@@ -493,7 +521,9 @@ func main() {
 		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。
 		IdleTimeout: 120 * time.Second,
 	}
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -504,6 +534,9 @@ func main() {
 	log.Print(listenBanner(cfg.Listen, loadedFrom, cfg.APIKey))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
+	}
+	if ctx.Err() != nil {
+		<-shutdownDone
 	}
 	log.Printf("bye")
 }

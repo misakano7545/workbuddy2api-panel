@@ -426,6 +426,8 @@ curl -s http://localhost:7863/v1/responses \
 | `dns_servers` | `[]` | 出站解析用的 DNS 服务器（`["223.5.5.5","119.29.29.29"]`；也可用 `WB2A_DNS` 逗号分隔覆盖）。空 = 系统解析器。给没有 `/etc/resolv.conf` 的环境用（Android 上 Go 解析器会退回 `[::1]:53`，所有域名解析失败），本地 DNS 被污染时也可借此直连可信解析器。改动需重启 |
 | `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
 | `panel.package_detail_limit` | `5` | 积分构成页单账号默认展示的最早到期包数；其余未用完包与已用完包聚合折叠 |
+| `update.auto_enabled` | `false` | 是否每天按上海时间自动检查并安装新的时间标签版 Release；仅原生 Linux / Windows `amd64` / `arm64` 二进制支持原地更新 |
+| `update.auto_time` | `04:00` | 自动更新时间，格式 `HH:MM`，按上海时间执行；容器 / systemd 等托管部署会检测版本但需手动更新镜像或下载 Release |
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
 | `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
@@ -789,14 +791,16 @@ http://127.0.0.1:7863/panel/
 | **积分任务**（账号行内「任务」按钮） | 展示全部任务（进度 / 奖励分数与能量 / 状态）；「全部接受」批量报名；「一键完成」覆盖 **17 个任务**（推进进度 + 异步计分等待 + **自动领奖**，幂等可重复点）；其余任务展示操作指引 |
 | **模型与档位** | 实时查询上游：每模型的积分倍率、默认思考档、支持的档位（含「off（可关）」）、上下文长度与最大输出；若存在探测数据，最大输出列显示**实测上限与钳制告警**（见「探测模型真实输出上限」）。列表支持**按条件查询**：关键词（ID / 名称 / 描述 / 厂商，空格分词 AND）、域（CN / Global）、能力（工具 / 视觉 / 思考 / 默认）、思考档位、价格（折扣 / 限时免费 / 打折），以及按倍率、上下文、最大输出、ID 排序。**出图模型的倍率另有口径**：真实单价在每次出图回执 `usage.credit` 里，上游目录对出图模型**已基本不再报牌价**——CN `hunyuan-image-alpha` 实扣固定 **5.71/张**（与尺寸、画质、`n` 无关，回执带 `output_image_coefficient:1`），global `hy-image-3.5` 实扣固定 **0.27/张**（low/medium/high × 512/1024/1536 六档同价；回执恒 `output_image_tokens:15000` 但不带 coefficient——**token 数不代表单价**，按 token 反推价格会算错）。旧的 global `gpt-image-2.5-sunburst` 已下架（`400 code=14401 route config not found`），不再列出。面板因此把「牌价」与「实扣」分列，并按尺寸×画质分档显示（`charge_variants`），不用均值互相覆盖 |
 | **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败 / 平均延迟）+ Token 时序图（渐变柱、均值线、峰值标注）+ 用量明细（按账号 / 模型 / 域切换）+ 积分扣除历史。**时间范围**支持 今天 / 近 24 小时 / 近 3 天 / 近 7 天 / 近 30 天 / 全部历史 / **自定义区间**（精确到分钟），卡片、表格与图表全部按同一窗口统计 |
-| **配置** | 在线编辑 config.json：API 密钥、定时任务（四类任务时点与开关、余额刷新间隔）、账号池与流量治理参数、上游超时与 UA、提示词模式、脱敏/粘性开关、日志来源记录开关 |
+| **配置** | 在线编辑 config.json：API 密钥、版本更新（自动更新开关与上海时间）、定时任务（四类任务时点与开关、余额刷新间隔）、账号池与流量治理参数、上游超时与 UA、提示词模式、脱敏/粘性开关、日志来源记录开关 |
 | **运行日志** | **请求记录表**（时间 / 结果 / 模型 / 账号 / **来源 IP** / **User-Agent** / 耗时 / Token / 积分 / 请求 ID），支持关键词与结果筛选、读取条数，以及 今天 / 近 24 小时 / 近 7 天 / **自定义区间**等**时间范围**查询（由归档侧按时间取，不是筛已拉取的条目）+ 最近 500 行服务日志（按任务 / 对话 / 系统分频道，可开关自动滚动），并新增 **积分历史**（每次真实查到余额与上次比对，变动即留痕） |
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
-`models.hidden`、`models.aliases`、`logging.request_client_info`、`pool.*`（熔断/在途/权重/保底倍率上限）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
+`models.hidden`、`models.aliases`、`logging.request_client_info`、`pool.*`（熔断/在途/权重/保底倍率上限）、`schedule.*`（时点/开关/余额刷新间隔）、`update.*`（自动更新时间）**立即生效，无需重启**；
 涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`、`admin`、`metrics`、`alerting`）
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。
+
+面板左上角会显示当前版本；启动后会定期查询 GitHub Release，发现更新时显示提醒。设置页可手动检查、打开 Release 或一键更新。更新前会校验 GitHub SHA-256 摘要并在替换失败时恢复旧程序；Docker、systemd / Windows 服务等托管环境只提示手动更新，避免覆盖由宿主机或镜像管理的程序文件。
 
 顶部「刷新」按钮 = 向上游全量查询真实余额并回写（5 秒自动轮询只读内存，不打上游）。
 

@@ -20,6 +20,26 @@ func TestDefault(t *testing.T) {
 	if c.SoftRateDur.Seconds() != 600 {
 		t.Errorf("soft=%v want 600s", c.SoftRateDur)
 	}
+	if c.Update.AutoEnabled {
+		t.Error("update.auto_enabled default should be false")
+	}
+	if c.Update.AutoTime != "04:00" {
+		t.Errorf("update.auto_time=%q want 04:00", c.Update.AutoTime)
+	}
+}
+
+func TestUpdateAutoTimeValidation(t *testing.T) {
+	for _, value := range []string{"4:00", "+0:00", "24:00", "12:60", "noon"} {
+		if _, err := ParseConfig([]byte(`{"update":{"auto_time":"` + value + `"}}`)); err == nil {
+			t.Fatalf("auto_time %q should be rejected", value)
+		}
+	}
+	for _, value := range []string{"00:00", "04:00", "23:59"} {
+		c, err := ParseConfig([]byte(`{"update":{"auto_time":"` + value + `"}}`))
+		if err != nil || c.Update.AutoTime != value {
+			t.Fatalf("auto_time %q parse failed: cfg=%+v err=%v", value, c, err)
+		}
+	}
 }
 
 func TestPanelPackageDetailLimit(t *testing.T) {

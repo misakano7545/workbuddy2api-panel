@@ -10,6 +10,10 @@
   "panel": {
     "package_detail_limit": 5
   },
+  "update": {
+    "auto_enabled": false,
+    "auto_time": "04:00"
+  },
   "logging": {
     "request_archive_enabled": true,
     "request_retention_days": 7,

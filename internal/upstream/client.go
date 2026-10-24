@@ -1417,7 +1417,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// （官方桌面端头与体都带 conversationRequestId）。见 conv_fields.go。
 	prepared = injectConversationFields(prepared, meta.ConversationRequestID)
 	if timing != nil {
-		timing.Prep += time.Since(prepStart)
+		// Zero means unmeasured; coarse clocks can report zero for completed work.
+		timing.Prep += max(time.Since(prepStart), time.Nanosecond)
 		timing.RequestedEffort = requested // 客户端原始档位（未携带 → 空）
 		timing.Effort = effort             // 生效档位（可能被降级；空 = 未参与降级）
 	}
@@ -1441,7 +1442,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		doStart := time.Now()
 		resp, err := c.chatHTTP().Do(req)
 		if timing != nil {
-			timing.Do += time.Since(doStart)
+			timing.Do += max(time.Since(doStart), time.Nanosecond)
 		}
 		if err != nil {
 			cancel()

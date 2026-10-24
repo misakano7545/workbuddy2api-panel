@@ -32,6 +32,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/scheduler"
+	"github.com/misakano7545/workbuddy2api-panel/internal/updater"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 	"github.com/misakano7545/workbuddy2api-panel/internal/usage"
 )
@@ -47,6 +48,7 @@ type Config struct {
 	APIKey           string // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
 	RedisMode        string // "upstash" / "noop"，仅观测透出
 	Version          string // 面板版本号（展示用）
+	Updater          *updater.Manager
 
 	// Live 运行期可变配置（在线改配置立即生效）。
 	Live *livecfg.Holder
@@ -243,6 +245,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))
+	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.checkUpdate))
+	p.mux.HandleFunc("POST /panel/api/update/install", p.withAuth(p.installUpdate))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
@@ -309,6 +314,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":         p.cfg.Version,
+		"update":          p.updateSnapshot(),
 		"uptime_sec":      int(time.Since(p.started).Seconds()),
 		"auth_required":   p.apiKey() != "",
 		"redis_mode":      p.cfg.RedisMode,
@@ -346,6 +352,13 @@ func (p *Panel) balanceRefreshedAt() time.Time {
 		return time.Time{}
 	}
 	return p.cfg.Scheduler.BalanceRefreshedAt()
+}
+
+func (p *Panel) updateSnapshot() any {
+	if p.cfg.Updater == nil {
+		return nil
+	}
+	return p.cfg.Updater.Status()
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
