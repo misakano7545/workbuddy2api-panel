@@ -2612,3 +2612,30 @@ func TestModelsHiddenFiltered(t *testing.T) {
 		t.Errorf("hidden model leaked into /v1/models: ids=%v", ids)
 	}
 }
+
+// 裸模型名默认落 cn 域（resolveModel）：池里只有 global 号时选号必然失败，而固定
+// hint 指向的 /status 永远是健康的 —— 客户端据此只会一直重试。noHealthyHint 应把
+// 「该怎么写」直接告诉客户端；显式带前缀或另一域也没有号时，一律退回固定文案。
+func TestNoHealthyHintPointsAtRealmPrefix(t *testing.T) {
+	globalPool := testPoolWith(&auth.Auth{
+		UID: "g1", AccessToken: "at-g1", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai",
+	})
+	h := NewHandler(Config{Pool: globalPool})
+
+	want := `model "glm-5.3" is only available in the global realm; retry with "global:glm-5.3"`
+	if got := h.noHealthyHint("glm-5.3", "cn", "glm-5.3"); got != want {
+		t.Fatalf("裸名 hint = %q, want %q", got, want)
+	}
+
+	// 显式带前缀：前缀不是它失败的原因，建议换域反而误导
+	if got := h.noHealthyHint("global:glm-5.3", "global", "glm-5.3"); got != upstream.NoHealthyAccountHint() {
+		t.Errorf("显式前缀不应改写 hint，got %q", got)
+	}
+
+	// 池里只有 cn 号：另一域无号可服务，不得断言模型在那边可用
+	cnPool := testPoolWith(&auth.Auth{UID: "c1", AccessToken: "at-c1", ExpiresAt: 9999999999})
+	h2 := NewHandler(Config{Pool: cnPool})
+	if got := h2.noHealthyHint("glm-5.3", "cn", "glm-5.3"); got != upstream.NoHealthyAccountHint() {
+		t.Errorf("另一域无健康号时应退回固定文案，got %q", got)
+	}
+}

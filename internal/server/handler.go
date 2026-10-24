@@ -1588,8 +1588,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 自己的 quota 错误口径；客户端据此不重试）。
 	quota := false
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
-	// 错误（无上游原文）固定 no_healthy_account hint。
-	hint := upstream.NoHealthyAccountHint()
+	// 错误（无上游原文）走 noHealthyHint —— 裸名落错域时改写成带前缀的指引。
+	hint := h.noHealthyHint(routeModel, realm, bareModel)
 	// upstreamMsgPassed 记录 error.message 是否已被上游原文占据：模型级阻塞分支
 	// 据此决定要不要覆盖 msg（上游原文优先，含 requestId）。
 	upstreamMsgPassed := false
@@ -2211,6 +2211,28 @@ func (h *Handler) hintContext(bareModel string, hasImage bool) upstream.HintCont
 // gateway_hint 文案（upstream.GatewayHint 单一事实来源）。uerr 为 nil 时回落
 // body 原文判定（防御路径）。transport 层错误（lastErr 非 *upstream.Error 且
 // 上游没回 body）→ 无 hint（不编造）。
+// noHealthyHint 选号失败（no_healthy_account）的 gateway_hint。
+//
+// 裸模型名默认落 cn 域：池里若只有另一域的号，选号必然失败，而固定文案指向的
+// /status 永远是健康的——客户端据此只会一直重试，看不到真正该改的是模型名。
+// 这里在「请求确实是裸名」且「另一域有该模型的健康号」时，改写成可操作的带前缀
+// 写法；其余情况一律退回固定文案（不编造能力事实）。
+//
+// 显式带前缀的请求不做改写：前缀不是它失败的原因，建议换域反而误导。
+func (h *Handler) noHealthyHint(routeModel, realm, bareModel string) string {
+	if routeModel != bareModel {
+		return upstream.NoHealthyAccountHint()
+	}
+	other := "global"
+	if realm == "global" {
+		other = "cn"
+	}
+	if len(h.cfg.Pool.AvailableUIDsForModelRealm(bareModel, other)) > 0 {
+		return upstream.NoHealthyAccountHintForModel(bareModel, other)
+	}
+	return upstream.NoHealthyAccountHint()
+}
+
 func (h *Handler) hintOf(kind upstream.ErrKind, body, bareModel string, hasImage bool, uerr *upstream.Error) string {
 	msg := body
 	if uerr != nil && uerr.Msg != "" {
