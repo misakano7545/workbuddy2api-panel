@@ -60,6 +60,7 @@ assert(start>=0&&end>start);
   const hosts={cfgForm:{},btnCfgSave:{},cfgKey:{value:'submitted-key'},cfgNote:{}};
   let saved='environment-key';
   const ctx={$:id=>hosts[id],DURATION_FIELDS:[],durationBad:()=>false,markDurationFields(){},collectConfig:()=>({api_key:'submitted-key'}),
+   FALLBACK_FIELDS:[],fallbackBad:()=>false,FALLBACK_TIP:'',
    api:async()=>({restart_required:[],api_key_env_managed:managed}),
    localStorage:{setItem:(_,value)=>{saved=value}},LS_KEY:'key',toast(){},loadOverview(){},
    loadConfig:async()=>{assert.equal(saved,managed?'environment-key':'submitted-key')},JSON};
