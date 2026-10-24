@@ -1,6 +1,11 @@
 services:
   wb2api:
-    build: .
+    build:
+      context: .
+      # 面板版本号注入（编译期 -X main.appVersion）。留空时 build 阶段回落 dev，
+      # 与本地 go build 一致；想显示版本号就在 .env 里写 APP_VERSION=2026.10.22.2343。
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     container_name: workbuddy2api
     restart: unless-stopped
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致

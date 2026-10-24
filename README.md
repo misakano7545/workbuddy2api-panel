@@ -310,7 +310,8 @@ docker compose down             # 停止并移除容器（数据在 ./auths 与 
 
 ```powershell
 # 1) 下载 Release 中的 wb2api.exe，或从源码构建
-go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
+#    APP_VERSION 决定面板左下角显示的版本号；不传则显示 vdev
+go build -trimpath -ldflags="-s -w -X main.appVersion=${APP_VERSION:-dev}" -o wb2api.exe ./cmd/server
 
 # 2) 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
 .\wb2api.exe -config config.json
@@ -333,7 +334,7 @@ go run ./cmd/server -config config.json
 构建全部二进制：
 
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.appVersion=${APP_VERSION:-dev}" -o wb2api ./cmd/server
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
@@ -900,6 +901,7 @@ completion 的七到九成。
 - 以 `app` 用户（uid 10001）运行，`app/auths` 与 `app/data` 预建
 - 镜像内默认落 `config.example.json` 作为空配置（不含密钥），生产用挂载卷覆盖 `/app/config.json`
 - 内置 `HEALTHCHECK`（`wget /healthz`，30s 间隔）
+- 面板版本号由 `APP_VERSION` build-arg 注入；`docker compose build` 会自动传，手动 `docker build` 不传则显示 `vdev`
 
 账号 / 数据通过 `docker-compose.yml` 卷挂载持久化：`./auths`、`./data`、`./config.json`。
 

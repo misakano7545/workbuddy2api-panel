@@ -1,11 +1,15 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.26.10-alpine AS build
 WORKDIR /src
+
+# 版本号注入：与 .github/workflows/binaries.yml 保持一致（-X main.appVersion）。
+# 不传则保持 dev，与本地 go build 行为一致。
+ARG APP_VERSION=dev
 COPY go.mod ./
 RUN go mod download
 COPY . .
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.appVersion=${APP_VERSION}" -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit
