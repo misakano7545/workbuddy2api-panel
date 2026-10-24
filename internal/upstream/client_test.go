@@ -140,13 +140,16 @@ func TestClassify(t *testing.T) {
 		// 其他业务码不劫持（不许把网关 401 的判定扩张到带信封的响应）。
 		{401, `{"code":12153,"msg":"12153:refresh token is invalid"}`, ErrSessionDead},
 		{401, `{"code":1,"msg":"unknown business error"}`, ErrClient},
-		// 6021「queue.full.title」渠道级准入队列满：任意状态码都判 upstream_busy
-		//（防上游换状态码），结构化 code 主判、requestId 含 "6021" 不误伤。
+		// 6020「queue.waiting.title」/ 6021「queue.full.title」渠道级排队/队列满：
+		// 任意状态码都判 upstream_busy（防上游换状态码），结构化 code 主判、
+		// requestId 含 "6020"/"6021" 不误伤。
+		{429, `{"code":6020,"msg":"queue.waiting.title","requestId":"01a16e3d95b4a000e3385c807c"}`, ErrUpstreamBusy},
 		{429, `{"code":6021,"msg":"queue.full.title","requestId":"341738971737c911985e5b9e67a4eceb"}`, ErrUpstreamBusy},
 		{500, `{"code":6021,"msg":"queue.full.title"}`, ErrUpstreamBusy},
 		// 防过宽：普通 429（无 queue 语义）仍是账号级软限流。
 		{429, `{"code":1,"msg":"too many requests"}`, ErrSoftRate},
 		{429, `{"requestId":"6021","msg":"rate limit"}`, ErrSoftRate},
+		{429, `{"requestId":"6020","msg":"rate limit"}`, ErrSoftRate},
 		// 11148 工具配对断裂：请求内容级（上游「直接重试无效，请新建任务」），
 		// 换号/重试必然同样失败——不得落 ErrClient 白轮转全池。
 		{400, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrToolMismatch},

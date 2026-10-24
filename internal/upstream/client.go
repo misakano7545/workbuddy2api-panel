@@ -45,7 +45,7 @@ const (
 	ErrImageInvalid                     // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrModelParamInvalid                // 11133「参数被模型供应商拒绝」（缺/空 messages、模型不支持图片等）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
 	ErrClient                           // 其他 4xx / 业务错误
-	ErrUpstreamBusy                     // 6021「queue.full.title」渠道级准入队列满 → 上游容量信号：不罚号、不轮转，末端 503 透传原文
+	ErrUpstreamBusy                     // 6020「queue.waiting.title」/ 6021「queue.full.title」渠道级排队/队列满 → 上游容量信号：不罚号、不轮转，末端 503 透传原文
 	ErrToolMismatch                     // 11148「tool calls and tool results do not match」 → 请求内容级配对断裂：不罚号、不轮转，末端 400 透传原文
 )
 
@@ -640,13 +640,14 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return ErrHardCredit
 	}
-	// 6021「queue.full.title」渠道级准入队列满：上游容量信号，不是账号限流。判在
-	// 429 兜底之前——按 ErrSoftRate 罚号会与全冷却兜底互相喂（兜底把冷却号再送
-	// 上游，再撞 6021 又续订 600s），把几秒的排队放大成整段时间全量 429
-	//（2026-10-15 实案：18 次全落 soft_rate，上游 PR #180/#185）。任意状态码都认
-	//（防上游换状态码）；结构化 code 主判，requestId 等字段恰好含 "6021" 不误伤
-	//（hasBusinessCode 只认 "code": 键）。
-	if hasBusinessCode(body, "6021") {
+	// 6020「queue.waiting.title」/ 6021「queue.full.title」渠道级排队/队列满：上游
+	// 容量信号，不是账号限流。判在 429 兜底之前——按 ErrSoftRate 罚号会与全冷却兜底
+	// 互相喂（兜底把冷却号再送上游，再撞又续订 600s），把几秒的排队放大成整段时间
+	// 全量 429（6021：2026-10-15 实案 18 次全落 soft_rate，PR #180/#185；6020：
+	// 2026-10-24 实案同样落 soft_rate 账号级冻结 600s）。两个 code 同族同判。
+	// 任意状态码都认（防上游换状态码）；结构化 code 主判，requestId 等字段恰好
+	// 含 "6020"/"6021" 不误伤（hasBusinessCode 只认 "code": 键）。
+	if hasBusinessCode(body, "6020") || hasBusinessCode(body, "6021") {
 		return ErrUpstreamBusy
 	}
 	// status==429 先于 hardMarkers：限流响应 body 高频携带 "quota exceeded"/
