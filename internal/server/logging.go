@@ -89,6 +89,10 @@ type chatStat struct {
 	effort    string
 	effortReq string
 
+	// modelEff 模型降级（pool.model_fallback）后**实际使用**的模型（与 effort/effortReq
+	// 同一哲学：请求值与实际生效值分开记录，未降级时为空）。
+	modelEff string
+
 	logged bool
 }
 
@@ -115,7 +119,7 @@ func (s *chatStat) done() {
 	logChatRowFull(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks,
 		s.think, s.cacheHit, s.cacheMiss, s.hasCache,
 		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit,
-		s.clientIP, s.userAgent, s.prep, s.do, s.effort, s.effortReq)
+		s.clientIP, s.userAgent, s.prep, s.do, s.effort, s.effortReq, s.modelEff)
 	s.budget.add(s.credit, s.hasCredit)
 	s.budget.observeCache(int64(s.cacheHit), int64(s.cacheMiss), s.hasCache)
 	noteProm(s, total)
@@ -605,6 +609,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		s := t.stat
 		e.Account = logfmt.Label(s.uid, s.nick)
 		e.Model = s.model
+		e.ModelEff = s.modelEff
 		e.Outcome = s.outcome
 		e.TTFBMs = s.ttfb.Milliseconds()
 		e.Attempts = s.attempts
@@ -694,7 +699,7 @@ const (
 //
 // logChatRow 旧形态（带缓存命中率、无请求 ID）；新代码请用 logChatRowFull。
 func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int, cacheHit, cacheMiss int, hasCache bool) {
-	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, -1, cacheHit, cacheMiss, hasCache, "", "", 0, 0, false, "", "", 0, 0, "", "")
+	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, -1, cacheHit, cacheMiss, hasCache, "", "", 0, 0, false, "", "", 0, 0, "", "", "")
 }
 
 // logChatRowEx 带请求 ID、结果、重试、积分与调用来源字段的扩展形态；缓存列不传
@@ -703,7 +708,7 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 	requestID, outcome string, attempts int, credit float64, hasCredit bool,
 	clientIP, userAgent string) {
 	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, -1, 0, 0, false,
-		requestID, outcome, attempts, credit, hasCredit, clientIP, userAgent, 0, 0, "", "")
+		requestID, outcome, attempts, credit, hasCredit, clientIP, userAgent, 0, 0, "", "", "")
 }
 
 // logChatRowFull 是本文件唯一的行输出点：宽表字段 + 缓存列 + 可选请求 ID/结果/重试/积分尾段 + 调用来源段。
@@ -715,12 +720,18 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int,
 	think int, cacheHit, cacheMiss int, hasCache bool,
 	requestID, outcome string, attempts int, credit float64, hasCredit bool,
-	clientIP, userAgent string, prep, do time.Duration, effort, effortReq string) {
+	clientIP, userAgent string, prep, do time.Duration, effort, effortReq, modelEff string) {
 	if !chatLogEnabled {
 		return
 	}
 	seq := chatSeq.Add(1)
-	model = logfmt.Pad(logfmt.Truncate(model, chatModelWidth), chatModelWidth)
+	// 降级后 model 与 modelEff 两个值都不同），显示成 requested->effective——与 effort 的双值口径一致；未降级保持
+	// 旧宽度。带箭头时允许超宽（同账号列：宁可该行变宽，不丢可辨性）。
+	if modelEff != "" && modelEff != model {
+		model = model + "->" + modelEff // 带箭头时允许超宽，不再截断补齐
+	} else {
+		model = logfmt.Pad(logfmt.Truncate(model, chatModelWidth), chatModelWidth)
+	}
 	// 账号标签只补不截：超宽时宁可让该行变宽，也不丢昵称信息（昵称是排查的主线索）。
 	acct := logfmt.Pad(logfmt.Label(uid, nick), chatAcctWidth)
 	tokField := "-"
