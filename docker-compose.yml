@@ -1,6 +1,12 @@
 services:
   wb2api:
-    build: .
+    build:
+      context: .
+      # Dockerfile 已支持 ARG APP_VERSION，但这里没传，导致自建镜像的
+      # appVersion 回落 dev：面板显示 vdev，且 updater 解析失败会把
+      # UpdateAvailable 恒判为 true。在 .env 里写 APP_VERSION 即可。
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     container_name: workbuddy2api
     restart: unless-stopped
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
