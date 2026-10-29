@@ -11,7 +11,10 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
+
+	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 )
 
 // 连接层参数集中定义（与 server/backoff.go 同风格：一处定义，测试可回读断言）。
@@ -133,6 +136,21 @@ func (c *Client) SetDNSDialer(d *net.Dialer) {
 func newTransport() *http.Transport {
 	dialer := newDialer()
 	return &http.Transport{
+		// Proxy 按「账号」选出口：uid 由请求构造处塞进 context
+		// （proxypool.WithUID，见 upstream/*.go 的 NewRequestWithContext 调用点）。
+		//
+		// 为什么是函数而不是固定 URL：上游按出口 IP 计数限流，需要把不同账号
+		// 摊到不同出口；而同一个账号必须恒定走同一出口（IP 跳变本身是风控信号），
+		// 所以选路逻辑在 proxypool 里按 mode 决定，这里只做转接。
+		//
+		// 返回 (nil, nil) 的三种情形都等价于「直连」，与历史行为完全一致：
+		//   - proxy_mode = off（默认值）
+		//   - 池为空
+		//   - 全部出口都已 dead
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			u, _ := proxypool.Default().Pick(proxypool.UIDFrom(req.Context()))
+			return u, nil
+		},
 		DialContext: dialer.DialContext,
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设

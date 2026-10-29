@@ -28,6 +28,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
 	"github.com/misakano7545/workbuddy2api-panel/internal/panel"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
+	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/redisstore"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/safefile"
@@ -242,6 +243,8 @@ func main() {
 	up.DumpDir = cfg.Upstream.DumpDir
 	up.DumpRequestMax = cfg.Upstream.DumpMaxBytes
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
+	// 启动期初始化出站代理池（未配 proxies 时退化为 off 直连）
+	proxypool.Default().Configure(cfg.Upstream.Proxies, cfg.Upstream.ProxyMode)
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled
@@ -853,6 +856,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	up.SanitizeBrandScope.Store(newCfg.Features.SanitizeBrandScope)
 	// 思考档位策略热生效：改默认档 / 切换客户端优先或作用域后，下一次 chat 即按新策略。
 	up.SetEffortPolicy(effortPolicyOf(newCfg))
+	// 代理池热生效：更新出口列表与分配策略，无需重启容器
+	proxypool.Default().Configure(newCfg.Upstream.Proxies, newCfg.Upstream.ProxyMode)
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
