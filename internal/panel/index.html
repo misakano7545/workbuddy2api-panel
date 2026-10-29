@@ -784,6 +784,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
+      <li><a href="#proxies" data-view="proxies">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2a9 9 0 0 1 0 12M8 2a9 9 0 0 0 0 12"/></svg>
+        出站代理</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
@@ -1152,6 +1155,74 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <table class="acc zebra">
             <thead id="usCreditHead"></thead>
             <tbody id="usCreditBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 出站代理 -->
+    <section class="view" id="view-proxies" hidden>
+      <div class="stats">
+        <div class="stat"><div class="v" id="pxMode">-</div><div class="k">分配模式</div></div>
+        <div class="stat"><div class="v" id="pxTotal">0</div><div class="k">配置出口数</div></div>
+        <div class="stat good"><div class="v" id="pxHealthy">0</div><div class="k">健康出口</div></div>
+        <div class="stat bad"><div class="v" id="pxDead">0</div><div class="k">熔断 (Dead)</div></div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>代理配置与策略</h3>
+          <span class="grow"></span>
+          <span class="note" id="pxSaveNote"></span>
+          <button class="xs" id="btnPxResetDead" type="button" title="清空所有节点的熔断标记与连续失败计数">重置熔断</button>
+          <button class="xs" id="btnPxResetAssign" type="button" title="清空账号绑定关系，下次请求重新分配">重新洗牌</button>
+          <button class="xs primary" id="btnPxSave" type="button">保存并热生效</button>
+        </header>
+        <div class="pad">
+          <div class="grid2">
+            <label class="fld"><span class="lb">分配策略</span>
+              <select id="pxModeSelect" class="input">
+                <option value="per_account">单号单代理（固定IP，防风控）</option>
+                <option value="round_robin">轮询轮换（每请求换出口）</option>
+                <option value="off">关闭（直连出站）</option>
+              </select>
+              <span class="hint">单号单代理：每个账号在首调时绑定一个固定出口，后续请求恒定走该出口，贴近真人行为</span>
+            </label>
+            <div class="fld">
+              <span class="lb">协议说明</span>
+              <div class="hint" style="margin-top:6px;line-height:1.6">
+                支持 <code>http://host:port</code>、<code>https://...</code>、<code>socks5://user:pass@host:port</code>、<code>socks5h://...</code><br>
+                保存后<strong>立即热生效</strong>，正在运行的长连接不受影响，密码自动脱敏展示。
+              </div>
+            </div>
+          </div>
+          <label class="fld" style="margin-top:12px"><span class="lb">代理出口列表（每行一个）</span>
+            <textarea id="pxListInput" rows="6" style="font-family:monospace;font-size:12px;width:100%;box-sizing:border-box" placeholder="socks5h://user:pass@47.242.19.215:8899&#10;http://194.61.232.13:8095"></textarea>
+            <span class="hint">留空 = 直连模式。支持带账号密码认证。</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>出口监控列表</h3>
+          <span class="grow"></span>
+          <span class="note" id="pxTableNote"></span>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th style="width:40px">#</th>
+              <th>出口地址</th>
+              <th>协议</th>
+              <th class="num">绑定账号</th>
+              <th class="num">成功</th>
+              <th class="num">失败</th>
+              <th style="text-align:center">状态</th>
+            </tr></thead>
+            <tbody id="pxTableBody">
+              <tr><td colspan="7"><div class="empty">暂未加载</div></td></tr>
+            </tbody>
           </table>
         </div>
       </div>

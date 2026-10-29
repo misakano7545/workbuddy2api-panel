@@ -449,7 +449,7 @@ $('btnLogout').onclick = () => {
 };
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', taskscenter: '任务中心', models: '模型与档位', config: '配置', events: '请求事件日志', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', taskscenter: '任务中心', models: '模型与档位', proxies: '出站代理', config: '配置', events: '请求事件日志', logs: '运行日志' };
 function go(v) {
   navSet(false);
   view = v;
@@ -462,6 +462,7 @@ function go(v) {
   // 注意**不要**在每次切视图时 resetLogWindow()——那会把增量游标清掉，下一轮
   // 又变成全量拉，白白丢掉增量带来的收益。
   if (v === 'events') loadEvents();
+  if (v === 'proxies') loadProxies();
   if (v === 'logs') { if (!logRows.length) resetLogWindow(); loadLogs(); }
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
@@ -5004,3 +5005,116 @@ if ($('btnEventExport')) $('btnEventExport').onclick = () => {
   a.click();
   URL.revokeObjectURL(url);
 };
+
+/* ── 出站代理池 ─────────────────────────────────────────────────────── */
+let proxiesData = null;
+async function loadProxies() {
+  try {
+    $('pxTableNote').textContent = '加载中...';
+    const [px, cfg] = await Promise.all([
+      api('proxies'),
+      api('config')
+    ]);
+    proxiesData = px;
+    cfgLoaded = cfg.config;
+    renderProxies(px, cfg.config);
+    $('pxTableNote').textContent = '更新于 ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    $('pxTableNote').textContent = '加载失败: ' + e.message;
+    toast('读取代理池失败：' + e.message, 'err');
+  }
+}
+
+function renderProxies(px, cfg) {
+  const mode = px.mode || (cfg && cfg.upstream && cfg.upstream.proxy_mode) || 'off';
+  const modeNames = { per_account: '单号单代理', round_robin: '轮询轮换', off: '关闭(直连)' };
+  $('pxMode').textContent = modeNames[mode] || mode;
+  $('pxTotal').textContent = px.total || 0;
+  $('pxHealthy').textContent = px.healthy || 0;
+  $('pxDead').textContent = px.dead || 0;
+
+  // 表单回填
+  if ($('pxModeSelect')) $('pxModeSelect').value = mode;
+  if ($('pxListInput') && cfg && cfg.upstream && Array.isArray(cfg.upstream.proxies)) {
+    if (document.activeElement !== $('pxListInput')) {
+      $('pxListInput').value = cfg.upstream.proxies.join('\n');
+    }
+  }
+
+  // 监控表渲染
+  const tb = $('pxTableBody');
+  const list = px.proxies || [];
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="big">暂无配置代理出口</div>在上方填写代理列表并保存，或选择「关闭」直接出站</div></td></tr>';
+    return;
+  }
+
+  tb.innerHTML = list.map((it, idx) => {
+    const isDead = it.dead;
+    const tag = isDead ? '<span class="tag bad">熔断 (Dead)</span>' : '<span class="tag ok">正常</span>';
+    const cls = isDead ? 'off' : '';
+    return '<tr class="' + cls + '">' +
+      '<td>' + (idx + 1) + '</td>' +
+      '<td><code style="font-size:12px">' + esc(it.raw || it.host) + '</code></td>' +
+      '<td><span class="tag">' + esc(it.scheme || 'http') + '</span></td>' +
+      '<td class="num">' + (it.accounts || 0) + '</td>' +
+      '<td class="num" style="color:var(--good)">' + (it.ok || 0) + '</td>' +
+      '<td class="num" style="color:' + (it.fail > 0 ? 'var(--bad)' : 'var(--ink-4)') + '">' + (it.fail || 0) + '</td>' +
+      '<td style="text-align:center">' + tag + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+async function saveProxiesForm() {
+  const btn = $('btnPxSave');
+  if (btn) btn.disabled = true;
+  $('pxSaveNote').textContent = '保存中...';
+  try {
+    const mode = $('pxModeSelect').value;
+    const rawLines = $('pxListInput').value.split('\n')
+      .map(s => s.trim())
+      .filter(s => s && !s.startsWith('#'));
+
+    // 读取当前最新配置，叠加 upstream.proxies 与 proxy_mode
+    const cur = await api('config');
+    const cfg = cur.config || {};
+    if (!cfg.upstream) cfg.upstream = {};
+    cfg.upstream.proxies = rawLines;
+    cfg.upstream.proxy_mode = mode;
+
+    await api('config', { method: 'POST', body: JSON.stringify(cfg) });
+    $('pxSaveNote').textContent = '保存成功（已热生效）';
+    toast('代理配置已热生效 ✔');
+    await loadProxies();
+  } catch (e) {
+    $('pxSaveNote').textContent = '保存失败：' + e.message;
+    toast('保存失败：' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function resetProxiesDead() {
+  try {
+    const res = await api('proxies/reset_dead', { method: 'POST' });
+    toast('已重置 ' + (res.reset || 0) + ' 个熔断出口');
+    await loadProxies();
+  } catch (e) {
+    toast('重置失败: ' + e.message, 'err');
+  }
+}
+
+async function resetProxiesAssign() {
+  if (!confirm('重新洗牌将清空当前所有账号绑定的固定出口，下次各账号发起请求时会重新挑选代理。确认重置？')) return;
+  try {
+    await api('proxies/reset_assign', { method: 'POST' });
+    toast('账号出口绑定已重置');
+    await loadProxies();
+  } catch (e) {
+    toast('重置失败: ' + e.message, 'err');
+  }
+}
+
+if ($('btnPxSave')) $('btnPxSave').onclick = saveProxiesForm;
+if ($('btnPxResetDead')) $('btnPxResetDead').onclick = resetProxiesDead;
+if ($('btnPxResetAssign')) $('btnPxResetAssign').onclick = resetProxiesAssign;
