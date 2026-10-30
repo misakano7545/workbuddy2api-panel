@@ -164,6 +164,11 @@ type searchDone struct {
 // searchPrelude 组装 Anthropic 的服务端工具块：每次检索一对
 // server_tool_use（模型发起）+ web_search_tool_result（网关执行结果）。
 // 只在真检索成功时回报——失败的检索没有结果块可发（客户端可见的失败仍走文本）。
+//
+// web_search_result 的字段必须补齐（见 webSearchResult）：官方响应里
+// encrypted_content 是**必填字符串**、page_age 是**必填可空**，官方 SDK 的同名
+// schema 无 .optional()。少给一个字段，整条结果块在客户端解析阶段就被判非法，
+// 表现为「联网搜索这次调用直接失败」——比缺内容严重得多。
 func searchPrelude(name string, done []searchDone) []any {
 	if len(done) == 0 {
 		return nil
@@ -177,7 +182,7 @@ func searchPrelude(name string, done []searchDone) []any {
 		})
 		content := make([]any, 0, len(d.Results))
 		for _, r := range d.Results {
-			content = append(content, map[string]any{"type": "web_search_result", "title": r.Title, "url": r.URL})
+			content = append(content, webSearchResult(r))
 		}
 		out = append(out, map[string]any{
 			"type": "web_search_tool_result", "tool_use_id": id, "content": content,
@@ -188,6 +193,28 @@ func searchPrelude(name string, done []searchDone) []any {
 
 // searchCall 模型要的一次检索。
 type searchCall struct{ ID, Query string }
+
+// webSearchResult 单条检索结果 → Anthropic 的 web_search_result 块。
+//
+// 字段纪律（照官方 /v1/messages + web_search 的响应实况，也与官方 SDK 的 schema
+// 一一对应）：
+//   - type/url/title：原样带；
+//   - encrypted_content：**必填 string**，官方拿它做多轮引用回传校验
+//     （官方文档：缺了或被改过，把结果回传的后续请求会 400）。网关的检索结果
+//     来自官方 agenttool 明文，没有可回传的密文，故给空串——「不加密的空内容」
+//     在协议上是合法值。**不能省略**：客户端 schema 是 required，缺字段会让
+//     整条 web_search_tool_result 块判非法、本次联网调用直接失败；
+//   - page_age：**必填但可 null**（官方对未知更新时间的站点也给 null）。
+//     上游 agenttool 不提供该信息，故恒为 null。
+func webSearchResult(r upstream.SearchResult) map[string]any {
+	return map[string]any{
+		"type":              "web_search_result",
+		"url":               r.URL,
+		"title":             r.Title,
+		"encrypted_content": "",
+		"page_age":          nil,
+	}
+}
 
 // webSearchCalls 取出本轮里对 name 工具的调用（参数非法/无 query 的丢弃）。
 func webSearchCalls(msg map[string]any, name string) []searchCall {

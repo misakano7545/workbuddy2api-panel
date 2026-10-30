@@ -153,6 +153,47 @@ func TestMessagesWebSearchToolRuns(t *testing.T) {
 	if strings.Contains(body, `"type":"tool_use"`) {
 		t.Fatalf("服务端工具被当成客户端工具下发: %s", body)
 	}
+	// 每个结果项都得是**协议完整**的 web_search_result（缺字段=客户端解析整块失败）
+	assertWebSearchResultFields(t, res)
+}
+
+// assertWebSearchResultFields 校验结果块里每一项都带齐官方要求的字段。
+// 回归位：encrypted_content 曾漏发，官方 SDK 的 schema 是 required，
+// 客户端解析阶段直接判非法 → WebSearch 整次调用报 "Model request failed."。
+func assertWebSearchResultFields(t *testing.T, res map[string]any) {
+	t.Helper()
+	items, ok := res["content"].([]any)
+	if !ok || len(items) == 0 {
+		t.Fatalf("结果块没有 content 数组: %v", res)
+	}
+	for i, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			t.Fatalf("第 %d 项不是对象: %v", i, it)
+		}
+		if asString(m["type"]) != "web_search_result" {
+			t.Fatalf("第 %d 项 type=%v", i, m["type"])
+		}
+		if asString(m["url"]) == "" || asString(m["title"]) == "" {
+			t.Fatalf("第 %d 项缺 url/title: %v", i, m)
+		}
+		// encrypted_content 必须是 string（可为空串）——键存在且类型对，都不能省。
+		if v, ok := m["encrypted_content"]; !ok {
+			t.Fatalf("第 %d 项缺 encrypted_content（官方 schema 必填，缺了客户端解析整块失败）: %v", i, m)
+		} else if _, ok := v.(string); !ok {
+			t.Fatalf("第 %d 项 encrypted_content 不是 string: %#v", i, v)
+		}
+		// page_age 必填可空：键必须在，值允许 null，但不允许是数字/对象等其它类型。
+		v, ok := m["page_age"]
+		if !ok {
+			t.Fatalf("第 %d 项缺 page_age（必填可空，null 才合法）: %v", i, m)
+		}
+		if v != nil {
+			if _, ok := v.(string); !ok {
+				t.Fatalf("第 %d 项 page_age 既不是 string 也不是 null: %#v", i, v)
+			}
+		}
+	}
 }
 
 // sseBlocks 解析 Anthropic SSE 里的 content_block_start 块与全文（顺序即下标顺序）。
@@ -206,6 +247,7 @@ func TestMessagesWebSearchBlocksNonStream(t *testing.T) {
 	if asString(msg.Content[2]["type"]) != "text" {
 		t.Fatalf("正文块位置不符: %v", msg.Content[2])
 	}
+	assertWebSearchResultFields(t, msg.Content[1])
 }
 
 // TestMessagesWithoutWebSearchToolSkipsProbe 没声明服务端工具时零额外开销：
