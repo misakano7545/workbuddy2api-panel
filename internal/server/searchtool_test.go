@@ -158,8 +158,10 @@ func TestMessagesWebSearchToolRuns(t *testing.T) {
 }
 
 // assertWebSearchResultFields 校验结果块里每一项都带齐官方要求的字段。
-// 回归位：encrypted_content 曾漏发，官方 SDK 的 schema 是 required，
-// 客户端解析阶段直接判非法 → WebSearch 整次调用报 "Model request failed."。
+// 回归位：encrypted_content 曾漏发，官方 SDK 的 WebSearchResultBlock 把它定为
+// 必填 string，客户端解析阶段直接判非法 → WebSearch 整次调用报
+// "Model request failed."。page_age 在客户端 schema 里是 nullish（可选可空），
+// 所以只断言「若在，必须是 string 或 null」，不要求必须出现。
 func assertWebSearchResultFields(t *testing.T, res map[string]any) {
 	t.Helper()
 	items, ok := res["content"].([]any)
@@ -177,18 +179,14 @@ func assertWebSearchResultFields(t *testing.T, res map[string]any) {
 		if asString(m["url"]) == "" || asString(m["title"]) == "" {
 			t.Fatalf("第 %d 项缺 url/title: %v", i, m)
 		}
-		// encrypted_content 必须是 string（可为空串）——键存在且类型对，都不能省。
+		// encrypted_content 是必填 string（官方 SDK 类型无 ?），空串合法但键不能省。
 		if v, ok := m["encrypted_content"]; !ok {
 			t.Fatalf("第 %d 项缺 encrypted_content（官方 schema 必填，缺了客户端解析整块失败）: %v", i, m)
 		} else if _, ok := v.(string); !ok {
 			t.Fatalf("第 %d 项 encrypted_content 不是 string: %#v", i, v)
 		}
-		// page_age 必填可空：键必须在，值允许 null，但不允许是数字/对象等其它类型。
-		v, ok := m["page_age"]
-		if !ok {
-			t.Fatalf("第 %d 项缺 page_age（必填可空，null 才合法）: %v", i, m)
-		}
-		if v != nil {
+		// page_age 可空：键可省；若在，值只能是 string 或 null。
+		if v, ok := m["page_age"]; ok && v != nil {
 			if _, ok := v.(string); !ok {
 				t.Fatalf("第 %d 项 page_age 既不是 string 也不是 null: %#v", i, v)
 			}
