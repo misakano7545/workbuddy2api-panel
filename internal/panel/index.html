@@ -1277,6 +1277,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <!-- 配置 -->
     <section class="view" id="view-config" hidden>
       <form id="cfgForm">
+        <span class="vtabs" id="cfgRealmTabs">
+          <button type="button" data-realm="all" class="on">全部</button>
+          <button type="button" data-realm="cn">国内版</button>
+          <button type="button" data-realm="global">国际版</button>
+        </span>
+        <div class="note">切换以分域查看 / 编辑国内版与国际版的独立配置（域名 base 等），共享配置始终显示。</div>
         <div class="box">
           <header><h3>服务</h3><span class="grow"></span><span class="note" id="cfgPath"></span></header>
           <div class="pad">
@@ -1295,6 +1301,27 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <label class="fld"><span class="lb">面板自动刷新间隔（秒）</span>
               <input name="poll_interval_sec" type="number" placeholder="0">
               <span class="hint">0 = 缺省 5 秒；负数 = 关闭自动刷新（仅手动更新）。页面切到后台时自动暂停。</span></label>
+          </div>
+        </div>
+
+        <div class="box">
+          <header><h3>分域配置（国内版 / 国际版）</h3></header>
+          <div class="pad">
+            <div class="grid2">
+              <label class="fld" data-realm="cn"><span class="lb">国内版 chat base</span>
+                <input name="cn_chat_base" placeholder="默认 https://www.workbuddy.cn">
+                <span class="hint">覆盖国内版对话 / 模型目录上游域名；留空回落内置默认。</span></label>
+              <label class="fld" data-realm="cn"><span class="lb">国内版 billing base</span>
+                <input name="cn_billing_base" placeholder="默认 https://www.workbuddy.cn">
+                <span class="hint">覆盖国内版积分 / 成长任务上游域名。</span></label>
+              <label class="fld" data-realm="global"><span class="lb">国际版 chat base</span>
+                <input name="global_chat_base" placeholder="按账号 domain 选官方主机">
+                <span class="hint">覆盖国际版对话 / 模型目录上游域名。</span></label>
+              <label class="fld" data-realm="global"><span class="lb">国际版 billing base</span>
+                <input name="global_billing_base" placeholder="同 chat base 口径">
+                <span class="hint">覆盖国际版 billing / growth 上游域名。</span></label>
+            </div>
+            <div class="hint">模型级分域已在「模型与档位」页通过 <code>cn:</code> / <code>global:</code> 前缀白 / 黑名单实现，无需在此重复配置。</div>
           </div>
         </div>
 

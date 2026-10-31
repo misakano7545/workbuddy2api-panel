@@ -1694,6 +1694,8 @@ const CFG_MAP = {
   models_allowed: ['models', 'allowed'],
   models_aliases: ['models', 'aliases'],
   thinking_enabled: ['thinking', 'enabled'],
+  cn_chat_base: ['cn', 'chat_base'], cn_billing_base: ['cn', 'billing_base'],
+  global_chat_base: ['global', 'chat_base'], global_billing_base: ['global', 'billing_base'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -1706,7 +1708,7 @@ const CFG_MAP = {
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
  */
-const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file']);
+const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'cn_chat_base', 'cn_billing_base', 'global_chat_base', 'global_billing_base']);
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function put(obj, path, val) {
@@ -1819,6 +1821,28 @@ $('btnEye').onclick = () => {
   $('btnEye').textContent = show ? '隐藏' : '显示';
 };
 $('btnCfgReload').onclick = loadConfig;
+// cfgRealmFilter 配置页分域切换：all 显示全部；cn/global 仅显示该域专属字段
+// （data-realm 标记）。共享配置（无 data-realm）始终显示。保存时仍回传整份配置，
+// 故切换仅控制可见性、不丢字段。域名 base 等各域独立配置由此分开关，与账号池
+// 已有的 accRealmTabs 同构。
+let cfgRealmFilter = 'all';
+function applyCfgRealmFilter() {
+  document.querySelectorAll('#cfgForm [data-realm]').forEach(el => {
+    const r = el.getAttribute('data-realm');
+    el.style.display = (cfgRealmFilter === 'all' || cfgRealmFilter === r) ? '' : 'none';
+  });
+  const tabs = $('cfgRealmTabs');
+  if (tabs) tabs.querySelectorAll('button[data-realm]').forEach(b => b.classList.toggle('on', b.dataset.realm === cfgRealmFilter));
+}
+if ($('cfgRealmTabs')) {
+  $('cfgRealmTabs').addEventListener('click', ev => {
+    const btn = ev.target.closest('button[data-realm]');
+    if (!btn) return;
+    cfgRealmFilter = btn.dataset.realm;
+    applyCfgRealmFilter();
+  });
+  applyCfgRealmFilter();
+}
 $('cfgForm').onsubmit = async ev => {
   ev.preventDefault();
   // 时长字段脏值拦截：标红 + toast 点名，不发保存请求（后端同样会拒，这里前置）。
