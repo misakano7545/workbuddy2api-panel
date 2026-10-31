@@ -4998,7 +4998,10 @@ function renderEventTable() {
     const acctRaw = e.account || '-';
     const acctClean = acctRaw.replace(/\([^)]*\)/, '');
     const mName = e.model || '-';
-    const effort = e.reasoning_effort || '-';
+    const effort = e.reasoning_effort || '';
+    // 旧归档行没有这个键（不知道客户端发了什么）；新行恒有（空串 = 确认没发）。
+    const hasEffortReq = 'reasoning_effort_requested' in e;
+    const effortReq = e.reasoning_effort_requested || '';
 
     let resTag = '<span class="tag-badge tag-success">成功</span>';
     if (e.status === 429) {
@@ -5037,7 +5040,7 @@ function renderEventTable() {
       '<td class="time-cell"><div class="t-time">' + esc(tStr) + '</div><div class="t-date">' + esc(dStr) + '</div></td>' +
       '<td><div class="acct-cell"><span class="acct-icon"></span><span title="' + esc(acctRaw) + '">' + esc(acctClean) + '</span></div></td>' +
       '<td class="model-cell"><div class="m-name">' + esc(mName) + '</div></td>' +
-      '<td><span class="pill-effort">' + esc(effort) + '</span></td>' +
+      '<td>' + eventEffortPill(effort, effortReq, hasEffortReq) + '</td>' +
       '<td>' + resTag + '</td>' +
       '<td><span class="req-tag">' + esc(reqProto) + '</span><div class="req-path-sub">' + esc(reqPath) + '</div></td>' +
       '<td><div class="metric-main">' + esc(durSec) + '</div><div class="metric-sub">' + esc(ttfbSec) + '</div></td>' +
@@ -5051,6 +5054,21 @@ function renderEventTable() {
   }).join('');
 
   setHTML(tb, html);
+}
+
+// eventEffortPill 事件页「推理强度」列：「客户端要的」→「网关实际发出去的」两段显示。
+// 网关会在客户端没带档位时补模型默认档（thinking 默认档）、按策略改写或就近降级；
+// 只显示生效值时整列都是 max，看不出这一档是谁定的（与聊天行日志的
+// effort=max->high / effort=- ->max 同一口径）。
+//   - 一致：max；不一致（改写/降级）：high→max；客户端没发（网关补默认档）：-→max；都没有：-
+//   - hasReq=false 是升级前的老归档行（没有这个键），按旧口径只显示生效值，不臆测。
+function eventEffortPill(eff, req, hasReq) {
+  if (!hasReq) return '<span class="pill-effort">' + esc(eff || '-') + '</span>';
+  if (!eff && !req) return '<span class="pill-effort">-</span>';
+  if (!req) return '<span class="pill-effort" title="客户端未携带思考档位，这是网关补的默认档">-→' + esc(eff) + '</span>';
+  if (!eff) return '<span class="pill-effort" title="客户端要求关闭思考，或该档位模型不支持">' + esc(req) + '</span>';
+  if (req === eff) return '<span class="pill-effort">' + esc(eff) + '</span>';
+  return '<span class="pill-effort" title="左：客户端请求；右：网关实际发送">' + esc(req) + '→' + esc(eff) + '</span>';
 }
 
 // renderEventContext 把一次请求的会话上下文渲染成「角色 + 原文」块。
