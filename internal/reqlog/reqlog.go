@@ -87,8 +87,15 @@ type Event struct {
 	UserAgent       string `json:"user_agent,omitempty"`
 	Mode            string `json:"mode,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	ReasoningTokens int64  `json:"reasoning_tokens,omitempty"`
-	ExecutorType    string `json:"executor_type,omitempty"`
+	// ReasoningEffortRequested 客户端原始请求的思考档位（reasoning_effort / reasoningEffort
+	// 原值；空字符串 = 客户端没携带）。与上一列（生效值）配对：生效值可能来自网关补默认档、
+	// 策略改写或就近降级——只给生效值时，「客户端要了 max」与「客户端什么都没发、网关补了
+	// max」在事件页/JSONL 里长得一模一样（issue #43 的读法歧义）。
+	// **刻意不带 omitempty**：旧归档行没有这个键（「不知道客户端发了什么」），新行恒有
+	// （空串「确认客户端没发」）——两种情况在事件页里要能分开。
+	ReasoningEffortRequested string `json:"reasoning_effort_requested"`
+	ReasoningTokens          int64  `json:"reasoning_tokens,omitempty"`
+	ExecutorType             string `json:"executor_type,omitempty"`
 	// ToolsDeclared / ToolCalls 本轮的「工具面」观测量（issue #44）：声明了几个工具、
 	// 实际拿到几个工具调用。ToolsDeclared>0 且 ToolCalls==0 就是一次「零工具调用
 	// 收尾」——上游把本该调工具的回合当成正常完成，客户端据此认为任务做完、工具一次
