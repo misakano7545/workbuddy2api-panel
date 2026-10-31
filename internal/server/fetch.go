@@ -69,6 +69,59 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tried := map[string]bool{}
+	lastErr, handled := h.fetchInRealm(w, r, target, realm, tried)
+	if handled {
+		return
+	}
+	// 跨域兜底（2026-10-31 实案）：CN 域的 edgebrowser 有域名路由策略，Google 系域名
+	// （google.com / *.googlesource.com / developer.android.com / source.android.com
+	// 实测全拒）一律回 403 code=15021「domain rejected by via routing policy」，
+	// 而 global 域对同一域名正常返回正文。这不是账号问题（换遍全池 CN 号都是同一个
+	// 403），只有换域才有救 —— 故仅在「域名被策略拒绝」时改域重试，其他错误不跨域
+	// （两域积分/账号互不相通，跨域重试对 5xx/限流无意义）。
+	//
+	// DSH 不会传 realm，默认走 CN，于是「抓 Google 文档」在默认配置下必失败；这条
+	// 兜底让它在用户无感的情况下用 global 账号拿到正文。
+	if lastErr != nil && isFetchDomainRejected(lastErr) {
+		alt := "global"
+		if realm == "global" {
+			alt = "cn"
+		}
+		if h.cfg.Pool.ServableForRealm(alt) {
+			log.Printf("fetch realm=%s: 域名被上游路由策略拒绝（15021），改试 %s 域", realm, alt)
+			lastErr, handled = h.fetchInRealm(w, r, target, alt, tried)
+			if handled {
+				return
+			}
+			realm = alt // 日志/错误口径按最终尝试的域
+		}
+	}
+
+	status, code := http.StatusBadGateway, "upstream_error"
+	var ue *upstream.Error
+	switch {
+	case len(tried) == 0:
+		status, code = http.StatusServiceUnavailable, "no_account"
+		lastErr = fmt.Errorf("没有可用的 %s 账号", realm)
+	case errors.As(lastErr, &ue) && ue.Status >= 400:
+		status = ue.Status
+	}
+	// 下载类 URL 的专属提示：global 域的浏览器工具对 Content-Disposition/非 HTML
+	// 响应直接 422「Browser does not support download functionality」（gitiles 的
+	// ?format=TEXT 实测如此）。改域也救不了，只能让调用方换 HTML 页面地址。
+	if lastErr != nil && strings.Contains(strings.ToLower(lastErr.Error()), "does not support download") {
+		status = http.StatusUnprocessableEntity
+		lastErr = fmt.Errorf("上游浏览器不支持下载类 URL（如 gitiles 的 ?format=TEXT）；"+
+			"请改用该文件的 HTML 页面地址（去掉 ?format=TEXT）：%w", lastErr)
+	}
+	log.Printf("fetch realm=%s: 全部尝试失败（%d 个账号）：%v", realm, len(tried), lastErr)
+	writeOpenAIError(w, status, code, lastErr.Error())
+}
+
+// fetchInRealm 在单个域内轮转取号抓取。
+// 返回 (lastErr, handled)：handled=true 表示响应已写出（成功 / 上游形状不可用 /
+// 请求级错误），调用方应立即返回；否则 lastErr 供调用方决定是否跨域重试。
+func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, realm string, tried map[string]bool) (error, bool) {
 	var lastErr error
 	for attempt := 0; attempt < searchAttempts; attempt++ {
 		a := h.cfg.Pool.PickExcludingForRealm(tried, "", realm)
@@ -83,11 +136,11 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 				// 上游 200 但形状不对：改写成 502，别把半成品当成功透传。
 				log.Printf("fetch %s realm=%s: 上游响应不可用: %v", logfmt.Label(a.UID, a.Nickname), realm, perr)
 				writeOpenAIError(w, http.StatusBadGateway, "upstream_error", perr.Error())
-				return
+				return nil, true
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(out)
-			return
+			return nil, true
 		}
 		lastErr = ferr
 		var ue *upstream.Error
@@ -104,23 +157,22 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("fetch realm=%s: 请求级错误 kind=%v，不再换号", realm, ue.Kind)
 				writeOpenAIError(w, status, "upstream_error", ue.Msg)
-				return
+				return nil, true
 			}
 		}
 		log.Printf("fetch %s realm=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), realm, attempt+1, ferr)
 	}
+	return lastErr, false
+}
 
-	status, code := http.StatusBadGateway, "upstream_error"
+// isFetchDomainRejected 上游 edgebrowser 的域名路由策略拒绝（业务码 15021）。
+// 该错误是**域名级**的（同域所有账号一致），与账号健康无关，换号无效、换域有效。
+func isFetchDomainRejected(err error) bool {
 	var ue *upstream.Error
-	switch {
-	case len(tried) == 0:
-		status, code = http.StatusServiceUnavailable, "no_account"
-		lastErr = fmt.Errorf("没有可用的 %s 账号", realm)
-	case errors.As(lastErr, &ue) && ue.Status >= 400:
-		status = ue.Status
+	if !errors.As(err, &ue) {
+		return false
 	}
-	log.Printf("fetch realm=%s: 全部尝试失败（%d 个账号）：%v", realm, len(tried), lastErr)
-	writeOpenAIError(w, status, code, lastErr.Error())
+	return upstream.HasCodeMarker(ue.Msg, "15021")
 }
 
 // normalizeFetchResponse 确保响应是 DSH 需要的 {"content": "<markdown>"} 形状。

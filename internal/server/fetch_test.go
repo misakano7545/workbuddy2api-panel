@@ -2,12 +2,14 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
 // TestFetchEndpoint POST /v1/fetch：DSH 的 DeepSeek Fetch API 形状——
@@ -103,5 +105,148 @@ func TestFetchRequestLevelFailFast(t *testing.T) {
 	}
 	if len(f.paths) != 1 {
 		t.Fatalf("请求级错误应 fail-fast 不轮转，实际打了 %d 次", len(f.paths))
+	}
+}
+
+// TestFetchFallsBackToGlobalOnDomainRejected 2026-10-31 实案：CN 域 edgebrowser 的
+// 域名路由策略拒绝 Google 系域名（403 code=15021），global 域同一域名正常。
+// 换遍全池 CN 号都是同一个 403（域名级），只有换域有救 → /v1/fetch 必须自动改域。
+func TestFetchFallsBackToGlobalOnDomainRejected(t *testing.T) {
+	var hosts []string
+	f := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			hosts = append(hosts, r.URL.Host)
+			status, body := http.StatusForbidden,
+				`{"code":15021,"msg":"edgebrowser: API error: domain rejected by via routing policy"}`
+			if r.URL.Host == "global.example" {
+				status, body = http.StatusOK,
+					`{"url":"https://android.googlesource.com/x","title":"t","content":"# ok"}`
+			}
+			return &http.Response{
+				StatusCode: status,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+		GlobalEnabled:  true,
+		ChatBaseCN:     "https://cn.example",
+		ChatBaseGlobal: "https://global.example",
+	}
+	p := testPoolWith(
+		&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		&auth.Auth{UID: "g1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: f})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/fetch",
+		strings.NewReader(`{"url":"https://android.googlesource.com/x"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("应跨域成功，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"content":"# ok"`) {
+		t.Fatalf("content 不符: %s", rec.Body.String())
+	}
+	if len(hosts) != 2 || hosts[0] != "cn.example" || hosts[1] != "global.example" {
+		t.Fatalf("应先 CN 后 global，实际 hosts=%v", hosts)
+	}
+}
+
+// TestFetchNoCrossRealmOnOtherErrors 只有「域名被策略拒绝」才跨域：
+// 5xx / 普通 4xx 跨域重试毫无意义（两域积分、账号互不相通），不该白烧 global 号。
+func TestFetchNoCrossRealmOnOtherErrors(t *testing.T) {
+	var hosts []string
+	f := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			hosts = append(hosts, r.URL.Host)
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"code":10000,"msg":"boom"}`)),
+			}, nil
+		})},
+		GlobalEnabled:  true,
+		ChatBaseCN:     "https://cn.example",
+		ChatBaseGlobal: "https://global.example",
+	}
+	p := testPoolWith(
+		&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		&auth.Auth{UID: "g1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: f})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/fetch",
+		strings.NewReader(`{"url":"https://example.com/a"}`)))
+	if rec.Code == 200 {
+		t.Fatalf("5xx 不该成功: %s", rec.Body.String())
+	}
+	for _, host := range hosts {
+		if host != "cn.example" {
+			t.Fatalf("5xx 不该跨域重试，实际 hosts=%v", hosts)
+		}
+	}
+}
+
+// TestFetchDownloadHint 下载类 URL（gitiles ?format=TEXT）连 global 域都救不了：
+// 上游浏览器回 422「Browser does not support download functionality」。此时应把
+// 提示改成可操作的建议（换 HTML 页面地址），而不是把上游内部文案原样甩给用户。
+func TestFetchDownloadHint(t *testing.T) {
+	f := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			status, body := http.StatusForbidden,
+				`{"code":15021,"msg":"edgebrowser: API error: domain rejected by via routing policy"}`
+			if r.URL.Host == "global.example" {
+				status, body = http.StatusInternalServerError,
+					`{"code":10000,"msg":"search post: unexpected status 422: Browser does not support download functionality"}`
+			}
+			return &http.Response{
+				StatusCode: status,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+		GlobalEnabled:  true,
+		ChatBaseCN:     "https://cn.example",
+		ChatBaseGlobal: "https://global.example",
+	}
+	p := testPoolWith(
+		&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		&auth.Auth{UID: "g1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: f})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/fetch",
+		strings.NewReader(`{"url":"https://android.googlesource.com/x?format=TEXT"}`)))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("code=%d, want 422 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "HTML") || !strings.Contains(rec.Body.String(), "format=TEXT") {
+		t.Fatalf("应给出换 HTML 地址的可操作提示: %s", rec.Body.String())
+	}
+}
+
+// TestFetchDomainRejectedDoesNotPenalizeAccounts 15021 是域名级策略拒绝（同域所有
+// 账号同一结果），不是账号问题。若按 ErrClient 喂连败，连抓几个 Google 文档就会把
+// 整个 CN 池逐个降到出池——这里连打 6 轮（> degradeThreshold=5）断言账号零惩罚。
+func TestFetchDomainRejectedDoesNotPenalizeAccounts(t *testing.T) {
+	f := &searchFake{status: http.StatusForbidden,
+		body: `{"code":15021,"msg":"edgebrowser: API error: domain rejected by via routing policy"}`}
+	p := testPoolWith(
+		&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		&auth.Auth{UID: "c2", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: f.client()})
+	for i := 1; i <= 6; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/fetch",
+			strings.NewReader(`{"url":"https://www.google.com/"}`)))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("run %d: code=%d want 403 (%s)", i, rec.Code, rec.Body)
+		}
+	}
+	for _, uid := range []string{"c1", "c2"} {
+		st, _ := p.Status(uid)
+		if st.Cooling || st.Disabled || st.ConsecutiveFails != 0 || !st.DegradeUntil.IsZero() {
+			t.Errorf("%s: 15021 域名级拒绝不得罚账号: %+v", uid, st)
+		}
 	}
 }
