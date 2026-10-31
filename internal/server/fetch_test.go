@@ -224,6 +224,54 @@ func TestFetchDownloadHint(t *testing.T) {
 	}
 }
 
+// TestFetchInRealmNoPickReturnsError 契约：fetchInRealm 一个号都没选到时必须返回
+// 非 nil 错误（而不是 nil）。跨域兜底会把该返回值覆盖到 lastErr 上，nil 会让
+// fetch 末尾的 lastErr.Error() 空指针 panic。
+func TestFetchInRealmNoPickReturnsError(t *testing.T) {
+	f := &searchFake{status: 200, body: `{"content":"x"}`}
+	// 池里只有 CN 号；对 realm=global 的取号必然选不到任何账号。
+	p := testPoolWith(&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
+	h := NewHandler(Config{Pool: p, Upstream: f.client()})
+	lastErr, handled := h.fetchInRealm(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/fetch", nil),
+		"https://example.com/a", "global", map[string]bool{})
+	if handled {
+		t.Fatalf("选不到号不应写响应")
+	}
+	if lastErr == nil {
+		t.Fatalf("选不到号必须返回显式错误，nil 会在跨域兜底路径触发空指针 panic")
+	}
+	if !strings.Contains(lastErr.Error(), "没有可用的 global 账号") {
+		t.Fatalf("错误文案不符: %v", lastErr)
+	}
+}
+
+// TestFetchGlobalAccountDisabledSkipsFallback global 号不可用时跳过跨域兜底：
+// 主域 15021 的 403 原样透传（与无兜底路径一致），CN 号零惩罚。
+func TestFetchGlobalAccountDisabledSkipsFallback(t *testing.T) {
+	f := &searchFake{status: http.StatusForbidden,
+		body: `{"code":15021,"msg":"edgebrowser: API error: domain rejected by via routing policy"}`}
+	g := &auth.Auth{UID: "g1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"}
+	p := testPoolWith(
+		&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		g,
+	)
+	p.Disable("g1", "test")
+	h := NewHandler(Config{Pool: p, Upstream: f.client()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/fetch",
+		strings.NewReader(`{"url":"https://android.googlesource.com/x"}`)))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code=%d want 403 原样透传 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "15021") {
+		t.Fatalf("应保留上游 15021 错误文案: %s", rec.Body.String())
+	}
+	st, _ := p.Status("c1")
+	if st.Cooling || st.Disabled || st.ConsecutiveFails != 0 {
+		t.Errorf("15021 不得罚 CN 账号: %+v", st)
+	}
+}
+
 // TestFetchDomainRejectedDoesNotPenalizeAccounts 15021 是域名级策略拒绝（同域所有
 // 账号同一结果），不是账号问题。若按 ErrClient 喂连败，连抓几个 Google 文档就会把
 // 整个 CN 池逐个降到出池——这里连打 6 轮（> degradeThreshold=5）断言账号零惩罚。

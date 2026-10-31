@@ -162,6 +162,13 @@ func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, r
 		}
 		log.Printf("fetch %s realm=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), realm, attempt+1, ferr)
 	}
+	if lastErr == nil {
+		// 一个号都没选到（本域无账号，或 ServableForRealm 与 pick 之间账号恰好
+		// 进入冷却/名额占满的竞态窗口）。必须返回显式错误而非 nil：跨域兜底会把
+		// 这里的返回值覆盖到 lastErr 上，nil 会让下方 lastErr.Error() 空指针 panic
+		//（回归：fetch 跨域兜底选不到号）。
+		return fmt.Errorf("没有可用的 %s 账号", realm), false
+	}
 	return lastErr, false
 }
 
