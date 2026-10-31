@@ -2413,6 +2413,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 账号临时出池（NoteFailures 达阈降权），单次/偶发不罚（不误伤）。ErrNone
 		// 到这里属防御路径（status>=400 但分类成功），语义不明不喂。
 		if kind == upstream.ErrClient {
+			// 15021 = edgebrowser 的**域名路由策略**拒绝（"domain rejected by via
+			// routing policy"）：域名级判定，同一域名的所有账号返回完全一致的 403，
+			// 与账号健康无关。喂连败会让「连续抓几个 Google 文档」把整个 CN 池逐个
+			// 降到出池（5 次达阈）——这不是账号的问题，故与 ErrContentBlocked 同待遇：
+			// 零动作（/v1/fetch 另有跨域兜底，见 fetch.go）。
+			if upstream.HasCodeMarker(body, "15021") {
+				return
+			}
 			h.cfg.Pool.NoteFailures(uid)
 		}
 	}
