@@ -1297,18 +1297,18 @@ $('btnModels').onclick = () => loadModels(true);
 
 /* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
 let logCh = 'all';
-// 运行日志的增量拉取状态（perf）：logRows 是本地窗口，logSinceTs 是下次增量的起点。
+// 运行日志的增量拉取状态（perf）：logRows 是本地窗口，logSeq 是下次增量的起点。
 // 常态每 5 秒只传新增行，不再每轮重拉 500 行（~90KB）并重建整块 DOM。
 // LOG_ROWS_MAX 与服务端环形缓冲同量级（500）——本地窗口不必更大。
 let logRows = [];
-let logSinceTs = null;
-let logSince = '';
+let logSeq = 0;
+let logCursorAt = null;
 const LOG_ROWS_MAX = 500;
 // 增量游标最长有效期：超过则改全量拉（服务端环形缓冲只有 500 行，久了会淘汰
 // 中间旧行，增量就拿不到「完整的一段」）。
 const LOG_CURSOR_MAX_AGE_MS = 5 * 60 * 1000;
 // resetLogWindow 丢弃本地窗口，下次改为全量拉（切视图/手动重载时用）。
-function resetLogWindow() { logRows = []; logSinceTs = null; logSince = ''; }
+function resetLogWindow() { logRows = []; logSeq = 0; logCursorAt = null; }
 $('logChips').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-ch]');
   if (!b) return;
@@ -1346,10 +1346,10 @@ async function loadLogs() {
     // 例外：切走很久再回来时，服务端环形缓冲（500 行）可能已经把中间的旧行
     // 淘汰掉了——增量只会拿到「还在环里」的那部分，中间缺一段。因此游标超过
     // LOG_CURSOR_MAX_AGE_MS 就退回全量拉（一次 90KB，换来不缺行）。
-    if (logSinceTs && (Date.now() - logSinceTs.getTime()) > LOG_CURSOR_MAX_AGE_MS) {
+    if (logCursorAt && (Date.now() - logCursorAt.getTime()) > LOG_CURSOR_MAX_AGE_MS) {
       resetLogWindow();
     }
-    const lq = logSince ? '?since=' + encodeURIComponent(logSince) : '';
+    const lq = logSeq ? '?since_seq=' + logSeq : '';
     const [d, requestRows, credit, errSum] = await Promise.all([
       api('logs' + lq),
       api('request_logs?' + rq.toString()).catch(() => ({ entries: [] })),
@@ -1368,19 +1368,29 @@ async function loadLogs() {
     renderRequestMetrics(metrics, recent);
     // 增量合并到本地窗口（增量拉到的行 append；全量拉到的行 replace）。
     const incoming = d.entries || [];
-    if (logSince) {
+    if (logSeq) {
       logRows = logRows.concat(incoming);
       if (logRows.length > LOG_ROWS_MAX) logRows = logRows.slice(-LOG_ROWS_MAX);
     } else {
       logRows = incoming.slice(-LOG_ROWS_MAX);
     }
-    // 下次增量的起点：本次收到的最后一条的时间戳（同毫秒的多条会被一起带上，
-    // 重复无害——服务端按 After(since) 过滤，同毫秒条目可能重复一次；用
-    // 「已见过的最大 ts」而不是「现在」是对的：不能漏）。
+    // 下次增量的起点：**服务端给的单调节号 seq**，不是时间戳。
+    //
+    // 时间戳在这里靠不住：入环 TS 是 time.Now()，同一时钟刻度内的多次写入完全相同
+    // （Windows 实测 ~15.6ms 粒度，一次 Write 的多行、背靠背的 Write 都会撞）。
+    // 按「最后一条的 ts」推进游标时，同一刻度里排在它后面（或就是它自己）的行
+    // 永远满足「晚于 since」，于是每轮轮询都重复返回一次、游标再也不前进——
+    // 面板「运行日志」底部那行反复刷出来。JS 的 Date 还只有毫秒，把原始串换成
+    // Date 往返只会让重复更严重。
+    // seq 是环内单调递增的（淘汰不回退），`seq > logSeq` 精确表达「还有哪些没给过」。
     for (const e of incoming) {
-      if (e && e.ts && (!logSinceTs || new Date(e.ts) > logSinceTs)) logSinceTs = new Date(e.ts);
+      if (e && typeof e.seq === 'number' && e.seq > logSeq) logSeq = e.seq;
     }
-    logSince = logSinceTs ? logSinceTs.toISOString() : '';
+    // logCursorAt 记的是「上次成功同步的时刻」，不是「上次出现新行的时刻」：
+    // 老化判断要回答的是「我离开多久没跟了」，与有没有新日志无关。空闲时也刷新，
+    // 否则静默期每 5 分钟就会误触发一次全量拉（90KB 白拉）。真正切走很久再回来时
+    // 轮询本来就停了，这里的值会自然变旧，届时照旧回落全量。
+    logCursorAt = new Date();
     const entries = logRows.filter(e => logCh === 'all' || e.ch === logCh);
     setHTML(box, entries.length
       ? entries.map(e => {

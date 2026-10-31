@@ -28,8 +28,20 @@ const (
 )
 
 // LogEntry 单条日志（时间戳取写入时刻；log 包行的行首日期时间已被剥离）。
+//
+// Seq 是环形缓冲内的**单调序号**（随写入递增，淘汰不回退；初值取启动时刻的
+// 毫秒数，使跨进程重启也保持单调）。增量拉取
+// 必须用它做游标，不能用 TS：
+//   - time.Now() 的精度不足以保证唯一。Windows 上实测相邻 Write 落在同一
+//     ~15.6ms 时钟刻度内，TS 完全相同（一次 Write 的多行、以及背靠背的多次
+//     Write 都是）；Linux 上纳秒精度好些但同样不保证。
+//   - 用 TS 做游标时，客户端只能拿到毫秒（JS Date）或全精度（原始串）两种形态；
+//     无论哪种，「同一 TS 的多条」都无法部分推进——要么重复返回，要么整批漏掉。
+//
+// 序号没有这个问题：`Seq > since_seq` 精确表达「这一批里的哪些还没给你」。
 type LogEntry struct {
 	TS   time.Time `json:"ts"`
+	Seq  uint64    `json:"seq"`
 	Ch   string    `json:"ch"`
 	Text string    `json:"text"`
 }
@@ -62,17 +74,23 @@ func classifyLine(line string) string {
 type Ring struct {
 	mu           sync.Mutex
 	entries      []LogEntry
+	seq          uint64
 	cap          int
 	taskArchive  string
 	archiveError string
 }
 
 // NewRing 构建每频道容量为 capacity 的日志环（非正值回退 500）。
+//
+// seq 的起点取**当前时间戳的毫秒数**，不是 0：序号要在进程重启后仍然单调，
+// 否则浏览器里残留的旧游标（重启前 seq 可能已到几万）会大于新进程的序号，
+// `?since_seq=` 一直返回空，「运行日志」页空白最长要到游标老化（5 分钟）才恢复。
+// 用时间做纪元后，重启前的游标必然小于重启后写入的任何序号。
 func NewRing(capacity int) *Ring {
 	if capacity <= 0 {
 		capacity = 500
 	}
-	return &Ring{cap: capacity}
+	return &Ring{cap: capacity, seq: uint64(time.Now().UnixMilli())}
 }
 
 // SetTaskArchive 恢复并持久化任务频道的最近日志。不存在的文件是正常首启。
@@ -133,6 +151,9 @@ func boundedLogText(text string) string {
 
 // appendLocked 入环并按**同频道**计数淘汰最旧行（频道互不挤占）。
 func (r *Ring) appendLocked(entry LogEntry) {
+	// 序号在锁内递增：即使 TS 相同（同一时钟刻度内的多次写入），每行也唯一。
+	r.seq++
+	entry.Seq = r.seq
 	r.entries = append(r.entries, entry)
 	count, first := 0, -1
 	for i, e := range r.entries {
