@@ -370,18 +370,15 @@ function disabledAge(at) {
   return Math.floor(sec / 86400) + ' 天前';
 }
 
-function rateLimitRowsHtml(rows, now) {
+function rateLimitRowsHtml(rows, now, realm) {
   const list = Array.isArray(rows) ? rows.filter(row => row && row.model) : [];
   if (!list.length) return '';
   // 降级路由表（overview 的 model_fallback）：限流的模型若配了等价模型，标注
   // 「⤳ 已路由至 X」—— 否则用户看到「v4.1 限流」会以为服务断了，实际请求已被
   // 自动改道到等价模型继续服务。这条是用户实测反馈要求可见的。
-  const fb = (overviewData && overviewData.model_fallback) || {};
   return '<div class="rate-limits">' + list.map(row => {
     const m = rateLimitMeta(row, now);
-    // 双重查找：上游台账里的 model 可能带 realm 前缀（cn:x），配置里是裸名。
-    const bare = String(m.model || '').replace(/^[a-z]+:/, '');
-    const alt = fb[row.model] || fb[bare] || '';
+    const alt = fallbackTargetFor(m.model, realm);
     const route = alt ? '<span class="fb">⤳ 已路由至 ' + esc(alt) + '</span>' : '';
     const title = alt ? m.title + '；已自动改道到 ' + alt : m.title;
     return '<div class="rate-limit ' + (m.kind === 'model_unavailable' ? 'model-unavailable' : '') +
@@ -559,7 +556,7 @@ function renderAccounts(list) {
         (dk && dk.action ? '<span>' + esc(dk.action) + '</span>' : '') +
         '<div style="margin-top:2px;opacity:.85">' + esc(s.reason) + '</div></div>'
       : '';
-    const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
+    const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now(), s.realm);
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
     // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream
     // enterpriseUnlimitedTotal）。此时剩余额度不参与展示，直接标「不限」。
@@ -642,6 +639,17 @@ function renderAccounts(list) {
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。后端已按
 // 「整池不可用 → 此刻没号 → 部分限流」排好序，这里只做展示（移植上游 PR #120）。
 const ML_STATE = { locked: ['bad', '全池锁定'], starved: ['warn', '此刻无号'], partial: ['ok', '部分限流'] };
+/* fallbackTargetFor 查该 (域, 模型) 配置的降级目标（未配置 → 空串）。
+   配置键既可能是裸名，也可能带 cn:/global: 前缀，查找顺序必须与网关侧
+   lookupFallback 一致：带域前缀的键优先，再回退裸名——只查裸名会让按域
+   配置的键整表失效，限流的模型看不到「已路由至」。限流行（rateLimitRowsHtml）
+   与锁池表（renderModelLocks）共用；函数声明提升，两处调用均可用。 */
+function fallbackTargetFor(model, realm) {
+  if (!model) return '';
+  const bare = String(model).replace(/^[a-z]+:/, '');
+  const t = (overviewData && overviewData.model_fallback) || {};
+  return (realm ? t[realm + ':' + bare] : '') || t[model] || t[bare] || '';
+}
 function renderModelLocks(rows) {
   const tb = $('mlBody');
   const list = Array.isArray(rows) ? rows : [];
@@ -654,8 +662,14 @@ function renderModelLocks(rows) {
     const [cls, label] = ML_STATE[r.state] || ['', r.state || '—'];
     const unlock = r.unlock_at && !/^0001-/.test(r.unlock_at) ? fmtLocalDateTime(r.unlock_at) : '—';
     const fully = r.fully_unlock_at && !/^0001-/.test(r.fully_unlock_at) ? fmtLocalDateTime(r.fully_unlock_at) : '—';
+    // 「锁了但请求照样能过」是这张表最容易误读的地方：配了降级路由表时，该模型
+    // 在本域不可用，请求已被网关改道到等价模型继续服务。不标出来，会把
+    // 「global flash 锁定」直接读成「flash 服务中断」。
+    const alt = fallbackTargetFor(r.model, r.realm);
+    const route = alt ? '<div class="fb" title="该模型在本域不可用时，请求已自动改道到 ' +
+      esc(alt) + '">⤳ 已路由至 ' + esc(alt) + '</div>' : '';
     return '<tr>' +
-      '<td><b>' + esc(r.model) + '</b></td>' +
+      '<td><b>' + esc(r.model) + '</b>' + route + '</td>' +
       '<td>' + (r.realm === 'global' ? '国际版' : '国内版') + '</td>' +
       '<td><span class="tag ' + cls + '">' + label + '</span></td>' +
       '<td class="num">' + (r.servable || 0) + ' / ' + (r.total || 0) + '</td>' +
