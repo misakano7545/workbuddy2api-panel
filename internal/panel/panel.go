@@ -91,6 +91,10 @@ type Config struct {
 	// 面板据它在限流提示里标注「已路由至 X」—— 否则用户看到「v4.1 限流」
 	// 会以为服务断了，实际请求已被自动改道到等价模型继续服务。
 	ModelFallback func() map[string]string
+
+	// ClientKeys 客户端密钥表（nil = 本进程未启用，相关接口回 501）。面板是
+	// 这表的唯一写入口：新建/停用/改上限/删；网关只读它做准入与计量。
+	ClientKeys *httpauth.ClientKeyStore
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -289,6 +293,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))
 	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.checkUpdate))
 	p.mux.HandleFunc("POST /panel/api/update/install", p.withAuth(p.installUpdate))
+	// 客户端密钥（发给别人调 /v1/* 的多把密钥）：新建/改/删都在面板，网关只读。
+	p.mux.HandleFunc("GET /panel/api/client_keys", p.withAuth(p.clientKeys))
+	p.mux.HandleFunc("POST /panel/api/client_keys", p.withAuth(p.clientKeyCreate))
+	p.mux.HandleFunc("POST /panel/api/client_keys/{id}", p.withAuth(p.clientKeyUpdate))
+	p.mux.HandleFunc("POST /panel/api/client_keys/{id}/delete", p.withAuth(p.clientKeyDelete))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

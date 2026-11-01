@@ -9,6 +9,7 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 )
 
 // apiKeyUIDMaxLen 派生/显式 uid 的长度上限（与 validImportUID 同口径：拼文件名的兜底）。
@@ -135,4 +137,104 @@ func apiKeyID(key string) string {
 		}
 	}
 	return b.String()
+}
+
+// ---------------------------------------------------------------------------
+// 客户端密钥（client keys）：发给别人调 /v1/* 的多把密钥
+//
+// 与上面的「API Key 账号」不是一回事：那些是**上游**凭证（ck_/pt_，号池里的号），
+// 这里是**下游**凭证（发给使用者的 sk-...）。面板是唯一写入口，网关只读它做
+// 准入与计量。落盘在 state 同目录 api_keys.json（见 httpauth.OpenClientKeys）。
+// ---------------------------------------------------------------------------
+
+// clientKeysStore 取密钥表；nil = 本进程未启用（回 501，而不是假装「没有密钥」
+// ——后者会让管理员以为密钥被删光了）。
+func (p *Panel) clientKeysStore(w http.ResponseWriter) *httpauth.ClientKeyStore {
+	if p.cfg.ClientKeys == nil {
+		writeErr(w, http.StatusNotImplemented, "客户端密钥未启用")
+		return nil
+	}
+	return p.cfg.ClientKeys
+}
+
+// clientKeys 列出全部客户端密钥（含原文：面板要能随时复制发给别人）。
+//
+//	GET /panel/api/client_keys
+func (p *Panel) clientKeys(w http.ResponseWriter, r *http.Request) {
+	s := p.clientKeysStore(w)
+	if s == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": s.List()})
+}
+
+// clientKeyCreate 新建一把客户端密钥。
+//
+//	POST /panel/api/client_keys
+//	body: {"name":"...","note":"","enabled":true,"expires_at":"2026-12-31T00:00:00Z",
+//	       "daily_limit":{"requests":1000,"tokens":2000000,"credits":50},
+//	       "total_limit":{...},"models":["glm-5.2","gpt-*"]}
+//
+// 密钥原文只由服务端生成，响应里返回完整对象（面板据此展示一次）。
+func (p *Panel) clientKeyCreate(w http.ResponseWriter, r *http.Request) {
+	s := p.clientKeysStore(w)
+	if s == nil {
+		return
+	}
+	var in httpauth.ClientKeyInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	k, err := s.Create(in)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, k)
+}
+
+// clientKeyUpdate 改一把密钥（名称/备注/启用/到期/上限/白名单；原文与累计用量不动）。
+//
+//	POST /panel/api/client_keys/{id}
+func (p *Panel) clientKeyUpdate(w http.ResponseWriter, r *http.Request) {
+	s := p.clientKeysStore(w)
+	if s == nil {
+		return
+	}
+	var in httpauth.ClientKeyInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	k, err := s.Update(r.PathValue("id"), in)
+	if err != nil {
+		writeClientKeyErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, k)
+}
+
+// clientKeyDelete 删除一把密钥。
+//
+//	POST /panel/api/client_keys/{id}/delete
+func (p *Panel) clientKeyDelete(w http.ResponseWriter, r *http.Request) {
+	s := p.clientKeysStore(w)
+	if s == nil {
+		return
+	}
+	if err := s.Delete(r.PathValue("id")); err != nil {
+		writeClientKeyErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// writeClientKeyErr 密钥表错误 → HTTP：不存在 404，其余（校验/写盘）400。
+func writeClientKeyErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, httpauth.ErrNoSuchClientKey) {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeErr(w, http.StatusBadRequest, err.Error())
 }

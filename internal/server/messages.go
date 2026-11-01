@@ -13,24 +13,12 @@ import (
 	"io"
 	"net/http"
 	"strings"
-
-	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 )
 
 func (h *Handler) withAnthropicAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// 官方 SDK 用 x-api-key，不是 Bearer。空 Authorization 时提升，再走同一套比较。
-		if r.Header.Get("Authorization") == "" {
-			if k := r.Header.Get("x-api-key"); k != "" {
-				r.Header.Set("Authorization", "Bearer "+k)
-			}
-		}
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
-			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "missing or invalid API key")
-			return
-		}
-		next(w, r)
-	}
+	// x-api-key 的提升与判定统一在 authGate 里做，这里只选错误体形状
+	// （Anthropic 侧要 type=error / authentication_error）。
+	return h.authGate(authStyleAnthropic, false, next)
 }
 
 // withDualAuth 同时接受 Bearer 与 Anthropic 的 x-api-key 两种携带方式。
@@ -44,23 +32,8 @@ func (h *Handler) withAnthropicAuth(next http.HandlerFunc) http.HandlerFunc {
 // （type: error / error.type: authentication_error），否则维持 OpenAI 口径
 // （error.type: api_error / error.code: invalid_api_key），两类 SDK 都能正确解析。
 func (h *Handler) withDualAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Anthropic 侧：空 Authorization 时把 x-api-key 提升到标准头，复用同一套比较。
-		if r.Header.Get("Authorization") == "" {
-			if k := r.Header.Get("x-api-key"); k != "" {
-				r.Header.Set("Authorization", "Bearer "+k)
-			}
-		}
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
-			if r.Header.Get("x-api-key") != "" || r.Header.Get("anthropic-version") != "" {
-				writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "missing or invalid API key")
-				return
-			}
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
-			return
-		}
-		next(w, r)
-	}
+	// 提升 x-api-key 与判定都在 authGate；错误形状按请求头自动选（authStyleDual）。
+	return h.authGate(authStyleDual, false, next)
 }
 
 func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {

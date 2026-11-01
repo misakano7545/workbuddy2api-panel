@@ -25,6 +25,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/balance"
 	"github.com/misakano7545/workbuddy2api-panel/internal/credithist"
+	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
 	"github.com/misakano7545/workbuddy2api-panel/internal/panel"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
@@ -432,6 +433,18 @@ func main() {
 	up.SetCreditObserver(creditHist.Observe)
 	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
 
+	// 客户端密钥表（发给别人调 /v1/* 的多把密钥）：面板新建、网关只读它做准入与
+	// 计量。与 state/usage 同目录，随 state_file 搬移；文件不存在 = 未启用。
+	// 读坏了直接退出——绝不能当成「没有密钥」，否则「建过密钥就必须带」会悄悄失效。
+	clientKeys, ckErr := httpauth.OpenClientKeys(stateSibling(cfg.StateFile, "api_keys.json"))
+	if ckErr != nil {
+		p.Flush()
+		log.Fatalf("client keys: %v", ckErr)
+	}
+	clientKeys.Start()
+	defer clientKeys.Stop()
+	log.Printf("[clientkeys] 客户端密钥表: %s", stateSibling(cfg.StateFile, "api_keys.json"))
+
 	updateManager := updater.New(appVersion, appRepository, *cfgPath, updater.Settings{
 		AutoEnabled: cfg.Update.AutoEnabled,
 		AutoTime:    cfg.Update.AutoTime,
@@ -439,6 +452,7 @@ func main() {
 	var pn *panel.Panel
 	pn = panel.New(panel.Config{
 		Pool:       p,
+		ClientKeys: clientKeys,
 		ProxyPool:  proxies,
 		Usage:      rec,
 		RequestLog: requestLog,
@@ -509,6 +523,7 @@ func main() {
 	gw = server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
+		ClientKeys:   clientKeys,
 		APIKey:       cfg.APIKey,
 		Session:      sessRouter,
 		StickyCount:  sessCount,

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
@@ -181,5 +182,106 @@ func TestResolveAPIKeyUID(t *testing.T) {
 	}
 	if len(uid) > apiKeyUIDMaxLen {
 		t.Fatalf("派生 uid 长度=%d 超过上限 %d", len(uid), apiKeyUIDMaxLen)
+	}
+}
+
+// clientKeyPanel 造一个只启用客户端密钥管理的面板（Pool/Upstream 都不需要：
+// 这些接口只碰密钥表，不碰号池）。
+func clientKeyPanel(t *testing.T) (*Panel, *httpauth.ClientKeyStore) {
+	t.Helper()
+	store, err := httpauth.OpenClientKeys("")
+	if err != nil {
+		t.Fatalf("OpenClientKeys: %v", err)
+	}
+	return New(Config{Version: "test", APIKey: "admin-key", ClientKeys: store}), store
+}
+
+// doPanelJSON 发一次带管理员密钥的面板 API 请求。
+func doPanelJSON(t *testing.T, pn *Panel, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	req.Header.Set("Authorization", "Bearer admin-key")
+	rec := httptest.NewRecorder()
+	pn.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestClientKeysPanelCRUD 面板新建/列表/改/删走通，且新建返回的密钥原文是 sk-。
+func TestClientKeysPanelCRUD(t *testing.T) {
+	pn, store := clientKeyPanel(t)
+
+	rec := doPanelJSON(t, pn, http.MethodGet, "/panel/api/client_keys", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("列表应 200，got %d body=%s", rec.Code, rec.Body)
+	}
+	var list struct {
+		Keys []httpauth.ClientKey `json:"keys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("列表响应不是 JSON: %v body=%s", err, rec.Body)
+	}
+	if len(list.Keys) != 0 {
+		t.Fatalf("新面板应有 0 把密钥，got %d", len(list.Keys))
+	}
+
+	rec = doPanelJSON(t, pn, http.MethodPost, "/panel/api/client_keys",
+		`{"name":"team-a","enabled":true,"daily_limit":{"requests":5},"models":["glm-*"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("新建应 200，got %d body=%s", rec.Code, rec.Body)
+	}
+	var created httpauth.ClientKey
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("新建响应不是 JSON: %v body=%s", err, rec.Body)
+	}
+	if !strings.HasPrefix(created.Secret, "sk-") || created.ID == "" {
+		t.Fatalf("新建应返回 sk- 原文与 id: %+v", created)
+	}
+	if !store.HasKeys() {
+		t.Fatal("新建后密钥表应非空")
+	}
+
+	if rec := doPanelJSON(t, pn, http.MethodPost, "/panel/api/client_keys/"+created.ID,
+		`{"name":"team-a","enabled":false}`); rec.Code != http.StatusOK {
+		t.Fatalf("改应 200，got %d body=%s", rec.Code, rec.Body)
+	}
+	if got, _ := store.Get(created.ID); got.Enabled {
+		t.Fatal("改后应为停用")
+	}
+
+	if rec := doPanelJSON(t, pn, http.MethodPost, "/panel/api/client_keys/"+created.ID+"/delete", ""); rec.Code != http.StatusOK {
+		t.Fatalf("删应 200，got %d body=%s", rec.Code, rec.Body)
+	}
+	if store.HasKeys() {
+		t.Fatal("删后密钥表应为空")
+	}
+}
+
+// TestClientKeysPanelErrors 未启用 501；坏 JSON/空名 400；不存在 404；无管理员密钥 401。
+func TestClientKeysPanelErrors(t *testing.T) {
+	pn, _ := clientKeyPanel(t)
+	if rec := doPanelJSON(t, pn, http.MethodPost, "/panel/api/client_keys", `{`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("坏 JSON 应 400，got %d", rec.Code)
+	}
+	if rec := doPanelJSON(t, pn, http.MethodPost, "/panel/api/client_keys", `{"name":""}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("空名应 400，got %d", rec.Code)
+	}
+	if rec := doPanelJSON(t, pn, http.MethodPost, "/panel/api/client_keys/nope/delete", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("删不存在的密钥应 404，got %d", rec.Code)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/panel/api/client_keys", nil)
+	rec := httptest.NewRecorder()
+	pn.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("无管理员密钥应 401，got %d body=%s", rec.Code, rec.Body)
+	}
+
+	// 未注入密钥表：接口回 501，而不是假装「没有密钥」。
+	plain := New(Config{Version: "test", APIKey: "admin-key"})
+	if rec := doPanelJSON(t, plain, http.MethodGet, "/panel/api/client_keys", ""); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("未启用应 501，got %d", rec.Code)
 	}
 }

@@ -32,10 +32,14 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool     *pool.Pool
+	Upstream *upstream.Client
+	APIKey   string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
+	// ClientKeys 客户端密钥表（可选；nil = 未启用）。非空时 /v1/* 接受「管理员
+	// 密钥」或表里的客户端密钥：前者不计量，后者按密钥计量并受模型白名单约束。
+	// 只要表里建过一把密钥，负载端点就必须带有效密钥（管理员密钥为空也一样）。
+	ClientKeys *httpauth.ClientKeyStore
+	MaxRotate  int // 单请求最多换号次数，默认 3
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -230,18 +234,18 @@ func NewHandler(cfg Config) *Handler {
 	// /v1/models 是双协议共用端点：Anthropic 官方 SDK 用 x-api-key，
 	// OpenAI 系客户端用 Bearer，两种携带方式都必须放行（见 withDualAuth）。
 	h.mux.HandleFunc("GET /v1/models", h.withDualAuth(h.models))
-	h.mux.HandleFunc("GET /v1/capacity", h.withAuth(h.capacity))
-	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	h.mux.HandleFunc("GET /v1/capacity", h.withAdminAuth(h.capacity))
+	h.mux.HandleFunc("GET /status", h.withAdminAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
 	}
 	if cfg.AdminEnabled {
 		h.mux.HandleFunc("POST /admin/tasks/{name}/run",
-			h.withAuth(h.audit("task.run", auditPathValue("name"), h.adminTaskRun)))
+			h.withAdminAuth(h.audit("task.run", auditPathValue("name"), h.adminTaskRun)))
 	}
 	if cfg.MetricsEnabled {
-		h.mux.HandleFunc("GET /metrics", h.withAuth(h.promMetrics))
+		h.mux.HandleFunc("GET /metrics", h.withAdminAuth(h.promMetrics))
 	}
 	return h
 }
@@ -283,13 +287,126 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
+	return h.authGate(authStyleOpenAI, false, next)
+}
+
+// withAdminAuth 运维端点鉴权：只认管理员密钥。
+//
+// /status、/v1/capacity、/metrics、/admin/* 会透出池内部状态或触发后台任务，
+// 发给别人的客户端密钥不该能看到这些（决策表：403 admin_key_required，并把准入
+// 时预扣的请求数退还——被拒的请求不该计费）。
+func (h *Handler) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return h.authGate(authStyleOpenAI, true, next)
+}
+
+// authStyle 鉴权失败时错误体的形状（按请求方协议选，形状错了客户端会解析失败）。
+type authStyle int
+
+const (
+	authStyleOpenAI authStyle = iota
+	authStyleAnthropic
+	authStyleDual // 双协议端点：按请求头自动选
+)
+
+// authGate 统一的准入闸：管理员密钥 → 放行不计量；客户端密钥 → 计量 + 白名单；
+// 两者都没有/不匹配 → 401；客户端密钥撞运维端点 → 403。
+//
+// 计量口径：Admit 在准入时预扣一次请求数，最终响应 4xx/5xx 时退还，所以「已用
+// 请求数」只算成功请求。token/积分不在这里加，由上游 usage 在 chatCompletions
+// 的 recordAttempt 里累加（换号重试各次都算，上游确实消耗了）。
+func (h *Handler) authGate(style authStyle, adminOnly bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+		// Anthropic 官方 SDK 用 x-api-key：空 Authorization 时提升成 Bearer，
+		// 三个入口（withAuth/withAnthropicAuth/withDualAuth）走同一套判定。
+		if r.Header.Get("Authorization") == "" {
+			if k := r.Header.Get("x-api-key"); k != "" {
+				r.Header.Set("Authorization", "Bearer "+k)
+			}
+		}
+		lease, denied := h.admitClient(r)
+		if denied != nil {
+			h.writeAuthDenied(w, r, style, denied)
 			return
 		}
-		next(w, r)
+		if lease == nil {
+			next(w, r) // 管理员密钥，或「管理员密钥为空且一把客户端密钥都没有」的旧语义
+			return
+		}
+		if adminOnly {
+			h.cfg.ClientKeys.Refund(lease.ID)
+			h.writeAuthDenied(w, r, style, &httpauth.ClientKeyDenied{
+				Status:  http.StatusForbidden,
+				Code:    "admin_key_required",
+				Message: "this endpoint requires the admin API key",
+			})
+			return
+		}
+		r = r.WithContext(httpauth.WithClientKey(r.Context(), lease))
+		obs := &responseObserver{ResponseWriter: w}
+		// defer 而不是顺序执行：handler panic 时也要退还（否则一次崩掉的请求
+		// 会永久占掉一个名额）。
+		defer func() {
+			status := obs.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			if status >= http.StatusBadRequest {
+				h.cfg.ClientKeys.Refund(lease.ID)
+			}
+		}()
+		next(obs, r)
 	}
+}
+
+// admitClient 判定这次请求的身份。
+//
+// 返回 (nil, nil) = 放行且不计量（管理员密钥，或未启用任何密钥的旧语义）；
+// (lease, nil) = 客户端密钥放行；denied 非 nil = 拒绝。
+func (h *Handler) admitClient(r *http.Request) (*httpauth.ClientKeyLease, *httpauth.ClientKeyDenied) {
+	admin := h.loadLive().APIKey
+	if admin != "" && httpauth.VerifyBearer(r, admin) {
+		return nil, nil
+	}
+	store := h.cfg.ClientKeys
+	if admin == "" && !store.HasKeys() {
+		// 零回归：管理员密钥为空、且一把客户端密钥都没建过 → 维持旧「不鉴权」。
+		return nil, nil
+	}
+	lease, denied := store.Admit(httpauth.BearerToken(r), time.Now())
+	if lease == nil && denied == nil {
+		// 管理员密钥非空但没有客户端密钥表（或表里没密钥）：落到「无效凭据」。
+		return nil, &httpauth.ClientKeyDenied{
+			Status:  http.StatusUnauthorized,
+			Code:    "invalid_api_key",
+			Message: "missing or invalid API key",
+		}
+	}
+	return lease, denied
+}
+
+// writeAuthDenied 按请求方协议写鉴权/限额错误（429 带 Retry-After 到 CST 次日 00:00）。
+func (h *Handler) writeAuthDenied(w http.ResponseWriter, r *http.Request, style authStyle, d *httpauth.ClientKeyDenied) {
+	if d.RetryAfter > 0 {
+		secs := int(math.Ceil(d.RetryAfter.Seconds()))
+		if secs < 1 {
+			secs = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+	}
+	anthropic := style == authStyleAnthropic ||
+		(style == authStyleDual && (r.Header.Get("x-api-key") != "" || r.Header.Get("anthropic-version") != ""))
+	if anthropic {
+		typ := "authentication_error"
+		switch d.Status {
+		case http.StatusTooManyRequests:
+			typ = "rate_limit_error"
+		case http.StatusForbidden:
+			typ = "permission_error"
+		}
+		writeAnthropicError(w, d.Status, typ, d.Message)
+		return
+	}
+	writeOpenAIError(w, d.Status, d.Code, d.Message)
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
@@ -876,6 +993,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// 客户端密钥的模型白名单（面板 api_keys.json 里每把钥的 models）：放在别名
+	// 映射**之后**，按实际发往上游的裸名判定——客户端写别名、写 realm 前缀都不
+	// 能绕过白名单。空白名单 = 不限；拒绝即 403，中间件会把准入预扣退还。
+	if l := httpauth.ClientKeyFrom(r.Context()); l != nil && bareModel != "" && !l.AllowsModel(bareModel) {
+		writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
+			fmt.Sprintf("model %q is not allowed for this API key", peek.Model))
+		return
+	}
 	// 模型降级（pool.model_fallback）：curModel 是**本轮实际使用**的模型，初值 = 客户端
 	// 请求的 bareModel；某账号在本轮模型上被 6004 模型级限流、且配置了等价模型时，
 	// 本账号换用等价模型重试（curModel 改指向等价模型），随后重置回 bareModel。
@@ -1115,6 +1240,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				CacheMissTokens:  delta.CacheMissTokens,
 				HasCache:         delta.HasCacheTokens,
 			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
+		}
+
+		// 客户端密钥计量：token/积分按上游 usage 累加（换号重试的每次尝试各算一次，
+		// 上游确实消耗了）；请求数已在准入时预扣，只在最终 4xx/5xx 退还，不在这儿加。
+		if l := httpauth.ClientKeyFrom(r.Context()); l != nil {
+			tokens := delta.TotalTokens
+			if !delta.HasTotalTokens {
+				tokens = delta.PromptTokens + delta.CompletionTokens
+			}
+			creditUsed := 0.0
+			if hasCredit {
+				creditUsed = credit
+			}
+			h.cfg.ClientKeys.AddUsage(l.ID, tokens, creditUsed)
 		}
 	}
 
