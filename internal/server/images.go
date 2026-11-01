@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
@@ -39,10 +40,11 @@ import (
 const defaultImageModel = "cn:hunyuan-image-alpha"
 
 // firstAllowedGenerationImage 白名单兜底（issue #68 设计决策 4）：从最近一次目录
-// 解析留存的出图模型里，按 cn 优先、global 其次返回第一个「白名单内且未被黑名单
-// 隐藏」的 image 模型 (realm, 裸名)。白名单未启用 / 无目录 / 无命中 → false，
-// 调用方维持默认名走拒绝路径（不做隐式放行）。
-func (h *Handler) firstAllowedGenerationImage() (string, string, bool) {
+// 解析留存的出图模型里，按 cn 优先、global 其次返回第一个「全局白名单 + 每 key
+// 白名单内且未被黑名单隐藏」的 image 模型 (realm, 裸名)。白名单未启用 / 无目录 /
+// 无命中 → false，调用方维持默认名走拒绝路径（不做隐式放行）。
+// p 为 nil（管理面/单测）时每 key 维度放行。
+func (h *Handler) firstAllowedGenerationImage(p *httpauth.Principal) (string, string, bool) {
 	snap := h.loadLive()
 	if !snap.AllowlistEnabled || h.cfg.Upstream == nil {
 		return "", "", false
@@ -60,6 +62,9 @@ func (h *Handler) firstAllowedGenerationImage() (string, string, bool) {
 				continue
 			}
 			if _, ok := snap.AllowedModels[realm+":"+mi.ID]; !ok {
+				continue
+			}
+			if !p.Allows(realm, mi.ID) {
 				continue
 			}
 			return realm, mi.ID, true
@@ -106,9 +111,9 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	// 未点名模型时先做白名单内兜底（设计决策 4）：默认模型不在白名单时改选
 	// 白名单内第一个可用出图模型；白名单内无出图模型则维持默认名落入拒绝
 	//（不做隐式放行）。文案与 chat 侧同口径，避免枚举探测。
-	if !h.allowedModel(realm, bare) {
+	if !h.allowedModel(realm, bare) || !principalFrom(r).Allows(realm, bare) {
 		if !named {
-			if fr, fb, ok := h.firstAllowedGenerationImage(); ok {
+			if fr, fb, ok := h.firstAllowedGenerationImage(principalFrom(r)); ok {
 				realm, bare = fr, fb
 			} else {
 				writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
@@ -137,7 +142,9 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 
 	// 记账：与 chat 同一条管道（请求台账归档由 ServeHTTP 的 isChatEntry 接管，
 	// 这里补账号/模型/用量/扣费 → stdout 流水行 + 面板「请求记录」+ 用量与成本账本）。
-	st := &chatStat{start: start, model: bare, mode: imageMode(edit), toks: -1, budget: h.budget}
+	st := &chatStat{start: start, model: bare, mode: imageMode(edit), toks: -1, budget: h.budget,
+		// 出图同样计入每 key 日预算（上游 usage.credit 是真实扣费）。
+		principal: principalFrom(r)}
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		st.requestID = tr.id

@@ -24,6 +24,10 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+	// KeysFile 命名推理 key 注册表（多 key + 每 key 策略）落盘路径；只存 SHA-256
+	// 摘要。空 = 与 state_file 同目录的 api_keys.json（normalize 推导）。主口令
+	// api_key 独立于本表，仍是面板/管理端点的唯一钥匙。
+	KeysFile string `json:"keys_file"`
 
 	// DNSServers 出站解析用的 DNS 服务器（空 = 用系统解析器）；也可用 WB2A_DNS 覆盖
 	// （逗号分隔）。给没有 /etc/resolv.conf 的环境用：Android 上 Go 的解析器会退回
@@ -487,6 +491,8 @@ func Default() *Config {
 		APIKey:    "",
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
+		// KeysFile 故意留空：由 normalize 从最终的 StateFile 推导（含 env 覆盖），
+		// 在这里写死会让 /srv/data 这类部署拿到 ./data/api_keys.json。
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
@@ -659,6 +665,9 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_STATE_FILE"); v != "" {
 		c.StateFile = v
+	}
+	if v := os.Getenv("WB2A_KEYS_FILE"); v != "" {
+		c.KeysFile = v
 	}
 	if v := os.Getenv("WB2A_DNS"); v != "" {
 		c.DNSServers = splitCSV(v)
@@ -885,6 +894,15 @@ func (c *Config) normalize() error {
 	var err error
 	if err = c.normalizeThinking(); err != nil {
 		return err
+	}
+	// 命名 key 表跟随 state_file 搬移：未显式配置时与它同目录。放在 normalize
+	// （而非 Default）里推导，环境变量 WB2A_STATE_FILE 覆盖后才会得到正确目录。
+	if strings.TrimSpace(c.KeysFile) == "" {
+		if dir := filepath.Dir(c.StateFile); dir != "" && dir != "." {
+			c.KeysFile = filepath.Join(dir, "api_keys.json")
+		} else {
+			c.KeysFile = "api_keys.json"
+		}
 	}
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5

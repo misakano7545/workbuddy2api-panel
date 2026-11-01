@@ -13,6 +13,7 @@ package panel
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -48,9 +49,12 @@ type Config struct {
 	AutoTasksEnabled func() bool
 	AuthDir          string // OAuth 登录完成后凭证落盘目录
 	APIKey           string // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
-	RedisMode        string // "upstash" / "noop"，仅观测透出
-	Version          string // 面板版本号（展示用）
-	Updater          *updater.Manager
+	// Keys 命名推理 key 注册表（只做管理：/panel/api/keys*）。面板鉴权仍只认主口令，
+	// 命名 key 进不了面板——推理面的钥匙不该顺带开出运维面。
+	Keys      *httpauth.Store
+	RedisMode string // "upstash" / "noop"，仅观测透出
+	Version   string // 面板版本号（展示用）
+	Updater   *updater.Manager
 
 	// PollIntervalSec 前端自动刷新间隔（秒）。0 = 用前端缺省值。
 	// 面板每轮刷新会重建若干表格并打一批接口；账号多、或只是开着面板当监控用
@@ -289,6 +293,13 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))
 	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.checkUpdate))
 	p.mux.HandleFunc("POST /panel/api/update/install", p.withAuth(p.installUpdate))
+	// 命名推理 key（多 key + 每 key 策略）：只做管理，明文 secret 仅在创建/轮换的
+	// 响应里出现一次。前端管理页在后续 PR 接；本次先给 JSON 接口。
+	p.mux.HandleFunc("GET /panel/api/keys", p.withAuth(p.keysList))
+	p.mux.HandleFunc("POST /panel/api/keys", p.withAuth(p.keyCreate))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/update", p.withAuth(p.keyUpdate))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/delete", p.withAuth(p.keyDelete))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/rotate", p.withAuth(p.keyRotate))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
@@ -303,7 +314,18 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // 即用新值（无需重启）。
 func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, p.apiKey()) {
+		key := p.apiKey()
+		if strings.TrimSpace(key) == "" {
+			// 空主口令只在「没有命名 key」时才等于不鉴权；一旦配了 key 表，
+			// 匿名进面板就是漏，必须 401（与 server 的 masterAuthOK 同口径）。
+			if !p.cfg.Keys.Empty() {
+				writeErr(w, http.StatusUnauthorized, "invalid_api_key")
+				return
+			}
+			next(w, r)
+			return
+		}
+		if !httpauth.VerifyBearer(r, key) {
 			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
 			return
 		}
@@ -1505,6 +1527,175 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"ok": false, "error": msg})
+}
+
+// ---------------------------------------------------------------------------
+// 命名推理 key 管理（/panel/api/keys*）
+//
+// 只做管理面：列表/新建/局部更新/删除/轮换。注册表由 main 注入，nil（老部署或
+// 单测）时一律 501。明文 secret 只在创建与轮换的响应里出现一次，此后面板只能
+// 看到 hint；审计只写 log.Printf（面板运行日志可见），管理操作审计接线另开 PR。
+// ---------------------------------------------------------------------------
+
+// decodeKeyBody 解析 JSON body；空 body 视为零值（rotate 的 grace_hours 可省略）。
+func decodeKeyBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	if r.Body == nil {
+		return true
+	}
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(v)
+	if err == nil || errors.Is(err, io.EOF) {
+		return true
+	}
+	writeErr(w, http.StatusBadRequest, "parse body: "+err.Error())
+	return false
+}
+
+// parseKeyExpiry 解析 expires_at：空串 = 不限期；只接受 RFC3339（带时区，避免
+// 「本地时区还是 UTC」的歧义）。
+func parseKeyExpiry(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, errors.New("expires_at 须为 RFC3339（如 2026-12-31T23:59:59+08:00）")
+	}
+	return t, nil
+}
+
+// keysList 列出全部命名 key（安全视图，不含摘要）。
+func (p *Panel) keysList(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Keys == nil {
+		writeErr(w, http.StatusNotImplemented, "api key store not available")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "keys": p.cfg.Keys.List()})
+}
+
+// keyCreate 新建命名 key；响应里的 secret 只出现这一次。
+func (p *Panel) keyCreate(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Keys == nil {
+		writeErr(w, http.StatusNotImplemented, "api key store not available")
+		return
+	}
+	var body struct {
+		Name      string          `json:"name"`
+		Policy    httpauth.Policy `json:"policy"`
+		ExpiresAt string          `json:"expires_at"`
+	}
+	if !decodeKeyBody(w, r, &body) {
+		return
+	}
+	expires, err := parseKeyExpiry(body.ExpiresAt)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	v, secret, err := p.cfg.Keys.Create(body.Name, body.Policy, expires)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// 审计行只记 ID 与策略维度，绝不打印 secret。
+	log.Printf("[panel] 新建命名 API key %s（名称 %q）：模型白名单 %d 条 / rpm %d / 并发 %d / 日预算 %.2f",
+		v.ID, v.Name, len(v.Policy.Models), v.Policy.RPM, v.Policy.MaxConcurrent, v.Policy.DailyCredits)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": v, "secret": secret})
+}
+
+// keyUpdate 局部更新 name / policy / expires_at / disabled；nil 字段保持不变。
+func (p *Panel) keyUpdate(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Keys == nil {
+		writeErr(w, http.StatusNotImplemented, "api key store not available")
+		return
+	}
+	id := r.PathValue("id")
+	var body struct {
+		Name        *string          `json:"name"`
+		Policy      *httpauth.Policy `json:"policy"`
+		ExpiresAt   *string          `json:"expires_at"`
+		ClearExpiry bool             `json:"clear_expiry"`
+		Disabled    *bool            `json:"disabled"`
+	}
+	if !decodeKeyBody(w, r, &body) {
+		return
+	}
+	in := httpauth.UpdateInput{
+		Name: body.Name, Policy: body.Policy,
+		ClearExpiry: body.ClearExpiry, Disabled: body.Disabled,
+	}
+	if body.ExpiresAt != nil {
+		t, err := parseKeyExpiry(*body.ExpiresAt)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !t.IsZero() {
+			in.ExpiresAt = &t
+		}
+	}
+	v, err := p.cfg.Keys.Update(id, in)
+	if errors.Is(err, httpauth.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "api key not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	log.Printf("[panel] 更新命名 API key %s：disabled=%v / rpm %d / 并发 %d / 日预算 %.2f",
+		v.ID, v.Disabled, v.Policy.RPM, v.Policy.MaxConcurrent, v.Policy.DailyCredits)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": v})
+}
+
+// keyDelete 删除命名 key；在途请求不受影响，下一个请求即 401。
+func (p *Panel) keyDelete(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Keys == nil {
+		writeErr(w, http.StatusNotImplemented, "api key store not available")
+		return
+	}
+	id := r.PathValue("id")
+	err := p.cfg.Keys.Delete(id)
+	if errors.Is(err, httpauth.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "api key not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "delete: "+err.Error())
+		return
+	}
+	log.Printf("[panel] 删除命名 API key %s", id)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// keyRotate 生成新 secret；旧 secret 在宽限期（grace_hours，缺省 24h）内仍可用。
+func (p *Panel) keyRotate(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Keys == nil {
+		writeErr(w, http.StatusNotImplemented, "api key store not available")
+		return
+	}
+	id := r.PathValue("id")
+	var body struct {
+		GraceHours float64 `json:"grace_hours"`
+	}
+	if !decodeKeyBody(w, r, &body) {
+		return
+	}
+	grace := time.Duration(body.GraceHours * float64(time.Hour))
+	if grace <= 0 {
+		grace = httpauth.DefaultRotateGrace
+	}
+	v, secret, err := p.cfg.Keys.Rotate(id, grace)
+	if errors.Is(err, httpauth.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "api key not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "rotate: "+err.Error())
+		return
+	}
+	log.Printf("[panel] 轮换命名 API key %s：旧 secret 宽限至 %s", v.ID, v.RotatedAt.Add(grace).Format(time.RFC3339))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": v, "secret": secret})
 }
 
 // balanceHistory 返回余额采样序列，供「余额趋势」视图画折线。

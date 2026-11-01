@@ -169,7 +169,7 @@ func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
 	if bare == "" {
 		bare = model
 	}
-	if !h.allowedModel(realm, bare) || h.hiddenModel(realm, bare) {
+	if !h.allowedModel(realm, bare) || !principalFrom(r).Allows(realm, bare) || h.hiddenModel(realm, bare) {
 		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable", "model is unavailable by gateway configuration, try another model")
 		return
 	}

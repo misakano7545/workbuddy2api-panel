@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
@@ -67,6 +68,9 @@ type chatStat struct {
 	cacheMiss        int
 	hasCache         bool
 	budget           *dailyBudget
+	// principal 本次请求的 key 身份（主口令为共享 no-op 句柄）：done() 用它把
+	// 上游末帧的真实 credit 回写到每 key 当日预算。nil = 不过 withKey 的裸用路径。
+	principal *httpauth.Principal
 
 	// 调用来源（客户端 IP / User-Agent）。空 = 未采集（logging.request_client_info
 	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
@@ -117,6 +121,9 @@ func (s *chatStat) done() {
 		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit,
 		s.clientIP, s.userAgent, s.prep, s.do, s.effort, s.effortReq)
 	s.budget.add(s.credit, s.hasCredit)
+	// 每 key 日预算：只认上游末帧的真实扣费（缺失/非法由 Charge 自行忽略），
+	// 与网关全局预算同一份口径、互不替代。
+	s.principal.Charge(s.credit, s.hasCredit, time.Now())
 	s.budget.observeCache(int64(s.cacheHit), int64(s.cacheMiss), s.hasCache)
 	noteProm(s, total)
 }

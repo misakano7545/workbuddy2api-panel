@@ -13,23 +13,18 @@ import (
 	"io"
 	"net/http"
 	"strings"
-
-	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 )
 
 func (h *Handler) withAnthropicAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 官方 SDK 用 x-api-key，不是 Bearer。空 Authorization 时提升，再走同一套比较。
+		// 官方 SDK 用 x-api-key，不是 Bearer。空 Authorization 时提升到标准头，
+		// 让 serveKey 的取值路径与 OpenAI 侧完全一致。
 		if r.Header.Get("Authorization") == "" {
 			if k := r.Header.Get("x-api-key"); k != "" {
 				r.Header.Set("Authorization", "Bearer "+k)
 			}
 		}
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
-			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "missing or invalid API key")
-			return
-		}
-		next(w, r)
+		h.serveKey(w, r, true, next)
 	}
 }
 
@@ -51,15 +46,10 @@ func (h *Handler) withDualAuth(next http.HandlerFunc) http.HandlerFunc {
 				r.Header.Set("Authorization", "Bearer "+k)
 			}
 		}
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
-			if r.Header.Get("x-api-key") != "" || r.Header.Get("anthropic-version") != "" {
-				writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "missing or invalid API key")
-				return
-			}
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
-			return
-		}
-		next(w, r)
+		// 错误形状按请求方选：带 x-api-key 或 anthropic-version 的按 Anthropic 口径，
+		// 否则维持 OpenAI 口径（两类 SDK 都能正确解析）。
+		anthropic := r.Header.Get("x-api-key") != "" || r.Header.Get("anthropic-version") != ""
+		h.serveKey(w, r, anthropic, next)
 	}
 }
 

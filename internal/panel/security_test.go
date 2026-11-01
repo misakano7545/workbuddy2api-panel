@@ -3,10 +3,15 @@ package panel
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 )
 
 func newTestPanel() *Panel {
@@ -220,5 +225,124 @@ func TestAuthLayerBehavior(t *testing.T) {
 	p.ServeHTTP(rec2, req2)
 	if rec2.Code == http.StatusUnauthorized {
 		t.Error("valid key must pass the auth layer")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 命名推理 key：面板只做管理，且只认主口令
+// ---------------------------------------------------------------------------
+
+func testKeysStore(t *testing.T) *httpauth.Store {
+	t.Helper()
+	s, err := httpauth.NewKeyStore(filepath.Join(t.TempDir(), "api_keys.json"))
+	if err != nil {
+		t.Fatalf("NewKeyStore: %v", err)
+	}
+	return s
+}
+
+// TestPanelRejectsNamedKey 推理面的命名 key 绝不能顺带开进运维面。
+func TestPanelRejectsNamedKey(t *testing.T) {
+	store := testKeysStore(t)
+	_, secret, err := store.Create("ci", httpauth.Policy{}, time.Time{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	p := New(Config{Version: "test", APIKey: "master", Keys: store})
+
+	req := httptest.NewRequest("GET", "/panel/api/overview", nil)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("命名 key 不该进面板，got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+// TestPanelClosedWhenKeysConfiguredWithoutMaster 空主口令 + 非空 key 表：匿名进不了面板。
+func TestPanelClosedWhenKeysConfiguredWithoutMaster(t *testing.T) {
+	store := testKeysStore(t)
+	if _, _, err := store.Create("ci", httpauth.Policy{}, time.Time{}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	p := New(Config{Version: "test", Keys: store})
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/api/overview", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("配了 key 表时匿名应 401，got %d body=%s", rec.Code, rec.Body)
+	}
+
+	// 没有 key 表时维持老的「不鉴权」语义（依赖 Pool 的 handler 会 5xx/501，
+	// 但不该是 401）。
+	open := New(Config{Version: "test"})
+	rec = httptest.NewRecorder()
+	open.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/api/keys", nil))
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatal("无 key 表且空主口令时应维持不鉴权")
+	}
+}
+
+// TestPanelKeyCRUD 管理端点：新建只回一次明文、列表不含摘要、轮换与删除生效。
+func TestPanelKeyCRUD(t *testing.T) {
+	store := testKeysStore(t)
+	p := New(Config{Version: "test", APIKey: "master", Keys: store})
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer master")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := call("POST", "/panel/api/keys", `{"name":"ci","policy":{"rpm":5,"max_concurrent":2,"daily_credits":1.5,"models":["glm-5.2"]}}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "wb2a_") {
+		t.Fatalf("新建应返回一次性 secret，got %d body=%s", rec.Code, rec.Body)
+	}
+	var created struct {
+		Key    httpauth.View `json:"key"`
+		Secret string        `json:"secret"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("响应体不是 JSON: %v", err)
+	}
+	if created.Key.Policy.RPM != 5 || created.Key.Policy.MaxConcurrent != 2 {
+		t.Fatalf("策略未落库: %+v", created.Key.Policy)
+	}
+
+	rec = call("GET", "/panel/api/keys", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("列表 got %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "hash") || strings.Contains(rec.Body.String(), created.Secret) {
+		t.Fatalf("列表泄漏摘要/明文: %s", rec.Body)
+	}
+
+	rec = call("POST", "/panel/api/keys/"+created.Key.ID+"/update", `{"disabled":true}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"disabled":true`) {
+		t.Fatalf("更新 disabled 失败: %d %s", rec.Code, rec.Body)
+	}
+
+	rec = call("POST", "/panel/api/keys/"+created.Key.ID+"/rotate", `{"grace_hours":1}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "wb2a_") {
+		t.Fatalf("轮换应返回新 secret: %d %s", rec.Code, rec.Body)
+	}
+
+	rec = call("POST", "/panel/api/keys/"+created.Key.ID+"/delete", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("删除 got %d body=%s", rec.Code, rec.Body)
+	}
+	if !store.Empty() {
+		t.Fatal("删除后注册表应为空")
+	}
+
+	// 未注入注册表 → 501（老部署/单测路径）。
+	legacy := New(Config{Version: "test", APIKey: "master"})
+	req := httptest.NewRequest("GET", "/panel/api/keys", nil)
+	req.Header.Set("Authorization", "Bearer master")
+	rec = httptest.NewRecorder()
+	legacy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("无注册表应 501，got %d", rec.Code)
 	}
 }

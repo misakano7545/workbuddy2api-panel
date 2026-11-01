@@ -31,7 +31,7 @@ func (h *Handler) WatchCatalog(ctx context.Context, every time.Duration, notify 
 	var prevFP string
 	var prevIDs []string
 	for {
-		fp, ids := catalogFingerprint(h.modelList())
+		fp, ids := catalogFingerprint(h.modelList(nil))
 		switch {
 		case prevFP == "":
 			log.Printf("watchdog: 上游目录基线 %d 个模型 fp=%s", len(ids), fp[:12])

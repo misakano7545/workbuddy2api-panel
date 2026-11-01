@@ -32,10 +32,14 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool     *pool.Pool
+	Upstream *upstream.Client
+	APIKey   string // 主口令；空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
+	// Keys 命名推理 key 注册表（多 key + 每 key 策略）。nil / 空表 = 只有主口令，
+	// 行为与旧版逐字节一致；非空时命名 key 只能用于推理面（/v1/*、/v2/chat/busy），
+	// 面板与 /status、/metrics、/admin 仍只认主口令。
+	Keys      *httpauth.Store
+	MaxRotate int // 单请求最多换号次数，默认 3
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -209,24 +213,26 @@ func NewHandler(cfg Config) *Handler {
 		budget:      newDailyBudget(cfg.BudgetLimit),
 	}
 	h.budget.setGuards(cfg.BurstCreditLimit, cfg.CacheLowRate)
-	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
-	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	// 推理面挂 withKey（主口令或命名 key + 每 key 策略准入）；管理面（/status、
+	// /metrics、/admin、/v1/capacity）仍挂 withAuth，只认主口令。
+	h.mux.HandleFunc("POST /v1/chat/completions", h.withKey(h.chatCompletions))
+	h.mux.HandleFunc("POST /v1/responses", h.withKey(h.responses))
 	// Codex 客户端在 supports_websockets/prefer_websockets 时先探 GET /v1/responses 升级 WS。
 	// 本网关不做连接内 previous_response_id 复用，回 426 让它立刻粘性回落 HTTPS。
-	h.mux.HandleFunc("GET /v1/responses", h.withAuth(h.responsesWebsocketUnsupported))
-	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, false) }))
-	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) }))
+	h.mux.HandleFunc("GET /v1/responses", h.withKey(h.responsesWebsocketUnsupported))
+	h.mux.HandleFunc("POST /v1/images/generations", h.withKey(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, false) }))
+	h.mux.HandleFunc("POST /v1/images/edits", h.withKey(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) }))
 	// 实验特性：OpenAI 兼容嵌入（features.embeddings_enabled，默认关闭；关着时回 403）。
-	h.mux.HandleFunc("POST /v1/embeddings", h.withAuth(h.embeddings))
+	h.mux.HandleFunc("POST /v1/embeddings", h.withKey(h.embeddings))
 	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))
 	h.mux.HandleFunc("POST /messages", h.withAnthropicAuth(h.messages))
 	// 官方 agenttool 联网检索/抓页的网关透传（非对话端点，与 images 同套取号/失败处置）。
-	h.mux.HandleFunc("POST /v1/search", h.withAuth(h.search))
+	h.mux.HandleFunc("POST /v1/search", h.withKey(h.search))
 	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。
-	h.mux.HandleFunc("POST /v1/fetch", h.withAuth(h.fetch))
+	h.mux.HandleFunc("POST /v1/fetch", h.withKey(h.fetch))
 	// POST /v2/chat/busy：官方客户端的「模型忙」预检（国区上游 200、国际版上游 404，
 	// 见 busy.go 文件头）。本地按池台账算，不打上游。
-	h.mux.HandleFunc("POST /v2/chat/busy", h.withAuth(h.chatBusy))
+	h.mux.HandleFunc("POST /v2/chat/busy", h.withKey(h.chatBusy))
 	// /v1/models 是双协议共用端点：Anthropic 官方 SDK 用 x-api-key，
 	// OpenAI 系客户端用 Bearer，两种携带方式都必须放行（见 withDualAuth）。
 	h.mux.HandleFunc("GET /v1/models", h.withDualAuth(h.models))
@@ -282,13 +288,123 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// withAuth 管理面鉴权：只认主口令（api_key）。命名 key 一律进不来——每 key 策略
+// 管的是推理流量，不能顺带把 /status、/metrics、/admin、/v1/capacity 的运维信息面
+// 也开出去。
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+		if !h.masterAuthOK(r) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
 		next(w, r)
+	}
+}
+
+// masterAuthOK 主口令校验。
+//
+// 空 api_key 的老语义是「完全不鉴权」，但只在**没有命名 key** 时成立：一旦配了
+// key 表还放行匿名请求，就是「配了钥匙却全开」的静默失效，比 401 危险得多。
+func (h *Handler) masterAuthOK(r *http.Request) bool {
+	master := h.loadLive().APIKey
+	if strings.TrimSpace(master) == "" {
+		return h.cfg.Keys.Empty()
+	}
+	return httpauth.VerifyBearer(r, master)
+}
+
+// keyPrincipalCtx 推理面请求上下文键：本次请求的 key 身份。
+type keyPrincipalCtx struct{}
+
+// principalFrom 取本次请求的 key 身份；管理面（未过 withKey）返回 nil。
+// nil 的 Allows/Admit/Charge 全为放行/no-op，裸用与单测路径不受影响。
+func principalFrom(r *http.Request) *httpauth.Principal {
+	if r == nil {
+		return nil
+	}
+	p, _ := r.Context().Value(keyPrincipalCtx{}).(*httpauth.Principal)
+	return p
+}
+
+// bearerToken 取请求携带的密钥原文：先 Authorization: Bearer，再 Anthropic 的
+// x-api-key（官方 SDK 走后者）。
+func bearerToken(r *http.Request) string {
+	if a := r.Header.Get("Authorization"); strings.HasPrefix(a, httpauthBearerPrefix) {
+		return a[len(httpauthBearerPrefix):]
+	}
+	return r.Header.Get("x-api-key")
+}
+
+// httpauthBearerPrefix 与 httpauth 内部保持一致的认证方案前缀。
+const httpauthBearerPrefix = "Bearer "
+
+// authenticateKey 推理面鉴权：主口令优先，其次命名 key。
+// 返回 (nil, status, code, msg) 表示拒绝；status 为 0 表示通过。
+func (h *Handler) authenticateKey(r *http.Request) (*httpauth.Principal, int, string, string) {
+	// 保留原文比较（不 TrimSpace）：老配置里带空白的 api_key 必须逐字节继续可用。
+	master := h.loadLive().APIKey
+	store := h.cfg.Keys
+	token := bearerToken(r)
+	if strings.TrimSpace(master) != "" {
+		if httpauth.TokenMatches(token, master) {
+			return httpauth.MasterPrincipal(), 0, "", ""
+		}
+	} else if store.Empty() {
+		// 既没主口令也没命名 key：维持「完全不鉴权」老语义。
+		return httpauth.MasterPrincipal(), 0, "", ""
+	}
+	if !store.Empty() && token != "" {
+		if p, err := store.Authenticate(token, time.Now()); err == nil {
+			return p, 0, "", ""
+		} else if errors.Is(err, httpauth.ErrExpired) {
+			return nil, http.StatusUnauthorized, "invalid_api_key", "API key expired"
+		} else if errors.Is(err, httpauth.ErrDisabled) {
+			return nil, http.StatusUnauthorized, "invalid_api_key", "API key disabled"
+		}
+	}
+	return nil, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key"
+}
+
+// writeKeyReject 按协议形状写鉴权/限流拒绝：Anthropic 侧用 error.type，OpenAI 侧
+// 用 error.code，两类 SDK 都能正确解析。
+func (h *Handler) writeKeyReject(w http.ResponseWriter, anthropic bool, status int, code, msg string) {
+	if anthropic {
+		typ := "authentication_error"
+		if status == http.StatusTooManyRequests {
+			typ = "rate_limit_error"
+		}
+		writeAnthropicError(w, status, typ, msg)
+		return
+	}
+	writeOpenAIError(w, status, code, msg)
+}
+
+// serveKey 推理面统一入口：鉴权 → RPM/并发准入 → 当日预算准入 → 注入身份。
+// 并发槽在整条请求（含流式全程）结束才归还：defer 覆盖 next 的同步执行区间。
+func (h *Handler) serveKey(w http.ResponseWriter, r *http.Request, anthropic bool, next http.HandlerFunc) {
+	p, status, code, msg := h.authenticateKey(r)
+	if p == nil {
+		h.writeKeyReject(w, anthropic, status, code, msg)
+		return
+	}
+	now := time.Now()
+	if err := p.Admit(now); err != nil {
+		h.writeKeyReject(w, anthropic, http.StatusTooManyRequests, "rate_limit_exceeded", err.Error())
+		return
+	}
+	defer p.Release()
+	if used, limit, ok := p.AdmitBudget(now); !ok {
+		h.writeKeyReject(w, anthropic, http.StatusTooManyRequests, "daily_budget_exceeded",
+			fmt.Sprintf("api key daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit))
+		return
+	}
+	next(w, r.WithContext(context.WithValue(r.Context(), keyPrincipalCtx{}, p)))
+}
+
+// withKey 推理面中间件（OpenAI 错误形状）。
+func (h *Handler) withKey(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		h.serveKey(w, r, false, next)
 	}
 }
 
@@ -434,7 +550,7 @@ const (
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   h.modelList(principalFrom(r)),
 	})
 }
 
@@ -559,11 +675,19 @@ func (h *Handler) allowedModel(realm, bare string) bool {
 // modelList 模型列表：CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel
 // 对称）；global.enabled=true 时追加 global: 前缀的国际版名单。
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
-func (h *Handler) modelList() []map[string]any {
+//
+// p 是本次请求的 key 身份：非 nil 且带模型白名单时，列表只保留白名单内的模型
+// （与全局 models.allowed 取交集）；nil（管理面/后台任务/单测）不过滤。
+func (h *Handler) modelList(p *httpauth.Principal) []map[string]any {
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
 		// 白名单过滤（issue #68）：启用时不在白名单的模型不进 cn 对话列表。
 		if !h.allowedModel("cn", mi.ID) {
+			continue
+		}
+		// 每 key 白名单：列表不列出「这把钥匙调不通」的模型，避免客户端按列表
+		// 选到必然 400 的模型（与全局白名单同一条发现面口径）。
+		if !p.Allows("cn", mi.ID) {
 			continue
 		}
 		if h.hiddenModel("cn", mi.ID) {
@@ -628,6 +752,9 @@ func (h *Handler) modelList() []map[string]any {
 			if !h.allowedModel("global", id) {
 				continue
 			}
+			if !p.Allows("global", id) {
+				continue
+			}
 			if h.hiddenModel("global", id) {
 				continue
 			}
@@ -673,13 +800,13 @@ func (h *Handler) modelList() []map[string]any {
 	}
 	// 出图模型（目录里被 tag 剔掉的 text-to-image / image-to-image）：对话列表照旧不含它们，
 	// 这里以 image_generation=true 单列——客户端据此发现可用的出图模型名，不会误发对话。
-	out = append(out, h.generationModelEntries()...)
+	out = append(out, h.generationModelEntries(p)...)
 	return out
 }
 
 // generationModelEntries /v1/models 里的出图模型条目（来自最近一次目录解析的旁路留存，
 // 零额外上游请求；尚未探测过该域时为空）。字段只给确定值：不编 context/output。
-func (h *Handler) generationModelEntries() []map[string]any {
+func (h *Handler) generationModelEntries(p *httpauth.Principal) []map[string]any {
 	if h.cfg.Upstream == nil {
 		return nil
 	}
@@ -701,6 +828,9 @@ func (h *Handler) generationModelEntries() []map[string]any {
 			}
 			// 白名单同样管出图单列（issue #68）：白名单外的出图模型不该被发现。
 			if !h.allowedModel(realm, mi.ID) {
+				continue
+			}
+			if !p.Allows(realm, mi.ID) {
 				continue
 			}
 			entry := map[string]any{
@@ -906,7 +1036,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if to == "" {
 			to = m[curModel]
 		}
-		if to == "" || to == curModel || fallbackTried[to] || !h.allowedModel(realm, to) || h.hiddenModel(realm, to) {
+		if to == "" || to == curModel || fallbackTried[to] || !h.allowedModel(realm, to) ||
+			!principalFrom(r).Allows(realm, to) || h.hiddenModel(realm, to) {
 			return ""
 		}
 		return to
@@ -941,6 +1072,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// routeModel：映射请求显示真实路由名（别名 INFO 行已记录 客户端名 -> 真实名，
 	// 两行合看即全链路；流水行与账本/上游口径一致，运维排查不用做心算翻译）。
 	st := newChatStat(time.Now(), routeModel, peek.Stream, h.budget)
+	// 每 key 日预算的记账句柄：done() 用同一份 principal 回写本次 credit。
+	st.principal = principalFrom(r)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
@@ -956,8 +1089,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// models.allowed 白名单（issue #68）：别名映射之后、黑名单检查之前——
 	// 别名解析出的真实目标同样受检，不能绕过白名单（与 hidden 同一条不变量）。
 	// 白名单外一律 400 拒绝，不打上游、不占选号；文案不区分「不存在」与
-	// 「未在白名单」，避免枚举探测。
-	if !h.allowedModel(realm, bareModel) {
+	// 「未在白名单」，避免枚举探测。每 key 白名单与全局白名单取交集——单点判据，
+	// 漏一处就等于每 key 白名单可被绕过。
+	if !h.allowedModel(realm, bareModel) || !principalFrom(r).Allows(realm, bareModel) {
 		writeOpenAIErrorHint(w, http.StatusBadRequest, "model_unavailable",
 			"model is not in the gateway allowlist, try another model", "")
 		st.status = http.StatusBadRequest

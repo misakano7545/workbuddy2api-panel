@@ -73,11 +73,12 @@ func (h *Handler) chatBusy(w http.ResponseWriter, r *http.Request) {
 
 // servableModelSet 返回网关当前对外提供的模型 id 集合（裸名，不含 realm 前缀）。
 //
-// 取 /v1/models 同一份动态目录缓存（modelList 内部已按 hidden_models 过滤，
-// 这里不再重复过滤）；缓存为空（还没探测过/探测失败）时回空集，调用方据此把
-// 模型判为 unknown —— 不编造「这个模型我们有」。
+// 取 /v1/models 同一份动态目录缓存；缓存为空（还没探测过/探测失败）时回空集，
+// 调用方据此把模型判为 unknown —— 不编造「这个模型我们有」。
+// 传 nil principal = 按全量目录判（本函数只用于繁忙度预判，不做访问判定；
+// 每 key 白名单在真正的入口 handler 里已经判过，不会因这里多列模型而放行）。
 func (h *Handler) servableModelSet() map[string]struct{} {
-	infos := h.modelList()
+	infos := h.modelList(nil)
 	set := make(map[string]struct{}, len(infos))
 	for _, it := range infos {
 		id, _ := it["id"].(string)

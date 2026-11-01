@@ -196,7 +196,7 @@ func TestModelsHiddenFiltersGenerationEntries(t *testing.T) {
 	// 触发一次目录探测，让出图模型进入旁路留存。
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
-	for _, e := range h.generationModelEntries() {
+	for _, e := range h.generationModelEntries(nil) {
 		if strings.Contains(e["id"].(string), "hunyuan-image-alpha") {
 			t.Fatalf("隐藏的出图模型不该出现在列表：%v", e)
 		}

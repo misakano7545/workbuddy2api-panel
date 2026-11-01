@@ -1181,3 +1181,45 @@ func TestConfigExampleParses(t *testing.T) {
 		t.Fatalf("unexpected example thinking defaults: %+v", cfg.Thinking)
 	}
 }
+
+// TestKeysFileFollowsStateFile 命名 key 表默认与 state_file 同目录；显式配置不被覆盖。
+func TestKeysFileFollowsStateFile(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"state_file":"/srv/data/state.json"}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if c.KeysFile != "/srv/data/api_keys.json" {
+		t.Fatalf("keys_file 应跟随 state_file 目录，got %q", c.KeysFile)
+	}
+	c, err = ParseConfig([]byte(`{"state_file":"state.json"}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if c.KeysFile != "api_keys.json" {
+		t.Fatalf("无目录时 keys_file 应为相对名，got %q", c.KeysFile)
+	}
+	c, err = ParseConfig([]byte(`{"keys_file":"custom/keys.json"}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if c.KeysFile != "custom/keys.json" {
+		t.Fatalf("显式 keys_file 不该被推导覆盖，got %q", c.KeysFile)
+	}
+}
+
+// TestKeysFileEnvOverride 环境变量优先级高于配置文件（与 state_file 同规则）。
+func TestKeysFileEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"state_file":"`+filepath.Join(dir, "state.json")+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WB2A_KEYS_FILE", "/env/keys.json")
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.KeysFile != "/env/keys.json" {
+		t.Fatalf("env 应覆盖 keys_file，got %q", c.KeysFile)
+	}
+}

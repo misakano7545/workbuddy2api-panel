@@ -25,6 +25,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/balance"
 	"github.com/misakano7545/workbuddy2api-panel/internal/credithist"
+	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
 	"github.com/misakano7545/workbuddy2api-panel/internal/panel"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
@@ -437,6 +438,20 @@ func main() {
 		AutoTime:    cfg.Update.AutoTime,
 	})
 	var pn *panel.Panel
+	// 命名推理 key 注册表：与 state/usage 同目录、随 state_file 搬移。加载失败必须
+	// fail fast——把损坏的表当成空表会静默退化成「没有命名 key」，若 api_key 也空
+	// 就变成完全不鉴权（fail-open）。
+	keys, keyErr := httpauth.NewKeyStore(cfg.KeysFile)
+	if keyErr != nil {
+		log.Fatalf("加载命名 API key 注册表失败（%s）：%v", cfg.KeysFile, keyErr)
+	}
+	if n := keys.Len(); n > 0 {
+		log.Printf("[keys] 命名推理 key 已启用：%d 把（%s）；只用于 /v1/*、/v2/chat/busy，面板与管理端点仍只认 api_key",
+			n, cfg.KeysFile)
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			log.Printf("WARN: 已配置命名 key 但 api_key 为空——匿名请求将被拒绝（不再等于「不鉴权」）；面板/管理端点此时无可用钥匙")
+		}
+	}
 	pn = panel.New(panel.Config{
 		Pool:       p,
 		ProxyPool:  proxies,
@@ -451,13 +466,15 @@ func main() {
 		// 后台任务的自动触发开关与成长任务排程共用热配置（schedule.growth_enabled）。
 		AutoTasksEnabled: sch.GrowthEnabled,
 		AuthDir:          cfg.AuthDir,
-		APIKey:           cfg.APIKey,
-		RedisMode:        redisMode,
-		StickyCount:      sessCount,
-		Version:          appVersion,
-		Updater:          updateManager,
-		PollIntervalSec:  cfg.Panel.PollIntervalSec,
-		Live:             live,
+		// 命名 key 表：面板的 /panel/api/keys* 只做管理，鉴权仍只认主口令。
+		Keys:            keys,
+		APIKey:          cfg.APIKey,
+		RedisMode:       redisMode,
+		StickyCount:     sessCount,
+		Version:         appVersion,
+		Updater:         updateManager,
+		PollIntervalSec: cfg.Panel.PollIntervalSec,
+		Live:            live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -509,6 +526,7 @@ func main() {
 	gw = server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
+		Keys:         keys,
 		APIKey:       cfg.APIKey,
 		Session:      sessRouter,
 		StickyCount:  sessCount,
@@ -952,6 +970,8 @@ func restartRequiredFields(current, next *Config) []string {
 	changed("listen", current.Listen, next.Listen)
 	changed("auth_dir", current.AuthDir, next.AuthDir)
 	changed("state_file", current.StateFile, next.StateFile)
+	// 命名 key 表路径只在启动装配期打开（进程内持有 *Store），改路径必须重启。
+	changed("keys_file", current.KeysFile, next.KeysFile)
 	changed("upstream.timeout_seconds", current.Upstream.TimeoutSeconds, next.Upstream.TimeoutSeconds)
 	changed("upstream.header_timeout_seconds", current.Upstream.HeaderTimeoutSeconds, next.Upstream.HeaderTimeoutSeconds)
 	changed("upstream.idle_timeout_seconds", current.Upstream.IdleTimeoutSeconds, next.Upstream.IdleTimeoutSeconds)
