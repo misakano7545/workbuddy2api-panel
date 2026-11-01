@@ -56,17 +56,18 @@ const src=fs.readFileSync(process.argv[2],'utf8');
 const start=src.indexOf("$('cfgForm').onsubmit ="),end=src.indexOf('/* ── 添加账号');
 assert(start>=0&&end>start);
 (async()=>{
+ // 会话凭据已改为服务端 HttpOnly Cookie：保存配置时无论是否由环境变量托管，
+ // 都绝不再把密钥写进 localStorage（旧实现会存，正是本次要消灭的明文泄露面）。
  for(const managed of [true,false]) {
-  const hosts={cfgForm:{},btnCfgSave:{},cfgKey:{value:'submitted-key'},cfgNote:{}};
-  let saved='environment-key';
+  const hosts={cfgForm:{},btnCfgSave:{},cfgKey:{value:'submitted-key'},cfgNote:{textContent:''}};
   const ctx={$:id=>hosts[id],DURATION_FIELDS:[],durationBad:()=>false,markDurationFields(){},collectConfig:()=>({api_key:'submitted-key'}),
    FALLBACK_FIELDS:[],fallbackBad:()=>false,FALLBACK_TIP:'',
    api:async()=>({restart_required:[],api_key_env_managed:managed}),
-   localStorage:{setItem:(_,value)=>{saved=value}},LS_KEY:'key',toast(){},loadOverview(){},
-   loadConfig:async()=>{assert.equal(saved,managed?'environment-key':'submitted-key')},JSON};
+   localStorage:{setItem:()=>{throw new Error('config save must not persist the key to localStorage')},removeItem(){}},
+   LS_KEY:'key',toast(){},loadOverview(){},
+   loadConfig:async()=>{},JSON};
   vm.createContext(ctx);vm.runInContext(src.slice(start,end),ctx);
   await hosts.cfgForm.onsubmit({preventDefault(){}});
-  assert.equal(saved,managed?'environment-key':'submitted-key');
  }
  console.log('config authentication regression passed');
 })().catch(e=>{console.error(e);process.exit(1)});`

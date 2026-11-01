@@ -107,3 +107,122 @@ func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(appJS)
 }
+
+// loginHTMLRaw 服务端渲染的登录页。
+//
+// 为什么不用 <form>：CSP 的 form-action 'none' 会拦掉表单提交；页面也没有
+// 内联脚本（script-src 'self'），所以提交逻辑必须放在外链 login.js 里，
+// 用 fetch 打 /panel/api/login。样式是内联 <style>——style-src 允许
+// unsafe-inline，且内联 CSS 不构成脚本执行面。
+const loginHTMLRaw = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 · 管理面板</title>
+<script src="theme.js?v=__THEME_FP__"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: #f4f6fa; color: #1d2330; }
+  @media (prefers-color-scheme: dark) { body { background: #14181f; color: #e6e9ef; } }
+  .card { width: min(360px, calc(100vw - 32px)); padding: 28px 26px; border-radius: 14px;
+          background: #fff; box-shadow: 0 10px 40px rgba(16,24,40,.12); }
+  @media (prefers-color-scheme: dark) { .card { background: #1c222c; box-shadow: 0 10px 40px rgba(0,0,0,.45); } }
+  h1 { margin: 0 0 6px; font-size: 18px; }
+  p { margin: 0 0 18px; color: #6b7280; font-size: 13px; }
+  @media (prefers-color-scheme: dark) { p { color: #9aa3b2; } }
+  input { width: 100%; padding: 10px 12px; border: 1px solid #cfd6e3; border-radius: 8px;
+          font: inherit; background: transparent; color: inherit; }
+  input:focus { outline: 2px solid #4f8cff; outline-offset: 1px; border-color: transparent; }
+  button { width: 100%; margin-top: 14px; padding: 10px 12px; border: 0; border-radius: 8px;
+           font: inherit; font-weight: 600; color: #fff; background: #2f6fed; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  .err { margin-top: 12px; color: #c62828; font-size: 13px; }
+  @media (prefers-color-scheme: dark) { .err { color: #ff8a80; } }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>管理面板</h1>
+  <p>请输入 config.json 中的管理密钥（admin_key；未分离时即 api_key）。</p>
+  <input id="key" type="password" placeholder="管理密钥" autocomplete="current-password" autofocus>
+  <button id="go" type="button">进入</button>
+  <div class="err" id="err" hidden>密钥不正确，请重试。</div>
+</div>
+<script src="login.js?v=__LOGIN_FP__"></script>
+</body>
+</html>
+`
+
+// loginJS 登录页脚本（外链，符合 script-src 'self'）。
+//
+// next 只从查询串读取并原样回传，服务端 sanitizeNext 再判一次——前端校验不能
+// 当作安全边界（URL 是用户可改的）。
+var loginJS = []byte(`(function () {
+  'use strict';
+  var next = new URLSearchParams(location.search).get('next') || '/panel/';
+  var inp = document.getElementById('key');
+  var btn = document.getElementById('go');
+  var err = document.getElementById('err');
+  function fail(msg) {
+    err.textContent = msg || '密钥不正确，请重试。';
+    err.hidden = false;
+    btn.disabled = false;
+    inp.focus();
+  }
+  async function submit() {
+    var key = inp.value.trim();
+    if (!key) { inp.focus(); return; }
+    btn.disabled = true;
+    err.hidden = true;
+    try {
+      var r = await fetch('/panel/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: key, next: next })
+      });
+      var d = await r.json().catch(function () { return {}; });
+      if (!r.ok) {
+        fail(r.status === 429 ? '尝试过于频繁，请稍后再试。' : (d.error || ('HTTP ' + r.status)));
+        return;
+      }
+      location.replace(d.next || '/panel/');
+    } catch (e) {
+      fail('网络错误：' + e.message);
+    }
+  }
+  btn.addEventListener('click', submit);
+  inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+})();
+`)
+
+// loginHTML 登录页字节（脚本 URL 带内容指纹，理由同 indexHTML）。
+var loginHTML = []byte(strings.NewReplacer(
+	"__THEME_FP__", fingerprint(themeJS),
+	"__LOGIN_FP__", fingerprint(loginJS),
+).Replace(loginHTMLRaw))
+
+// loginPage 输出登录页。未启用鉴权或已登录时直接跳回面板。
+func (p *Panel) loginPage(w http.ResponseWriter, r *http.Request) {
+	if p.isAdminAuthorized(r) {
+		http.Redirect(w, r, sanitizeNext(r.URL.Query().Get("next")), http.StatusFound)
+		return
+	}
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(loginHTML)
+}
+
+// loginScript 输出登录页脚本。
+func (p *Panel) loginScript(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(loginJS)
+}

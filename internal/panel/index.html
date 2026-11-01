@@ -858,7 +858,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button class="icon ghost" id="btnRefresh" title="刷新" aria-label="刷新">
         <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 1.5v3h-3"/></svg>
       </button>
-      <button class="icon ghost" id="btnLogout" title="登出（清空本机密钥）" aria-label="登出">
+      <button class="icon ghost" id="btnLogout" title="登出（清除会话）" aria-label="登出">
         <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6.5 2.5h-3a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3M10 5l3 3-3 3M13 8H6"/></svg>
       </button>
       <button class="icon primary" id="btnAdd" title="添加账号" aria-label="添加账号">
@@ -1302,6 +1302,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不鉴权">
                 <button type="button" class="xs" id="btnEye">显示</button></div>
                 <span class="hint">立即生效（含面板自身）</span></label>
+              <label class="fld"><span class="lb">管理密钥（admin_key）</span>
+                <input name="admin_key" id="cfgKeyAdmin" type="password" placeholder="留空 = 沿用 API 密钥">
+                <span class="hint">面板专用密钥；与 API 密钥分离后，发给调用方的 Key 不能进后台。留空 = 沿用 api_key（升级兼容，但不推荐）。</span></label>
             </div>
             <label class="fld"><span class="lb">单账号明细默认展示条数</span>
               <input name="package_detail_limit" type="number" min="1" placeholder="5">
@@ -1895,23 +1898,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   </div>
 </div>
 
-<!-- 密钥 -->
-<div class="veil" id="keyVeil" data-lock="1">
-  <div class="dlg" style="width:420px">
-    <header>
-      <h3>需要访问密钥</h3>
-      <div class="hint">该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。</div>
-    </header>
-    <div class="body">
-      <form style="display:contents" onsubmit="return false"><input type="password" id="keyInput" placeholder="api_key" autocomplete="off"></form>
-      <div class="state err" id="keyErr" hidden style="margin-top:10px">密钥不正确，请重试。</div>
-    </div>
-    <footer>
-      <span class="grow"></span>
-      <button class="primary" id="btnKey">进入</button>
-    </footer>
-  </div>
-</div>
+<!-- 登录门已移到服务端 /panel/login：页面在鉴权前不落地，浏览器侧也不再持有明文密钥。 -->
 
 <div id="toasts"></div>
 

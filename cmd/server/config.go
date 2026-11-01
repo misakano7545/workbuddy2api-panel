@@ -20,8 +20,14 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // "127.0.0.1:7863"（缺省只绑回环）
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
+	Listen string `json:"listen"`  // "127.0.0.1:7863"（缺省只绑回环）
+	APIKey string `json:"api_key"` // 空 = 不鉴权（对外发放给调用方）
+	// AdminKey 管理面板专用密钥（config.json 顶层，与 api_key 平级）。
+	// 空 = 回落 api_key：升级兼容（老配置不需要改），但网关 Key 仍能进后台，
+	// 启动时打 WARN、/panel/api/overview 透出 admin_key_shared=true。
+	// 建议配置成与 api_key 不同的随机串：api_key 是发给调用方的，泄露面远比
+	// 管理入口大；面板前端也不再把它写进 localStorage。
+	AdminKey  string `json:"admin_key"`
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
 
@@ -654,6 +660,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_API_KEY"); v != "" {
 		c.APIKey = v
 	}
+	if v := os.Getenv("WB2A_ADMIN_KEY"); v != "" {
+		c.AdminKey = v
+	}
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
 		c.AuthDir = v
 	}
@@ -818,6 +827,7 @@ func applyEnv(c *Config) {
 func (c *Config) EnvironmentManagedFields() []string {
 	fields := []struct{ env, path, kind string }{
 		{"WB2A_LISTEN", "listen", ""}, {"WB2A_API_KEY", "api_key", ""},
+		{"WB2A_ADMIN_KEY", "admin_key", ""},
 		{"WB2A_AUTH_DIR", "auth_dir", ""}, {"WB2A_STATE_FILE", "state_file", ""},
 		{"WB2A_DNS", "dns_servers", ""},
 		{"WB2A_SOFT_RATE", "cooldown.soft_rate", ""}, {"WB2A_SOFT_RATE_MAX", "cooldown.soft_rate_max", ""},
@@ -883,6 +893,14 @@ func splitCSV(raw string) []string {
 
 func (c *Config) normalize() error {
 	var err error
+	// 管理密钥：只去空白，不做长度限制（可以是任意随机串）。
+	// 与 api_key 相同直接报错——这一项的存在意义就是「两把钥匙」，配成同一把
+	// 等于没配，却会让人误以为已经分离（静默无效果是最差的一种）。
+	c.AdminKey = strings.TrimSpace(c.AdminKey)
+	c.APIKey = strings.TrimSpace(c.APIKey)
+	if c.AdminKey != "" && c.AdminKey == c.APIKey {
+		return fmt.Errorf("admin_key 不能与 api_key 相同（留空 = 沿用 api_key；配置独立值才能把面板与网关的凭据分开）")
+	}
 	if err = c.normalizeThinking(); err != nil {
 		return err
 	}

@@ -4,18 +4,24 @@
 //
 // 设计约束：
 //   - 前端 go:embed 单文件（index.html），无任何外部构建依赖，与二进制同体部署；
-//   - 鉴权复用网关 api_key（Bearer），与 /v1/* 同一口径；api_key 为空 = 不鉴权
-//     （仅本机/私网使用）。面板 HTML 本身无秘密，可匿名加载，密钥只发给 /panel/api/*；
+//   - 管理端用独立 admin_key（空则回落网关 api_key，升级零感知）：登录页由服务端
+//     渲染（/panel/login），会话是 HttpOnly Cookie（HMAC 签名，无服务端会话表）。
+//     /panel/ 全前缀默认拒绝，仅 publicPanelPaths 白名单放行；网关 /v1/* 仍只看 api_key；
 //   - 不改写既有池语义：所有运维操作落到 pool 已有入口（Revive/Disable/Remove...），
 //     添加账号走 auth.SaveAtomic + pool.Add，重启后与 auths/ 目录天然对齐。
 package panel
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
 	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -47,10 +53,13 @@ type Config struct {
 	// AutoTasksEnabled 与成长任务开关共用热配置；nil 时只允许手动启动后台任务。
 	AutoTasksEnabled func() bool
 	AuthDir          string // OAuth 登录完成后凭证落盘目录
-	APIKey           string // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
-	RedisMode        string // "upstash" / "noop"，仅观测透出
-	Version          string // 面板版本号（展示用）
-	Updater          *updater.Manager
+	APIKey           string // 网关密钥；空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
+	// AdminKey 管理面板密钥；空 = 回落 APIKey（升级兼容）。与 Live 同时给出时 Live 优先。
+	// 面板前端不再持有明文密钥：登录成功后服务端下发 HttpOnly 会话 Cookie。
+	AdminKey  string
+	RedisMode string // "upstash" / "noop"，仅观测透出
+	Version   string // 面板版本号（展示用）
+	Updater   *updater.Manager
 
 	// PollIntervalSec 前端自动刷新间隔（秒）。0 = 用前端缺省值。
 	// 面板每轮刷新会重建若干表格并打一批接口；账号多、或只是开着面板当监控用
@@ -142,6 +151,9 @@ type Panel struct {
 	// growthConc 排程轮次的账号间并发（config schedule.growth_concurrency，热生效）。
 	// 0 = 未配置 → 1。
 	growthConc atomic.Int64
+	// loginLimit 登录失败限速（按来源 IP 的固定窗口，零值可用）。
+	// 面板 401 是唯一能让攻击者反复提交候选密钥的入口，必须节流。
+	loginLimit loginThrottle
 	// notifier 排程轮次结束后的汇总通知出口（main 装配期注入 alerting webhook；
 	// nil = 只落面板日志）。装配期设定、运行期只读，不需要锁。
 	notifier func(string)
@@ -234,6 +246,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/theme.js", p.themeScript)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
+	// 登录页与脚本：登录前必须可取到，故在 publicPanelPaths 白名单里。
+	p.mux.HandleFunc("GET /panel/login", p.loginPage)
+	p.mux.HandleFunc("GET /panel/login.js", p.loginScript)
+	p.mux.HandleFunc("POST /panel/api/login", p.loginSubmit)
+	p.mux.HandleFunc("POST /panel/api/logout", p.logout)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.proxyRoutes()
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
@@ -293,30 +310,351 @@ func (p *Panel) routes() {
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
 // 与 401 错误响应全都带上（API 也可能在浏览器里被直接打开）。
+//
+// 鉴权在这里**默认拒绝**（只放行 publicPanelPaths 的精确白名单）：
+// routes() 里逐条包 withAuth 是「默认放行，忘了包就公开」，新增一条路由
+// 忘了加鉴权不会报错，失效方向不安全。这里新增路由默认是要密钥的，
+// withAuth 保留为第二道（p.mux 被测试直连时仍有鉴权）。
 func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
+	if p.needsAdminAuth(r.URL.Path) && !p.isAdminAuthorized(r) {
+		p.denyUnauthorized(w, r)
+		return
+	}
 	p.mux.ServeHTTP(w, r)
 }
 
-// withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
-// api_key 为空时放行。密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求
-// 即用新值（无需重启）。
+// withAuth 第二道鉴权（与会话 Cookie/管理密钥同口径）；密钥为空时放行。
+// 密钥经 livecfg 快照读取：面板里改了密钥，下一个请求即用新值（无需重启）。
 func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, p.apiKey()) {
-			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
+		if !p.isAdminAuthorized(r) {
+			p.denyUnauthorized(w, r)
 			return
 		}
 		next(w, r)
 	}
 }
 
-// apiKey 当前生效密钥（Live 优先，回落静态字段）。
+// apiKey 对外发放的网关密钥（Live 优先，回落静态字段）；空 = 未启用鉴权。
 func (p *Panel) apiKey() string {
 	if p.cfg.Live != nil {
 		return p.cfg.Live.Load().APIKey
 	}
 	return p.cfg.APIKey
+}
+
+// ---------------------------------------------------------------------------
+// 管理端鉴权：独立管理密钥、会话 Cookie、登录限速与「默认拒绝」路由门
+// ---------------------------------------------------------------------------
+
+const (
+	// adminCookieName 会话 Cookie 名。Path=/panel 已限域，别在别处复用。
+	adminCookieName = "wb2api_admin"
+	// adminSessionTTL 会话有效期（与上游一致的 30 天）。
+	adminSessionTTL = 30 * 24 * time.Hour
+
+	// adminLoginWindow / adminLoginMaxAttempts 登录失败限速：同一来源 IP 固定窗口
+	// 10 分钟内最多 10 次尝试。弱密钥的在线爆破成本因此从「无限」变成
+	// 「10 次/10 分钟 ≈ 每天 1440 次」。
+	adminLoginWindow      = 10 * time.Minute
+	adminLoginMaxAttempts = 10
+	// loginThrottleMaxEntries 限速表条目上限：来源 IP 不可信（可被伪造来源扫），
+	// 表必须有界。超限时先清过期项。
+	loginThrottleMaxEntries = 1024
+
+	// adminSessionContext 签名常量（域分隔）：同一把密钥在别处做 HMAC 也不会
+	// 与本会话令牌互通。
+	adminSessionContext = "wb2api/admin-session/v1"
+)
+
+// publicPanelPaths 免鉴权的精确路径白名单。
+//
+// 用「精确路径 + 默认拒绝」而不是「逐条包 withAuth 默认放行」：后者新增一条
+// 路由忘了包鉴权就是静默公开，失效方向不安全。这里新增路由默认是要密钥的。
+//   - /panel/login[.js]  登录页与它的脚本（登录前必须能取到）
+//   - /panel/theme.js    首屏主题预热（登录页也要用；无任何秘密）
+//   - /panel/api/login   登录提交本身（自带 IP 限速）
+//   - /panel/api/logout  清 Cookie（无秘密，且会话过期后也要能清）
+var publicPanelPaths = map[string]struct{}{
+	"/panel/login":      {},
+	"/panel/login.js":   {},
+	"/panel/theme.js":   {},
+	"/panel/api/login":  {},
+	"/panel/api/logout": {},
+}
+
+// needsAdminAuth 该路径是否需要管理密钥。非 /panel/ 前缀（不该走到这里）按需鉴权处理。
+func (p *Panel) needsAdminAuth(path string) bool {
+	if !strings.HasPrefix(path, "/panel/") {
+		return true
+	}
+	_, ok := publicPanelPaths[path]
+	return !ok
+}
+
+// adminKey 当前生效的管理密钥：admin_key 优先，空则回落对外发放的 api_key
+// （升级兼容：老配置没有 admin_key 时行为与旧版完全一致）；两者皆空 = 面板不鉴权。
+// 经 livecfg 快照读取：面板里改了密钥，下一个请求即用新值（无需重启）。
+func (p *Panel) adminKey() string {
+	if p.cfg.Live != nil {
+		if s := p.cfg.Live.Load(); s.AdminKey != "" {
+			return s.AdminKey
+		}
+		// 快照已是最新视图：这里**不能**再回落启动期的 cfg.AdminKey，否则
+		// 运维在面板里清空 admin_key 后，旧值会被这个静态字段悄悄续命。
+		return p.apiKey()
+	}
+	if p.cfg.AdminKey != "" {
+		return p.cfg.AdminKey
+	}
+	return p.cfg.APIKey
+}
+
+// adminKeyShared 面板是否仍在用网关密钥鉴权（未配置独立 admin_key）。
+// 透出到 overview，面板据此提示「网关 Key 能直接进后台」。
+func (p *Panel) adminKeyShared() bool {
+	k := p.adminKey()
+	return k != "" && k == p.apiKey()
+}
+
+// adminSessionToken 生成会话令牌：`<expUnix>.<hex(HMAC-SHA256(key, ctx‖0‖exp))>`。
+// 过期时刻进签名，浏览器与服务端都能独立校验；截断/篡改任一字段都会验签失败。
+func adminSessionToken(key string, exp time.Time) string {
+	payload := strconv.FormatInt(exp.Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write([]byte(adminSessionContext))
+	mac.Write([]byte{0})
+	mac.Write([]byte(payload))
+	return payload + "." + hex.EncodeToString(mac.Sum(nil))
+}
+
+// adminSessionOK 校验会话令牌（含服务端过期判断）。
+func adminSessionOK(key, token string, now time.Time) bool {
+	payload, sig, ok := strings.Cut(token, ".")
+	if !ok || sig == "" || payload == "" {
+		return false
+	}
+	exp, err := strconv.ParseInt(payload, 10, 64)
+	if err != nil || !now.Before(time.Unix(exp, 0)) {
+		return false
+	}
+	want := adminSessionToken(key, time.Unix(exp, 0))
+	_, wantSig, _ := strings.Cut(want, ".")
+	return hmac.Equal([]byte(sig), []byte(wantSig))
+}
+
+// isAdminAuthorized 请求是否已通过管理端鉴权：会话 Cookie 或 Bearer 管理密钥。
+// 两者都接受，是因为 curl / 脚本调试仍习惯带 Authorization 头。
+func (p *Panel) isAdminAuthorized(r *http.Request) bool {
+	key := p.adminKey()
+	if key == "" {
+		return true // 未配置任何密钥：与既有语义一致（只在本机/私网裸用）
+	}
+	if httpauth.VerifyBearer(r, key) {
+		return true
+	}
+	c, err := r.Cookie(adminCookieName)
+	if err != nil {
+		return false
+	}
+	return adminSessionOK(key, c.Value, time.Now())
+}
+
+// requestIsTLS 是否经 TLS 到达（含最常见的一层反代）。
+//
+// Secure 只在真 TLS 时加：面板常年挂在 LAN 的 http:// 上，无条件加 Secure 会让
+// Cookie 根本发不出去（表现为「登录成功又立刻回登录页」）。信任 X-Forwarded-Proto
+// 的代价最多是「https 反代后面误判成 http」，最坏结果是少一个 Secure 标记，
+// 不会把会话发给非 TLS 连接。
+func requestIsTLS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+}
+
+// setSessionCookie 下发会话 Cookie。
+func (p *Panel) setSessionCookie(w http.ResponseWriter, r *http.Request, exp time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     adminCookieName,
+		Value:    adminSessionToken(p.adminKey(), exp),
+		Path:     "/panel",
+		HttpOnly: true, // 脚本不可读：XSS 也偷不走会话
+		Secure:   requestIsTLS(r),
+		SameSite: http.SameSiteLaxMode, // 跨站 POST/PUT 不带 Cookie（CSRF 兜底）
+		Expires:  exp,
+		MaxAge:   int(adminSessionTTL / time.Second),
+	})
+}
+
+// clearSessionCookie 清会话（登出）。MaxAge<0 让 Go 输出 Max-Age=0。
+func (p *Panel) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     adminCookieName,
+		Value:    "",
+		Path:     "/panel",
+		HttpOnly: true,
+		Secure:   requestIsTLS(r),
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Unix(0, 0),
+		MaxAge:   -1,
+	})
+}
+
+// clientIP 登录限速的分桶键：只信 RemoteAddr。
+//
+// **故意不认 X-Forwarded-For / X-Real-IP**：那是客户端可任意伪造的请求头，
+// 认它等于给攻击者一个「每次换一个 IP」的开关，限速形同虚设。代价是反代后面
+// 所有来源同 IP、共享 10 次/10 分钟——面板登录用，够。
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
+}
+
+// sanitizeNext 校验登录后的跳转目标，防开放重定向。
+//
+// 只放行站内 /panel/ 路径：绝对 URL、协议相对 //evil、反斜杠变体 /\evil、
+// 控制字符一律回落 /panel/。另拒 /panel/login 自身（否则登录成功后原地打转）。
+func sanitizeNext(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !strings.HasPrefix(raw, "/panel/") {
+		return "/panel/"
+	}
+	if strings.HasPrefix(raw, "//") || strings.ContainsAny(raw, "\\\r\n	") {
+		return "/panel/"
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" {
+		return "/panel/"
+	}
+	if out := u.RequestURI(); strings.HasPrefix(out, "/panel/login") {
+		return "/panel/"
+	}
+	return raw
+}
+
+// denyUnauthorized 未通过鉴权的响应：API 回 401 JSON（前端/脚本按状态码处理），
+// 页面回 302 到登录页并带上 next。
+func (p *Panel) denyUnauthorized(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/panel/api/") {
+		writeErr(w, http.StatusUnauthorized, "invalid_admin_key")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	next := sanitizeNext(r.URL.RequestURI())
+	http.Redirect(w, r, "/panel/login?next="+url.QueryEscape(next), http.StatusFound)
+}
+
+// loginSubmit 登录：校验管理密钥，成功后下发会话 Cookie。
+//
+// 限速按来源 IP 固定窗口；失败只记来源，绝不记密钥内容（日志会被贴进 issue）。
+func (p *Panel) loginSubmit(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if ok, wait := p.loginLimit.take(ip, time.Now()); !ok {
+		secs := int((wait + time.Second - 1) / time.Second)
+		if secs < 0 {
+			secs = 0
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeErr(w, http.StatusTooManyRequests, "too_many_login_attempts")
+		return
+	}
+	var body struct {
+		Key  string `json:"key"`
+		Next string `json:"next"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
+	key := p.adminKey()
+	if key != "" && !httpauth.VerifyValue(strings.TrimSpace(body.Key), key) {
+		logLoginFailure(ip)
+		writeErr(w, http.StatusUnauthorized, "invalid_admin_key")
+		return
+	}
+	p.loginLimit.reset(ip)
+	if key != "" {
+		p.setSessionCookie(w, r, time.Now().Add(adminSessionTTL))
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "next": sanitizeNext(body.Next)})
+}
+
+// logout 服务端清会话；纯函数签名无法单条吊销（见 adminSessionToken：换密钥即整批失效）。
+func (p *Panel) logout(w http.ResponseWriter, r *http.Request) {
+	p.clearSessionCookie(w, r)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ---------------------------------------------------------------------------
+// 登录限速（按来源 IP 的固定窗口）
+// ---------------------------------------------------------------------------
+
+// loginThrottle 固定窗口计数器。零值可用。
+type loginThrottle struct {
+	mu   sync.Mutex
+	hits map[string]*loginWindow
+}
+
+type loginWindow struct {
+	start time.Time
+	count int
+}
+
+// take 记一次尝试并回报是否放行；不放行时给出剩余窗口（Retry-After）。
+//
+// 先记账再判断（计数含成功那一次，成功后调用方 reset）——避免「先判断后记账」
+// 的并发窗口：并发请求同时看到 count=9 会一起放行。
+func (t *loginThrottle) take(ip string, now time.Time) (bool, time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.hits == nil {
+		t.hits = make(map[string]*loginWindow)
+	}
+	e := t.hits[ip]
+	if e == nil || now.Sub(e.start) >= adminLoginWindow {
+		if len(t.hits) >= loginThrottleMaxEntries {
+			t.pruneLocked(now)
+		}
+		e = &loginWindow{start: now}
+		t.hits[ip] = e
+	}
+	e.count++
+	if e.count > adminLoginMaxAttempts {
+		left := adminLoginWindow - now.Sub(e.start)
+		if left < 0 {
+			left = 0
+		}
+		return false, left
+	}
+	return true, 0
+}
+
+// reset 登录成功后清零该 IP 的计数（不惩罚正常用户）。
+func (t *loginThrottle) reset(ip string) {
+	t.mu.Lock()
+	delete(t.hits, ip)
+	t.mu.Unlock()
+}
+
+// pruneLocked 清理过期窗口（调用方持锁）。
+func (t *loginThrottle) pruneLocked(now time.Time) {
+	for k, e := range t.hits {
+		if now.Sub(e.start) >= adminLoginWindow {
+			delete(t.hits, k)
+		}
+	}
+}
+
+// logLoginFailure 记一行登录失败（只记来源，绝不记密钥内容——日志会被贴进 issue）。
+func logLoginFailure(ip string) {
+	log.Printf("panel: 管理密钥登录失败 from %s", ip)
 }
 
 // expiringSoonWindow 返回调度器当前生效的快过期路由窗口；测试面板无调度器时返回 0。
@@ -359,14 +697,17 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"update":            p.updateSnapshot(),
 		"uptime_sec":        int(time.Since(p.started).Seconds()),
 		"auth_required":     p.apiKey() != "",
-		"redis_mode":        p.cfg.RedisMode,
-		"sticky_sessions":   sticky,
-		"total":             total,
-		"healthy":           healthy,
-		"cooling":           cooling,
-		"disabled":          disabled,
-		"paused":            paused,
-		"in_flight_full":    inFlightFull,
+		// admin_key_shared 未配置独立 admin_key（面板与网关共用一把钥匙）。
+		// 面板据此提示：发给调用方的网关 Key 能直接进后台，建议分离。
+		"admin_key_shared": p.adminKeyShared(),
+		"redis_mode":       p.cfg.RedisMode,
+		"sticky_sessions":  sticky,
+		"total":            total,
+		"healthy":          healthy,
+		"cooling":          cooling,
+		"disabled":         disabled,
+		"paused":           paused,
+		"in_flight_full":   inFlightFull,
 		// 模型降级路由表：前端据它标注「⤳ 已路由至 X」（限流的模型若配了等价模型）。
 		"model_fallback": p.modelFallbackSnapshot(),
 		"accounts":       p.cfg.Pool.List(),

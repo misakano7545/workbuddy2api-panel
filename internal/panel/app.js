@@ -63,15 +63,20 @@ if (btnNav && navScrim) {
 addEventListener('keydown', e => { if (e.key === 'Escape') navSet(false); });
 
 /* ── 请求 ─────────────────────────────────────────────────────────── */
+// 浏览器侧不再持有明文密钥：登录成功后服务端下发 HttpOnly 会话 Cookie，
+// 同源 fetch 自动携带（脚本读不到，XSS 也偷不走）。
 async function api(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
-  const k = localStorage.getItem(LS_KEY);
-  if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
   // status 挂到错误上：调用方靠它区分「可重试的抖动」与「重试无意义的终态」
   // （登录轮询据此决定继续等 OAuth 还是提示重新发起）。
-  if (r.status === 401) { openKey(); const e = new Error('密钥无效或未填写'); e.status = 401; throw e; }
+  // 401 = 会话过期/未登录：只能回服务端登录页重新认证，next 带上当前位置。
+  if (r.status === 401) {
+    const next = location.pathname + location.search;
+    location.replace('/panel/login?next=' + encodeURIComponent(next));
+    const e = new Error('登录已失效，请重新输入管理密钥'); e.status = 401; throw e;
+  }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) { const e = new Error(d.error || ('HTTP ' + r.status)); e.status = r.status; throw e; }
   return d;
@@ -425,28 +430,15 @@ function formatRate(rate) {
   return n.toFixed(1) + 'tok/s';
 }
 
-/* ── 密钥门 ───────────────────────────────────────────────────────── */
-function openKey() { $('keyVeil').classList.add('on'); setTimeout(() => $('keyInput').focus(), 60); }
-$('btnKey').onclick = async () => {
-  const v = $('keyInput').value.trim();
-  if (!v) return;
-  localStorage.setItem(LS_KEY, v);
-  try {
-    await api('overview');
-    $('keyErr').hidden = true;
-    $('keyVeil').classList.remove('on');
-    start();
-  } catch (e) { $('keyErr').hidden = false; }
-};
-$('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
-
-// 登出：api_key 是唯一凭据（服务端只做 VerifyBearer 比对，无会话无 cookie 可失效），
-// 所以"登出"= 清掉本机保存的密钥并重载——重载把内存里的定时器与已渲染数据一并清空，
-// 无密钥时 start() 的首次请求 401 会自动弹回密钥门（data-lock="1"，不可绕过）。
-$('btnLogout').onclick = () => {
-  if (!confirm('登出将清空本机保存的 API 密钥，需要重新输入才能进入面板。确认登出？')) return;
+/* ── 登出 ─────────────────────────────────────────────────────────── */
+// 会话在服务端（HMAC Cookie），所以登出必须让服务端下发 Max-Age=0；
+// 只清 localStorage 是旧版语义（那时密钥就存在浏览器里），现在清它只是为了
+// 抹掉升级前遗留的明文密钥。
+$('btnLogout').onclick = async () => {
+  if (!confirm('登出将清除本机会话，需要重新输入管理密钥。确认登出？')) return;
+  try { await fetch('/panel/api/logout', { method: 'POST' }); } catch (e) { /* 网络抖动也要本地登出 */ }
   localStorage.removeItem(LS_KEY);
-  location.reload();
+  location.replace('/panel/login');
 };
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
@@ -1659,7 +1651,7 @@ $('btnLogPin').onclick = () => {
 
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
-  listen: ['listen'], api_key: ['api_key'],
+  listen: ['listen'], api_key: ['api_key'], admin_key: ['admin_key'],
   package_detail_limit: ['panel', 'package_detail_limit'],
   update_auto_enabled: ['update', 'auto_enabled'], update_auto_time: ['update', 'auto_time'],
   poll_interval_sec: ['panel', 'poll_interval_sec'],
@@ -1718,7 +1710,7 @@ const CFG_MAP = {
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
  */
-const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'cn_chat_base', 'cn_billing_base', 'global_chat_base', 'global_billing_base']);
+const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'cn_chat_base', 'cn_billing_base', 'global_chat_base', 'global_billing_base', 'admin_key']);
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function put(obj, path, val) {
@@ -1756,7 +1748,13 @@ async function loadConfig() {
     } catch (e) { /* DOM 桩没有 NodeList 迭代器 */ }
     $('cfgKey').disabled = !!d.api_key_env_managed;
     $('cfgKey').title = d.api_key_env_managed ? '访问密钥由启动环境变量设置，请在部署配置中修改。' : '';
-    $('cfgNote').textContent = managed.length ? '由启动环境管理：' + managed.join('、') : '';
+    // 管理密钥未分离（admin_key 空 = 沿用 api_key）：网关 Key 能直接进后台，
+    // 在配置页显式提示，别只把这事写进文档。
+    const shared = !(cfgLoaded.admin_key || '') && !!(cfgLoaded.api_key || '');
+    $('cfgNote').textContent = [
+      managed.length ? '由启动环境管理：' + managed.join('、') : '',
+      shared ? '管理密钥未分离：网关 api_key 可直接进入面板，建议设置独立的 admin_key' : '',
+    ].filter(Boolean).join('；');
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
 // thinkingModeOf 由 thinking.client_priority + override_scope 推导三选一的选中项。
@@ -1783,7 +1781,8 @@ function collectConfig() {
       // 模型映射（issue #30）："客户端名=真实名" 条目数组，同列表语义；空数组照发 = 清空。
       else if (name === 'models_aliases') v = raw.split(/[,，]+/).map(s => s.trim()).filter(Boolean);
       // 覆盖型字段空串照发（见 CLEARABLE_CFG）；其余空 = 不下发。
-      else if (raw === '') v = CLEARABLE_CFG.has(name) ? '' : undefined;
+      // 由环境变量托管的字段一律不发：写了也不生效，还会把 env 值抄进配置文件。
+      else if (raw === '') v = (CLEARABLE_CFG.has(name) && !el.disabled) ? '' : undefined;
       else if (name.endsWith('_hours')) v = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
       else v = raw;
     }
@@ -1871,12 +1870,12 @@ $('cfgForm').onsubmit = async ev => {
     const fields = r.restart_required || [];
     const restartNote = fields.length ? '需重启生效：' + fields.join('、') : '';
     toast(fields.length ? '配置已保存，其中 ' + fields.length + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
-    // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
-    // 由启动环境变量托管时不写入本地（避免把无效值当会话密钥）。
-    const k = $('cfgKey').value.trim();
-    if (k && !r.api_key_env_managed) localStorage.setItem(LS_KEY, k);
+    // 密钥可能已改：会话 Cookie 由旧管理密钥签名，服务端已不认。
+    // 不再把密钥写进 localStorage（浏览器侧一律走 HttpOnly Cookie）；
+    // 若管理密钥变了，下一次轮询 401 会自动跳转登录页重新认证。
     await loadConfig();
-    $('cfgNote').textContent = [restartNote, (r.environment_managed_fields || []).length ? '由启动环境管理：' + r.environment_managed_fields.join('、') : ''].filter(Boolean).join('；');
+    // 追加而不是覆盖：cfgNote 里可能还有「管理密钥未分离」提示。
+    $('cfgNote').textContent = [restartNote, $('cfgNote').textContent].filter(Boolean).join('；');
     loadOverview(true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '保存配置'; }
@@ -2038,11 +2037,9 @@ $('importFile').onchange = async () => {
   $('importDone').hidden = true; $('importErr').hidden = true;
   const fd = new FormData();
   fd.append('file', file);
-  const h = {};
-  const k = localStorage.getItem(LS_KEY);
-  if (k) h['Authorization'] = 'Bearer ' + k;
   try {
-    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+    // 会话 Cookie 自动随同源 fetch 发送，无需再手带 Authorization 头。
+    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     $('importDone').hidden = false;

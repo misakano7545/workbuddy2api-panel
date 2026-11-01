@@ -33,7 +33,20 @@ func VerifyBearer(r *http.Request, key string) bool {
 		return false
 	}
 	tok := authz[len(bearerPrefix):]
-	return subtle.ConstantTimeCompare(digest(tok), digest(key)) == 1
+	return VerifyValue(tok, key)
+}
+
+// VerifyValue 常量时间比较一个「已知明文」与期望密钥（面板登录接口用）。
+//
+// 与 VerifyBearer 同一套判据（SHA-256 摘要 + subtle.ConstantTimeCompare），
+// key 为空恒返回 true（未启用鉴权）。登录接口必须走这里而不是 `==`：面板
+// 登录是唯一能让攻击者反复提交候选密钥的地方，逐字节比较会把密钥前缀
+// 泄露给在线爆破。
+func VerifyValue(got, key string) bool {
+	if key == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare(digest(got), digest(key)) == 1
 }
 
 // digest 返回 s 的 SHA-256（定长 32 字节，供常量时间比较）。

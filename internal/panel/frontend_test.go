@@ -989,8 +989,7 @@ process.stdout.write(JSON.stringify({
 
 func TestLogoutWired(t *testing.T) {
 	p := newTestPanel()
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	rec := authedGet(p, "/panel/")
 	if !strings.Contains(rec.Body.String(), `id="btnLogout"`) {
 		t.Error(`index.html 缺少登出按钮 id="btnLogout"`)
 	}
@@ -1080,8 +1079,7 @@ console.log('OK');
 
 func TestIndexHTMLConfigInputsUnique(t *testing.T) {
 	p := newTestPanel()
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	rec := authedGet(p, "/panel/")
 	body := rec.Body.String()
 
 	re := regexp.MustCompile(`<input[^>]*>`)

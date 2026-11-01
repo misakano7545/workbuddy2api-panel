@@ -59,3 +59,28 @@ func TestDigestIsFixedLength(t *testing.T) {
 		t.Errorf("sha256 digest length = %d, want 32", len(digest("x")))
 	}
 }
+
+// VerifyValue 与 VerifyBearer 必须同口径：面板登录接口只拿到明文密钥，
+// 若这里退回 `==` 就等于在唯一可反复试错的地方泄露前缀。
+func TestVerifyValue(t *testing.T) {
+	cases := []struct {
+		name string
+		got  string
+		key  string
+		want bool
+	}{
+		{"匹配", "admin-secret", "admin-secret", true},
+		{"不匹配", "admin-secret ", "admin-secret", false},
+		{"前缀相同", "admin", "admin-secret", false},
+		{"超长", "admin-secret-x", "admin-secret", false},
+		{"空 key 放行（未启用鉴权）", "anything", "", true},
+		{"两侧皆空", "", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := VerifyValue(c.got, c.key); got != c.want {
+				t.Errorf("VerifyValue(%q, %q) = %v, want %v", c.got, c.key, got, c.want)
+			}
+		})
+	}
+}

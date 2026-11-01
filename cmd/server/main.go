@@ -377,6 +377,7 @@ func main() {
 	allowedModels, allowlistEnabled := livecfg.NormalizeAllowedModels(cfg.Models.Allowed)
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
+		AdminKey:             cfg.AdminKey,
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		EmbeddingsEnabled:    cfg.Features.EmbeddingsEnabled,
@@ -436,6 +437,14 @@ func main() {
 		AutoEnabled: cfg.Update.AutoEnabled,
 		AutoTime:    cfg.Update.AutoTime,
 	})
+	// 未分离管理密钥时显式告警：网关 Key 是发给调用方的（客户端配置、issue
+	// 截图里到处都是），它若能直接进后台，等于每个调用方都拿到运维权限。
+	// 不自动生成新密钥：那会锁定所有存量用户（升级后必须翻日志才能进面板）。
+	if cfg.AdminKey == "" && cfg.APIKey != "" {
+		log.Printf("WARN: 未配置 admin_key，管理面板沿用网关 api_key（调用方密钥可直接进后台）；建议在 config.json 里设置独立的 admin_key/WB2A_ADMIN_KEY")
+	} else if cfg.AdminKey != "" {
+		log.Printf("[panel] 管理密钥已与网关 api_key 分离")
+	}
 	var pn *panel.Panel
 	pn = panel.New(panel.Config{
 		Pool:       p,
@@ -451,13 +460,15 @@ func main() {
 		// 后台任务的自动触发开关与成长任务排程共用热配置（schedule.growth_enabled）。
 		AutoTasksEnabled: sch.GrowthEnabled,
 		AuthDir:          cfg.AuthDir,
-		APIKey:           cfg.APIKey,
-		RedisMode:        redisMode,
-		StickyCount:      sessCount,
-		Version:          appVersion,
-		Updater:          updateManager,
-		PollIntervalSec:  cfg.Panel.PollIntervalSec,
-		Live:             live,
+		// 管理密钥：空 = 面板回落 api_key（升级兼容）。
+		AdminKey:        cfg.AdminKey,
+		APIKey:          cfg.APIKey,
+		RedisMode:       redisMode,
+		StickyCount:     sessCount,
+		Version:         appVersion,
+		Updater:         updateManager,
+		PollIntervalSec: cfg.Panel.PollIntervalSec,
+		Live:            live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -854,6 +865,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	newAllowedModels, newAllowlistEnabled := livecfg.NormalizeAllowedModels(newCfg.Models.Allowed)
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
+		AdminKey:             newCfg.AdminKey,
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 		EmbeddingsEnabled:    newCfg.Features.EmbeddingsEnabled,

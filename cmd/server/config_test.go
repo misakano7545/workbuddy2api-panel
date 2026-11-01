@@ -156,6 +156,49 @@ func TestEnvOverride(t *testing.T) {
 	}
 }
 
+// 管理密钥：独立值保留（两端空白去掉）；与 api_key 配成同一把必须显式失败。
+func TestAdminKeySeparatedFromAPIKey(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"api_key":"gw-key","admin_key":" ops-key "}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if c.AdminKey != "ops-key" {
+		t.Errorf("admin_key=%q，应去掉两端空白", c.AdminKey)
+	}
+
+	if _, err := ParseConfig([]byte(`{"api_key":"same","admin_key":"same"}`)); err == nil {
+		t.Fatal("admin_key == api_key 必须报错（否则会让人误以为已分离）")
+	}
+
+	// 留空合法 = 回落 api_key（升级零感知）。
+	c, err = ParseConfig([]byte(`{"api_key":"gw-key"}`))
+	if err != nil || c.AdminKey != "" {
+		t.Fatalf("留空 admin_key 应合法: cfg=%+v err=%v", c, err)
+	}
+}
+
+// WB2A_ADMIN_KEY 覆盖配置并出现在环境托管字段表里（面板据此禁用输入框）。
+func TestAdminKeyEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_API_KEY", "gw-key")
+	t.Setenv("WB2A_ADMIN_KEY", "ops-key")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AdminKey != "ops-key" {
+		t.Errorf("admin_key=%q want ops-key", c.AdminKey)
+	}
+	found := false
+	for _, f := range c.EnvironmentManagedFields() {
+		if f == "admin_key" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("WB2A_ADMIN_KEY 生效时必须把 admin_key 列进托管字段表")
+	}
+}
+
 func TestBadDuration(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
