@@ -77,7 +77,9 @@ func TestContinueReaderTextCutContinues(t *testing.T) {
 	if strings.Contains(s, `"finish_reason":"length"`) {
 		t.Fatalf("length 终态不应外泄:\n%s", s)
 	}
-	// usage：恰好一条，且为跨段合计（10+20 / 5+7 / 15+27）。
+	// usage：恰好一条，prompt 取末段（20），completion 跨段累计（5+7=12），
+	// total 按 prompt+completion 重算（32）——跨段 prompt 求和会把续写段
+	// 携带的整个上下文重复计入，客户端按 usage 判上下文压力会提前压缩。
 	var usageFrames int
 	var usage map[string]any
 	for _, f := range strings.Split(s, "\n\n") {
@@ -97,8 +99,8 @@ func TestContinueReaderTextCutContinues(t *testing.T) {
 	if usageFrames != 1 {
 		t.Fatalf("usage 帧数=%d want 1:\n%s", usageFrames, s)
 	}
-	if usage["prompt_tokens"] != float64(30) || usage["completion_tokens"] != float64(12) || usage["total_tokens"] != float64(42) {
-		t.Fatalf("usage 合计=%v want prompt=30 completion=12 total=42", usage)
+	if usage["prompt_tokens"] != float64(20) || usage["completion_tokens"] != float64(12) || usage["total_tokens"] != float64(32) {
+		t.Fatalf("usage 合并=%v want prompt=20 completion=12 total=32", usage)
 	}
 	// 续写请求：同模型 + assistant 携带已输出内容 + 续写指令 + 原始消息仍在。
 	req := (*reqs)[0]
