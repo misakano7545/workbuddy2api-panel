@@ -176,7 +176,8 @@ jobs:
     # phase=analyze 只出报告；不挡的话验证一次就会多开一个 PR
     if: always() && inputs.phase != 'analyze' && needs.analyze.result != 'cancelled'
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # land_max × 每条最坏 60 分钟（方案 30 + diff 30），留 60 分钟余量
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
         with:
