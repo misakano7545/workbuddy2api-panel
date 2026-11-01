@@ -9,14 +9,16 @@ import (
 	"testing"
 )
 
-// TestAppJSEventsView 事件日志页的两条硬约束：
+// TestAppJSEventsView 事件日志页的三条硬约束：
 //
 //  1. 读取失败必须说出来。原来 loadEvents 用 .catch(() => ({entries: []})) 把 501
 //     （归档未开启）和网络错误都变成「共 0 条事件」——和「真的没流量」长得一模一样，
 //     外层 try/catch 因此成了死代码。
 //  2. 表头 13 列与行内 13 个 <td> 必须一致，否则整张表错位。
+//  3. 「推理强度」列要区分「客户端要的」与「网关补的/改写的」：只显示生效值时，
+//     客户端请求会被网关默认档淹没（issue #43 同源歧义，见 eventEffortPill）。
 //
-// 两处都是纯前端、都看不见失败，所以用 node 跑真实函数而不是读源码断言。
+// 三处都是纯前端、都看不见失败，所以用 node 跑真实函数而不是读源码断言。
 func TestAppJSEventsView(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -61,15 +63,28 @@ async function run() {
   await b.ctx.load();
   out.e500 = b.el('eventTableBody').innerHTML;
 
-  // 成功：一行一条事件，列数按 <td> 计
-  const c = makeCtx(async () => ({ entries: [{
-    time: '2026-10-26T10:00:00Z', path: '/v1/chat/completions', model: 'wb-lite',
-    account: 'a@b.c (nick)', status: 200, ok: true, duration_ms: 1200, ttfb_ms: 300,
-    prompt_tokens: 10, completion_tokens: 20, total_tokens: 30,
-    reasoning_tokens: 5, reasoning_effort: 'high', mode: 'stream',
-    cache_hit_tokens: 4, cache_miss_tokens: 6, executor_type: 'CodexExecutor',
-    client_ip: '10.0.0.1', user_agent: 'codex/1.0'
-  }] }));
+  // 成功：三行事件，分别覆盖「老归档（无 requested 键）」「客户端没发档位、网关补默认档」
+  // 「客户端请求与生效不一致（改写/降级）」三种推理强度展示；列数按 <td> 计。
+  const c = makeCtx(async () => ({ entries: [
+    {
+      time: '2026-10-26T10:00:00Z', path: '/v1/chat/completions', model: 'wb-lite',
+      account: 'a@b.c (nick)', status: 200, ok: true, duration_ms: 1200, ttfb_ms: 300,
+      prompt_tokens: 10, completion_tokens: 20, total_tokens: 30,
+      reasoning_tokens: 5, reasoning_effort: 'high', mode: 'stream',
+      cache_hit_tokens: 4, cache_miss_tokens: 6, executor_type: 'CodexExecutor',
+      client_ip: '10.0.0.1', user_agent: 'codex/1.0'
+    },
+    {
+      time: '2026-10-26T10:01:00Z', path: '/v1/chat/completions', model: 'wb-lite',
+      status: 200, ok: true, duration_ms: 1000, ttfb_ms: 200, mode: 'stream',
+      reasoning_effort: 'max', reasoning_effort_requested: ''
+    },
+    {
+      time: '2026-10-26T10:02:00Z', path: '/v1/chat/completions', model: 'wb-lite',
+      status: 200, ok: true, duration_ms: 1000, ttfb_ms: 200, mode: 'stream',
+      reasoning_effort: 'high', reasoning_effort_requested: 'max'
+    }
+  ] }));
   await c.ctx.load();
   const html = c.el('eventTableBody').innerHTML;
   out.rows = (html.match(/<tr[\s>]/g) || []).length; // 行带 data-ev 属性（上下文展开），不能再钉 <tr>
@@ -77,6 +92,9 @@ async function run() {
   out.hasFakeKey = /Gra\*+cle@1!/.test(html);
   out.hasUpstreamLie = html.indexOf('上游响应') >= 0;
   out.cacheMiss = html.indexOf('未命中 6') >= 0;
+  out.oldEffort = html.indexOf('pill-effort">high<') >= 0; // 老归档：只显示生效值
+  out.gwEffort = html.indexOf('-→max') >= 0;                // 客户端没发，网关补的默认档
+  out.rwEffort = html.indexOf('max→high') >= 0;             // 客户端 max，实际发 high
   process.stdout.write(JSON.stringify(out));
 }
 run().catch(e => { console.error(e); process.exit(1); });`
@@ -103,6 +121,9 @@ run().catch(e => { console.error(e); process.exit(1); });`
 		HasFakeKey     bool    `json:"hasFakeKey"`
 		HasUpstreamLie bool    `json:"hasUpstreamLie"`
 		CacheMiss      bool    `json:"cacheMiss"`
+		OldEffort      bool    `json:"oldEffort"`
+		GwEffort       bool    `json:"gwEffort"`
+		RwEffort       bool    `json:"rwEffort"`
 	}
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("bad json: %v\n%s", err, out)
@@ -121,8 +142,8 @@ run().catch(e => { console.error(e); process.exit(1); });`
 			t.Errorf("%s 被渲染成「没有事件」了: %s", name, html)
 		}
 	}
-	if got.Rows != 1 {
-		t.Fatalf("应当渲染 1 行，实际 %d", got.Rows)
+	if got.Rows != 3 {
+		t.Fatalf("应当渲染 3 行，实际 %d", got.Rows)
 	}
 	if got.Cells != 13 {
 		t.Errorf("行内列数应为 13（与表头一致），实际 %v", got.Cells)
@@ -132,6 +153,15 @@ run().catch(e => { console.error(e); process.exit(1); });`
 	}
 	if !got.CacheMiss {
 		t.Error("缓存未命中数没有渲染出来")
+	}
+	if !got.OldEffort {
+		t.Error("升级前的老归档行（无 reasoning_effort_requested 键）应按旧口径只显示生效档位")
+	}
+	if !got.GwEffort {
+		t.Error("客户端未携带档位时应显示「-→生效档」，不能只给裸 max（会让读者以为客户端要了 max）")
+	}
+	if !got.RwEffort {
+		t.Error("客户端请求与生效档不一致时应显示「请求→生效」")
 	}
 }
 

@@ -618,6 +618,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.CacheMissTokens = int64(s.cacheMiss)
 		e.Mode = s.mode
 		e.ReasoningEffort = s.effort
+		e.ReasoningEffortRequested = s.effortReq
 		if s.think >= 0 {
 			e.ReasoningTokens = int64(s.think)
 		}
@@ -758,12 +759,15 @@ func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, st
 	// 「客户端要什么 / 网关实际发什么 / 根本没档位」三类情况：
 	//   - 降级：effort=max->high（issue #43：只报生效值会被读成客户端没发 max）
 	//   - 客户端关思考（off/none/disabled）：生效档位会被清空，显示客户端原值 effort=off
+	//   - 客户端没带、网关补齐了默认档：effort=- ->max（"-" 是客户端侧；别读成降级）
 	//   - 完全没档位：effort=-（网关关闭策略或模型不支持档位时就是这一种）
 	switch {
 	case effort != "" && effortReq != "" && !strings.EqualFold(effortReq, effort):
 		split += " effort=" + effortReq + "->" + effort
-	case effort != "":
+	case effort != "" && effortReq != "":
 		split += " effort=" + effort
+	case effort != "":
+		split += " effort=- ->" + effort
 	case effortReq != "":
 		split += " effort=" + effortReq
 	default:
