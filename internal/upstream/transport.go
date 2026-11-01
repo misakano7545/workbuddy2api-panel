@@ -106,8 +106,52 @@ func NewDNSDialer(servers []string) *net.Dialer {
 	return d
 }
 
-// SetDNSDialer 把拨号器挂到现役两个 http.Client 上（只覆盖 Transport.DialContext，
-// 其余连接池参数保持 newTransport 的取值）。nil 或空列表时不动——系统解析器不变。
+// newTLSDialer 构造出站 TLS 拨号函数：TCP → TLS 握手 → 头序包装。
+//
+// 为什么必须接管整个 TLS 拨号（而不是只包 DialContext）：http.Transport 在
+// DialContext 之上自己完成 TLS 握手，写进 conn 的是**加密记录**，在那一层
+// 看不到也改不了请求头。只有 DialTLSContext 返回「已完成的 TLS conn」时，
+// 上层写入的才是明文 HTTP 字节，headOrderConn 才能重排。
+//
+// 代价：设了 DialTLSContext 之后，Transport 的 TLSHandshakeTimeout 与
+// TLSClientConfig 都不再生效，握手超时与 ServerName 由本函数自行保证。
+//
+// cfg 为 nil 时用最小默认配置；测试注入 InsecureSkipVerify 用自签 httptest
+// 服务器验证整条链路（生产恒 nil）。
+func newTLSDialer(d *net.Dialer, cfg *tls.Config) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		host, _, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			host = addr
+		}
+		var tc0 *tls.Config
+		if cfg != nil {
+			tc0 = cfg.Clone()
+		} else {
+			tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		tc0.ServerName = host
+		// NextProtos 留空：与「禁 h2」口径一致——原 Transport 禁 h2 后
+		// 同样不发 ALPN，真机抓包复核过这一形态（见 transport.go:128 注释）。
+		tc0.NextProtos = nil
+		tc := tls.Client(raw, tc0)
+		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+		defer cancel()
+		if herr := tc.HandshakeContext(hctx); herr != nil {
+			raw.Close()
+			return nil, herr
+		}
+		return newHeadOrderConn(tc), nil
+	}
+}
+
+// SetDNSDialer 把拨号器挂到现役两个 http.Client 上（覆盖 DialContext 与
+// DialTLSContext 两条路；TLS 那条要重新生成闭包才能换掉底层 dialer）。
+// nil 或空列表时不动——系统解析器不变。
 func (c *Client) SetDNSDialer(d *net.Dialer) {
 	if d == nil || d.Resolver == nil {
 		return
@@ -118,6 +162,9 @@ func (c *Client) SetDNSDialer(d *net.Dialer) {
 		}
 		if t, ok := cl.Transport.(*http.Transport); ok {
 			t.DialContext = d.DialContext
+			if t.DialTLSContext != nil {
+				t.DialTLSContext = newTLSDialer(d, nil)
+			}
 		}
 	}
 }
@@ -134,6 +181,9 @@ func newTransport() *http.Transport {
 	dialer := newDialer()
 	return &http.Transport{
 		DialContext: dialer.DialContext,
+		// DialTLSContext 接管整条 TLS 拨号：返回已握手的 conn（包了 headOrderConn），
+		// 让上层写入的明文请求头能被重排成官方顺序。见 newTLSDialer 注释。
+		DialTLSContext: newTLSDialer(dialer, nil),
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
 		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。
