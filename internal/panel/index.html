@@ -782,6 +782,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .ip-mono { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--ink-2); }
 .ua-cell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--ink-3); cursor: help; }
 /* 请求上下文弹窗：一条消息一块，长文 pre-wrap，纵向滚动交给 .dlg .body。 */
+/* 跨账号合计：默认收起的 <details>，summary 当分隔条用（与代理池的分节同款）。 */
+.exp-total { border-top: 1px solid var(--line-soft); }
+.exp-total summary { cursor: pointer; padding: 10px 0; font-size: 12.5px; color: var(--ink-2); }
+.exp-total summary .note { margin-left: 8px; color: var(--ink-3); }
 #eventTableBody tr[data-ev] { cursor: pointer; }
 .ev-ctx { padding: 2px 0; display: flex; flex-direction: column; gap: 10px; }
 .ev-ctx-msg { display: grid; grid-template-columns: 76px 1fr; gap: 10px; align-items: start; }
@@ -894,16 +898,20 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
         <!-- 跨账号合计（issue #102）：同一份快照按自然日累加「该日到期」，
              一行一个到期日；只合计到期量，日均需耗跨号相加没有意义故不列。
-             混域时按 cn/global 分行——两域积分不同源。 -->
-        <div class="tbl-wrap">
-        <table class="acc">
-          <thead><tr>
-            <th>跨账号合计 · 到期日</th><th class="num">距到期</th>
-            <th class="num">该日到期</th><th class="num">账号数</th>
-          </tr></thead>
-          <tbody id="expTotalBody"></tbody>
-        </table>
-        </div>
+             混域时按 cn/global 分行——两域积分不同源。
+             默认收起：跟上面那张按账号的表叠在一起太吵，需要看总量时再展开。 -->
+        <details class="exp-total">
+          <summary>跨账号合计 · 按到期日<span class="note" id="expTotalNote"></span></summary>
+          <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th>到期日</th><th class="num">距到期</th>
+              <th class="num">该日到期</th><th class="num">账号数</th>
+            </tr></thead>
+            <tbody id="expTotalBody"></tbody>
+          </table>
+          </div>
+        </details>
       </div>
 
       <div class="box">

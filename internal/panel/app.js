@@ -3723,6 +3723,9 @@ function renderExpirySnapshot(d) {
   }
   const dayTotals = [...dayMap.values()].sort((x, y) =>
     (x.date < y.date ? -1 : x.date > y.date ? 1 : 0) || (x.realm < y.realm ? -1 : 1));
+  if ($('expTotalNote')) {
+    $('expTotalNote').textContent = dayTotals.length ? dayTotals.length + ' 个到期日' : '暂无';
+  }
   $('expTotalBody').innerHTML = dayTotals.map(t => {
     const days = expDayDiff(t.date);
     return '<tr><td>' + esc(t.date) +
