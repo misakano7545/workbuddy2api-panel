@@ -114,10 +114,19 @@ func lookupVal(values map[string]string, key string) string {
 }
 
 // TestOfficialParity 逐路径对拍官方真机头与本项目出站头。
+//
+// 两种模式：
+//
+//	WB2A_PARITY=report  只打印差异表，不判失败（审计用）
+//	WB2A_PARITY=1       打印 + **断言差异为零**（CI 门禁用）
+//
+// 默认跳过，不污染常规 go test。
 func TestOfficialParity(t *testing.T) {
-	if os.Getenv("WB2A_PARITY") == "" {
-		t.Skip("set WB2A_PARITY=1 to run official-head parity audit")
+	mode := os.Getenv("WB2A_PARITY")
+	if mode == "" {
+		t.Skip("set WB2A_PARITY=1 (gate) 或 WB2A_PARITY=report (audit) to run")
 	}
+	strict := mode != "report"
 
 	cn := &auth.Auth{UID: "uid-fixture", AccessToken: "AT", RefreshToken: "RT",
 		Nickname: "fixture", Domain: "www.workbuddy.cn"}
@@ -258,13 +267,36 @@ func TestOfficialParity(t *testing.T) {
 					t.Logf("   %s", d)
 				}
 			}
-			if len(missing)+len(extra)+len(caseDiff)+len(valDiff) == 0 {
+			total := len(missing) + len(extra) + len(caseDiff) + len(valDiff)
+			if total == 0 {
 				t.Logf("完全一致")
 			}
 
-			// Accept-Encoding 单列（传输层头但值是可指纹化的）
-			t.Logf("Accept-Encoding: 官方=%q 项目=%q",
-				lookupVal(offVals, "Accept-Encoding"), lookupVal(gotVals, "Accept-Encoding"))
+			// Accept-Encoding 单独判定：它是可指纹化的头，但有两个已知边界——
+			//   1. chat 链路有意保留 Go 自动 gzip（SSE 流解压风险，见 ChatHeaders）；
+			//   2. 真机某些路径（chat/busy、v3/config）没有这个头，而 Go 一定会补
+			//      gzip，除非全局 DisableCompression——那会把所有链路的透明解压关掉。
+			// 所以只对「真机有值」的路径做相等断言，chat 允许降级成 gzip。
+			offAE := lookupVal(offVals, "Accept-Encoding")
+			gotAE := lookupVal(gotVals, "Accept-Encoding")
+			t.Logf("Accept-Encoding: 官方=%q 项目=%q", offAE, gotAE)
+
+			if strict {
+				if total > 0 {
+					t.Errorf("%s：与官方真机存在 %d 处差异（漏发%d/多发%d/大小写%d/值%d）",
+						tc.fixture, total, len(missing), len(extra), len(caseDiff), len(valDiff))
+				}
+				if offAE != "" {
+					wantAE := offAE
+					if tc.chat {
+						// 已知残留：chat 交回 net/http 自动 gzip。
+						wantAE = "gzip"
+					}
+					if gotAE != wantAE {
+						t.Errorf("%s：Accept-Encoding=%q want %q", tc.fixture, gotAE, wantAE)
+					}
+				}
+			}
 		})
 	}
 }

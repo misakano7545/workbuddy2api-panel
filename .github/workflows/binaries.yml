@@ -28,6 +28,12 @@ jobs:
       - name: test
         run: go test ./...
 
+      # 出站头与官方真机夹具对拍（默认跳过，CI 显式开启作门禁）。
+      # 夹具是 WorkBuddy 桌面端真机抓包原文；任何头名/值/大小写漂移都会红。
+      # 改夹具必须同时说明抓包依据，否则等于自己给自己放水。
+      - name: official-head parity
+        run: WB2A_PARITY=1 go test ./internal/upstream -run TestOfficialParity -v
+
       # ponytail: 标签发版用标签名，避免 CI 时钟和标签差一分钟变成两个号。
       - name: version
         run: |
