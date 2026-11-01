@@ -30,11 +30,16 @@ type helloFields struct {
 	supportedVersions []uint16
 	alpn              []string
 	hasSNI            bool
+	// sessionIDLen/TLS 版本以外的形态字段。官方 Node 每次连接都发 32 字节随机
+	// session_id（39 次抓包 39 个不同值，无重复），Ja3/Ja4 都不含这一段，
+	// 所以必须单独断言，否则 uTLS 若发出 0 字节也照样「指纹一致」。
+	sessionIDLen int
+	recordLen    int
 }
 
 func parseClientHello(t *testing.T, raw []byte) *helloFields {
 	t.Helper()
-	f := &helloFields{}
+	f := &helloFields{recordLen: len(raw)}
 	p := 5
 	if len(raw) < p+4 || raw[p] != 1 {
 		t.Fatalf("不是 ClientHello（首字节 %d）", raw[0])
@@ -43,6 +48,7 @@ func parseClientHello(t *testing.T, raw []byte) *helloFields {
 	f.version = binary.BigEndian.Uint16(raw[p : p+2])
 	p += 2 + 32
 	sidLen := int(raw[p])
+	f.sessionIDLen = sidLen
 	p += 1 + sidLen
 	csLen := int(binary.BigEndian.Uint16(raw[p : p+2]))
 	p += 2
@@ -290,6 +296,15 @@ func TestNodeFingerprintMatchesOfficial(t *testing.T) {
 	}
 	if got := f.groups; fmt.Sprint(got) != "[29 23 24]" {
 		t.Errorf("groups = %v want [29 23 24]", got)
+	}
+	// session_id 与 record 长度不属于 JA3/JA4，单独盯：官方每次连接发 32 字节
+	// 随机 session_id（抓包 39 次 39 个不同值），uTLS 默认也发 32 字节，但这条
+	// 依赖库内部行为，写死断言才能在升级 uTLS 后第一时间发现形态变了。
+	if f.sessionIDLen != 32 {
+		t.Errorf("session_id 长度 = %d want 32（官方形态）", f.sessionIDLen)
+	}
+	if f.recordLen != 255 {
+		t.Logf("ClientHello record 长度 = %d（官方 255，本身不是指纹，仅记录）", f.recordLen)
 	}
 }
 
