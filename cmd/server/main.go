@@ -227,6 +227,7 @@ func main() {
 		log.Fatalf("proxy pool: %v", err)
 	}
 	defer proxies.Close()
+	proxies.SetTLSOver(up.TLSOver) // 经代理的 HTTPS 与直连同一指纹、同一请求头顺序
 	up.ProxyPool = proxies
 	up.SanitizeFingerprints.Store(cfg.Features.SanitizeBlacklistFingerprints)
 	up.SanitizeBrandScope.Store(cfg.Features.SanitizeBrandScope)
