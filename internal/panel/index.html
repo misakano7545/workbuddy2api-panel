@@ -1516,6 +1516,29 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
 
         <div class="box">
+          <header><h3>国际版配置 · 账号池守卫</h3><span class="hint">仅对国际版（global）账号生效；留空 = 继承上方国内默认值</span></header>
+          <div class="pad">
+            <div class="grid3">
+              <label class="fld"><span class="lb">保留积分（国际）</span>
+                <input name="global_reserve_credits" type="number" min="0" placeholder="继承国内默认">
+                <span class="hint">国际号余额低于此值停止接单；留空继承</span></label>
+              <label class="fld"><span class="lb">积分保底（国际）</span>
+                <input name="global_credit_floor" type="number" min="0" placeholder="继承">
+                <span class="hint">国际号余额低于此值不再接收费模型；留空继承</span></label>
+              <label class="fld"><span class="lb">保底倍率上限（国际）</span>
+                <input name="global_credit_floor_max_rate" type="number" min="0" step="0.01" placeholder="继承">
+                <span class="hint">无观测时目录倍率 ≤ 此值才放行；留空继承</span></label>
+              <label class="fld"><span class="lb">快过期窗口（国际）</span>
+                <input name="global_expiring_soon" placeholder="继承（如 168h）"></label>
+              <label class="fld"><span class="lb">用量均衡窗口（国际）</span>
+                <input name="global_balance_window" placeholder="继承（如 1h）"></label>
+              <label class="fld"><span class="lb">成本探索窗口（国际）</span>
+                <input name="global_cost_explore_interval" placeholder="继承（如 30m）"></label>
+            </div>
+          </div>
+        </div>
+
+        <div class="box">
           <header><h3>上游与高级</h3></header>
           <div class="pad">
             <div class="grid3">

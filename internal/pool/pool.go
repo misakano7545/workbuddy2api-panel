@@ -93,6 +93,9 @@ type Pool struct {
 	// issue #62：同一层内配了占比的账号独占抽签，按 share 归一化分流量（70/30 与
 	// 7/3 同义，不必凑满 100）。缺省 nil = 全部未配置（行为与旧版一致）。
 	accountShare map[string]float64
+	// guardsByRealm 按域覆盖账号池守卫值（global 域可单独设 reserve_credits 等）。
+	// 命中则返回覆盖值，否则回落各默认字段（与顶层 pool.* 一致）。键为 realm（"cn"/"global"）。
+	guardsByRealm map[string]*RealmGuards
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -362,6 +365,81 @@ func (p *Pool) inFlightLimit(e *entry) int {
 		return p.maxInFlightGlobal
 	}
 	return p.maxInFlight
+}
+
+// RealmGuards 某域的账号池守卫覆盖值（仅显式配置的非 nil 字段生效，其余回落默认）。
+// 由 main 从 config 的 global.pool.* 装配后通过 SetRealmGuards 注入。
+type RealmGuards struct {
+	ReserveCredits      *int64
+	CreditFloor         *int64
+	CreditFloorMaxRate  *float64
+	ExpiringWindow      *time.Duration
+	BalanceWindow       *time.Duration
+	CostExploreInterval *time.Duration
+}
+
+// SetRealmGuards 注入某域的守卫覆盖（覆盖整组，未配置的域字段保持 nil = 继承默认）。
+// 调用方：main 在初始化与热重载时，对 global 域构建 RealmGuards 后调用。
+func (p *Pool) SetRealmGuards(realm string, g RealmGuards) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.guardsByRealm == nil {
+		p.guardsByRealm = map[string]*RealmGuards{}
+	}
+	cp := g // 复制一份，避免与调用方共享底层指针
+	p.guardsByRealm[realm] = &cp
+}
+
+func (p *Pool) guardFor(realm string) *RealmGuards {
+	if p.guardsByRealm != nil {
+		if g, ok := p.guardsByRealm[realm]; ok {
+			return g
+		}
+	}
+	return nil
+}
+
+// 下列 XFor(realm) 返回某域生效的守卫值：域覆盖优先，否则回落默认字段。
+func (p *Pool) ReserveCreditsFor(realm string) int64 {
+	if g := p.guardFor(realm); g != nil && g.ReserveCredits != nil {
+		return *g.ReserveCredits
+	}
+	return p.reserveCredits
+}
+
+func (p *Pool) CreditFloorFor(realm string) int64 {
+	if g := p.guardFor(realm); g != nil && g.CreditFloor != nil {
+		return *g.CreditFloor
+	}
+	return p.creditFloor
+}
+
+func (p *Pool) CreditFloorMaxRateFor(realm string) float64 {
+	if g := p.guardFor(realm); g != nil && g.CreditFloorMaxRate != nil {
+		return *g.CreditFloorMaxRate
+	}
+	return p.creditFloorMaxRate
+}
+
+func (p *Pool) ExpiringWindowFor(realm string) time.Duration {
+	if g := p.guardFor(realm); g != nil && g.ExpiringWindow != nil {
+		return *g.ExpiringWindow
+	}
+	return p.expiringWindow
+}
+
+func (p *Pool) BalanceWindowFor(realm string) time.Duration {
+	if g := p.guardFor(realm); g != nil && g.BalanceWindow != nil {
+		return *g.BalanceWindow
+	}
+	return p.balanceWindow
+}
+
+func (p *Pool) CostExploreIntervalFor(realm string) time.Duration {
+	if g := p.guardFor(realm); g != nil && g.CostExploreInterval != nil {
+		return *g.CostExploreInterval
+	}
+	return p.costExploreInterval
 }
 
 // SetStore 注入池状态快照镜像（redisstore.Store）。nil 表示不镜像（纯本地恢复）。

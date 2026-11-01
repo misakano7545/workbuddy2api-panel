@@ -197,6 +197,19 @@ type Config struct {
 		// 「统一」把 base 写死成一个域，老账号的 token 只在签发域可用。
 		ChatBase    string `json:"chat_base"`
 		BillingBase string `json:"billing_base"`
+		// Pool 国际版（global 域）账号池守卫覆盖：仅 global 域账号生效；未设字段回落
+		// 顶层 pool.*（= 国内默认值）。用于「国内留 50、国际留 200」这类分域独立配置。
+		Pool struct {
+			ReserveCredits         *int64        `json:"reserve_credits"`       // 保留积分阈值；nil = 继承顶层 pool.reserve_credits
+			CreditFloor            *int64        `json:"credit_floor"`          // 积分保底；nil = 继承
+			CreditFloorMaxRate     *float64      `json:"credit_floor_max_rate"` // 保底倍率上限；nil = 继承
+			ExpiringSoon           *string       `json:"expiring_soon"`         // 快过期窗口（时长串）；nil = 继承
+			BalanceWindow          *string       `json:"balance_window"`        // 用量均衡窗口；nil = 继承
+			CostExploreInterval    *string       `json:"cost_explore_interval"` // 成本探索窗口；nil = 继承
+			ExpiringSoonDur        time.Duration `json:"-"`
+			BalanceWindowDur       time.Duration `json:"-"`
+			CostExploreIntervalDur time.Duration `json:"-"`
+		} `json:"pool"`
 	} `json:"global"`
 
 	CN struct {
@@ -977,6 +990,23 @@ func (c *Config) normalize() error {
 	}
 	if c.BalanceWindowDur < 0 {
 		c.BalanceWindowDur = 0
+	}
+	// 国际版（global 域）账号池守卫覆盖的时长字段：空/nil = 继承顶层 pool.*；
+	// 非空必须可解析（拼写错误 fail fast），非法值直接返回错误。
+	if c.Global.Pool.ExpiringSoon != nil {
+		if c.Global.Pool.ExpiringSoonDur, err = time.ParseDuration(*c.Global.Pool.ExpiringSoon); err != nil {
+			return fmt.Errorf("global.pool.expiring_soon: %w", err)
+		}
+	}
+	if c.Global.Pool.BalanceWindow != nil {
+		if c.Global.Pool.BalanceWindowDur, err = time.ParseDuration(*c.Global.Pool.BalanceWindow); err != nil {
+			return fmt.Errorf("global.pool.balance_window: %w", err)
+		}
+	}
+	if c.Global.Pool.CostExploreInterval != nil {
+		if c.Global.Pool.CostExploreIntervalDur, err = time.ParseDuration(*c.Global.Pool.CostExploreInterval); err != nil {
+			return fmt.Errorf("global.pool.cost_explore_interval: %w", err)
+		}
 	}
 	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
 	if c.Pool.CreditFloor < 0 {

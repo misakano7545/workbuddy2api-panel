@@ -123,7 +123,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// timer 同锁写入：并发 pick 串行进入写锁，只有一个进入者能通过窗口判定
 	//（天然防重复探索）。key = realm + "\x1f" + reqModel：同模型名可跨域，
 	// 探索节奏按 (域, 模型) 独立；realm==""（Pick 老语义）单独成键。
-	if p.costExploreInterval > 0 && bestTier == 0 && reqModel != "" {
+	if p.CostExploreIntervalFor(realm) > 0 && bestTier == 0 && reqModel != "" {
 		for _, e := range cands {
 			if ti, _ := costTier(e); ti == 1 {
 				hasTier1 = true
@@ -131,7 +131,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			}
 		}
 		key := realm + "\x1f" + reqModel
-		if hasTier1 && now.Sub(p.exploreLast[key]) >= p.costExploreInterval {
+		if hasTier1 && now.Sub(p.exploreLast[key]) >= p.CostExploreIntervalFor(realm) {
 			p.exploreLast[key] = now
 			p.costExploreEvents++
 			bestTier = 1
@@ -162,10 +162,10 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// shortcut: 翻滚窗口（从窗口内首次记账起算），不是滑动窗口——跨窗口边界的最初
 	// 一段会短暂少算用量；要精确滑窗得存每秒桶，收益不值得这份复杂度。
 	var uctx usageCtx
-	if p.balanceWindow > 0 {
+	if p.BalanceWindowFor(realm) > 0 {
 		uctx = usageCtx{model: reqModel, n: len(ws)}
 		for _, w := range ws {
-			uctx.sum += w.e.windowTokens(reqModel, p.balanceWindow, now)
+			uctx.sum += w.e.windowTokens(reqModel, p.BalanceWindowFor(realm), now)
 		}
 	}
 	for i := range ws {
@@ -252,7 +252,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		// 毕业结果由相邻的既有日志闭环（免费号无日志、收费号走 NoteModelCost
 		// 常规路径）。
 		log.Printf("[pool] cost explore model=%s realm=%q acct=%s window=%s",
-			reqModel, realm, logfmt.Label(e.a.UID, e.a.Nickname), p.costExploreInterval)
+			reqModel, realm, logfmt.Label(e.a.UID, e.a.Nickname), p.CostExploreIntervalFor(realm))
 	}
 	e.lastUsed = now // 锁内即时标记：下一个进入 pick 的 goroutine 立即看到本号已用
 	p.pickSeq++
@@ -290,7 +290,7 @@ func (p *Pool) floorBlockedForModel(e *entry, model string, now time.Time) bool 
 // floorBlockedForRealmModel 同上，但带 realm 上下文（倍率按 (realm, 模型) 分桶，
 // 同名模型在 CN / global 两域倍率可不同）。realm 为空时按倍率表的空域键查。
 func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time.Time) bool {
-	if p.creditFloor <= 0 || model == "" || e.exactCredits() >= float64(p.creditFloor) {
+	if p.CreditFloorFor(realm) <= 0 || model == "" || e.exactCredits() >= float64(p.CreditFloorFor(realm)) {
 		return false
 	}
 	// 1) 本地实测台账：最权威（真实扣费证据）。
@@ -313,7 +313,7 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 	if err != nil {
 		return false // 倍率非数值（异常形态）：不据此惩罚账号
 	}
-	return v > p.creditFloorMaxRate
+	return v > p.CreditFloorMaxRateFor(realm)
 }
 
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
@@ -408,7 +408,7 @@ func (p *Pool) usageDiv(e *entry, u usageCtx, now time.Time) float64 {
 	if u.sum <= 0 || u.n <= 0 {
 		return 1
 	}
-	used := float64(e.windowTokens(u.model, p.balanceWindow, now))
+	used := float64(e.windowTokens(u.model, p.BalanceWindowFor(e.a.Realm()), now))
 	return 1 + used*float64(u.n)/float64(u.sum)
 }
 
@@ -544,14 +544,14 @@ func (p *Pool) expiringUrgency(e *entry, now time.Time) float64 {
 	if e == nil || !expiringNow(e, now) {
 		return 1
 	}
-	if p.expiringWindow <= 0 {
+	if p.ExpiringWindowFor(e.a.Realm()) <= 0 {
 		return expiringVirtualSlots // ponytail: 无窗口信息 → 保持旧口径
 	}
 	remain := e.creditsEarliestExpiry.Sub(now)
-	if remain >= p.expiringWindow {
+	if remain >= p.ExpiringWindowFor(e.a.Realm()) {
 		return expiringUrgencyMin
 	}
-	frac := math.Sqrt(float64(remain) / float64(p.expiringWindow)) // T/W ∈ (0,1)
+	frac := math.Sqrt(float64(remain) / float64(p.ExpiringWindowFor(e.a.Realm()))) // T/W ∈ (0,1)
 	return expiringUrgencyMin + (expiringUrgencyMax-expiringUrgencyMin)*(1-frac)
 }
 

@@ -281,9 +281,9 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 	nowTS := time.Now()
 	var winStart time.Time
 	var winTokens int64
-	if p.balanceWindow > 0 {
+	if p.BalanceWindowFor(e.a.Realm()) > 0 {
 		winStart, winTokens = prev.WinStart, prev.WinTokens
-		if winStart.IsZero() || nowTS.Sub(winStart) >= p.balanceWindow {
+		if winStart.IsZero() || nowTS.Sub(winStart) >= p.BalanceWindowFor(e.a.Realm()) {
 			winStart, winTokens = nowTS, 0
 		}
 		winTokens += int64(tokens)
@@ -509,7 +509,7 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 	// （无需额外节流）；粘性续期中每个新请求一条，恰好是「余额仍在线下」的持续提醒。
 	if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
 		log.Printf("WARN: [pool] credit floor: sticky acct=%s model=%s credits=%d < floor=%d, unbind (paid model held out)",
-			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.creditFloor)
+			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.CreditFloorFor(e.a.Realm()))
 		return nil
 	}
 	e.lastUsed = now
@@ -669,7 +669,8 @@ func (p *Pool) reserveBlocked(e *entry, modelFree bool) bool {
 	if modelFree {
 		return false
 	}
-	return p.reserveCredits > 0 && e.creditsTotal > 0 && e.credits <= p.reserveCredits
+	rv := p.ReserveCreditsFor(e.a.Realm())
+	return rv > 0 && e.creditsTotal > 0 && e.credits <= rv
 }
 
 // modelFreeOf 报告 (账号域, 模型) 是否免费档：上游目录倍率数值为 0。
@@ -928,7 +929,7 @@ func (p *Pool) modelCostsStatusLocked(e *entry, now time.Time) []ModelCostStatus
 			CostPer1k: mc.CostPer1k,
 			LastSeen:  mc.LastSeen,
 			Samples:   mc.Samples,
-			WinTokens: e.windowTokens(m, p.balanceWindow, now),
+			WinTokens: e.windowTokens(m, p.BalanceWindowFor(e.a.Realm()), now),
 		})
 	}
 	return rows

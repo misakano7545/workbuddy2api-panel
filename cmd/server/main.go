@@ -158,6 +158,7 @@ func main() {
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring, cfg.ExpiringSoonDur)
 	p.SetAccountPriority(cfg.Pool.AccountPriority) // 账号优先级/占比（issue #62）：空表 = 不启用
 	p.SetAccountShare(cfg.Pool.AccountShare)
+	applyGlobalPoolGuards(p, cfg) // 国际版（global）账号池守卫覆盖（reserve_credits 等）
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -770,6 +771,38 @@ func effortPolicyOf(cfg *Config) *upstream.EffortPolicy {
 	}
 }
 
+// applyGlobalPoolGuards 把 config 的 global.pool.* 覆盖装配为按域守卫并注入 pool。
+// 仅 global 域账号生效；未配置的域字段保持 nil = 回落顶层 pool.*（国内默认值）。
+// 在初始化与热重载两处调用，保证改配置后 global 守卫即时生效。
+func applyGlobalPoolGuards(p *pool.Pool, cfg *Config) {
+	var g pool.RealmGuards
+	if v := cfg.Global.Pool.ReserveCredits; v != nil {
+		x := *v
+		g.ReserveCredits = &x
+	}
+	if v := cfg.Global.Pool.CreditFloor; v != nil {
+		x := *v
+		g.CreditFloor = &x
+	}
+	if v := cfg.Global.Pool.CreditFloorMaxRate; v != nil {
+		x := *v
+		g.CreditFloorMaxRate = &x
+	}
+	if v := cfg.Global.Pool.ExpiringSoon; v != nil {
+		d := cfg.Global.Pool.ExpiringSoonDur
+		g.ExpiringWindow = &d
+	}
+	if v := cfg.Global.Pool.BalanceWindow; v != nil {
+		d := cfg.Global.Pool.BalanceWindowDur
+		g.BalanceWindow = &d
+	}
+	if v := cfg.Global.Pool.CostExploreInterval; v != nil {
+		d := cfg.Global.Pool.CostExploreIntervalDur
+		g.CostExploreInterval = &d
+	}
+	p.SetRealmGuards("global", g)
+}
+
 func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, gw *server.Handler, pn *panel.Panel, running ...*Config) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
@@ -881,6 +914,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetReserveCredits(*newCfg.Pool.ReserveCredits)  // 保留积分热生效（0 = 关闭，缺省 10）
 	p.SetAccountPriority(newCfg.Pool.AccountPriority) // 账号优先级/占比热生效（issue #62）
 	p.SetAccountShare(newCfg.Pool.AccountShare)
+	applyGlobalPoolGuards(p, newCfg) // 国际版（global）账号池守卫覆盖热生效
 	sch.Reconfigure(scheduler.ScheduleParams{
 		CheckinHours:   newCfg.Schedule.CheckinHours,
 		TravelHours:    newCfg.Schedule.TravelHours,

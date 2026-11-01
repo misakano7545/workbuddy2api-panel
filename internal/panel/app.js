@@ -1706,6 +1706,12 @@ const CFG_MAP = {
   thinking_enabled: ['thinking', 'enabled'],
   cn_chat_base: ['cn', 'chat_base'], cn_billing_base: ['cn', 'billing_base'],
   global_chat_base: ['global', 'chat_base'], global_billing_base: ['global', 'billing_base'],
+  global_reserve_credits: ['global', 'pool', 'reserve_credits'],
+  global_credit_floor: ['global', 'pool', 'credit_floor'],
+  global_credit_floor_max_rate: ['global', 'pool', 'credit_floor_max_rate'],
+  global_expiring_soon: ['global', 'pool', 'expiring_soon'],
+  global_balance_window: ['global', 'pool', 'balance_window'],
+  global_cost_explore_interval: ['global', 'pool', 'cost_explore_interval'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -1719,6 +1725,12 @@ const CFG_MAP = {
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
  */
 const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'cn_chat_base', 'cn_billing_base', 'global_chat_base', 'global_billing_base']);
+// NULLABLE_CFG：国际版（global.pool.*）覆盖项。留空 = 明确要求回落国内默认值，
+// 故提交 null（而非不下发）——不下发会让旧值残留在 config.json 里清不掉。
+const NULLABLE_CFG = new Set([
+  'global_reserve_credits', 'global_credit_floor', 'global_credit_floor_max_rate',
+  'global_expiring_soon', 'global_balance_window', 'global_cost_explore_interval',
+]);
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function put(obj, path, val) {
@@ -1774,7 +1786,7 @@ function collectConfig() {
     if (!el) continue;
     let v;
     if (el.type === 'checkbox') v = el.checked;
-    else if (el.type === 'number') { v = el.value.trim() === '' ? undefined : Number(el.value); }
+    else if (el.type === 'number') { v = el.value.trim() === '' ? (NULLABLE_CFG.has(name) ? null : undefined) : Number(el.value); }
     else {
       const raw = el.value.trim();
       // 逗号/空白分隔的列表字段：空 = 显式清空黑名单（空数组照发，否则删不掉条目）。
@@ -1782,8 +1794,8 @@ function collectConfig() {
       if (name === 'models_hidden' || name === 'models_allowed') v = raw.split(/[,，\s]+/).filter(Boolean);
       // 模型映射（issue #30）："客户端名=真实名" 条目数组，同列表语义；空数组照发 = 清空。
       else if (name === 'models_aliases') v = raw.split(/[,，]+/).map(s => s.trim()).filter(Boolean);
-      // 覆盖型字段空串照发（见 CLEARABLE_CFG）；其余空 = 不下发。
-      else if (raw === '') v = CLEARABLE_CFG.has(name) ? '' : undefined;
+      // 覆盖型字段空串照发（见 CLEARABLE_CFG）；NULLABLE 字段空 = 明确回落默认，发 null；其余空 = 不下发。
+      else if (raw === '') v = NULLABLE_CFG.has(name) ? null : (CLEARABLE_CFG.has(name) ? '' : undefined);
       else if (name.endsWith('_hours')) v = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
       else v = raw;
     }
