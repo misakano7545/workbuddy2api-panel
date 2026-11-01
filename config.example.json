@@ -61,6 +61,7 @@
   },
   "upstream": {
     "timeout_seconds": 120,
+    "tls_fingerprint": "node",
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
     "user_agent": "",

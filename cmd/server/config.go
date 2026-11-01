@@ -217,6 +217,12 @@ type Config struct {
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
 		TimeoutSeconds int `json:"timeout_seconds"`
+		// TLSFingerprint 出站 ClientHello 指纹档位：
+		//   "node"（缺省）复刻官方 Node/OpenSSL 形态，JA3/JA4 与真机一致；
+		//   "go"   用 crypto/tls 原生形态（排障 / 回滚用）。
+		// 默认 node：不配也走复刻，避免"忘了配就裸奔"。
+		// 选 go 的唯一理由是指纹复刻导致握手异常时紧急回滚。
+		TLSFingerprint string `json:"tls_fingerprint"`
 		// HeaderTimeoutSeconds 聊天 SSE 首字节前（响应头）上限；<=0 回落 TimeoutSeconds。
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
@@ -681,6 +687,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
 		c.Upstream.UserAgent = v
 	}
+	if v := os.Getenv("WB2A_TLS_FINGERPRINT"); v != "" {
+		c.Upstream.TLSFingerprint = v
+	}
 	if v := os.Getenv("WB2A_CLIENT_VERSION"); v != "" {
 		c.Upstream.ClientVersion = v
 	}
@@ -814,6 +823,7 @@ func (c *Config) EnvironmentManagedFields() []string {
 		{"WB2A_SOFT_RATE", "cooldown.soft_rate", ""}, {"WB2A_SOFT_RATE_MAX", "cooldown.soft_rate_max", ""},
 		{"WB2A_TIMEOUT_SECONDS", "upstream.timeout_seconds", "int"}, {"WB2A_HEADER_TIMEOUT_SECONDS", "upstream.header_timeout_seconds", "int"},
 		{"WB2A_IDLE_TIMEOUT_SECONDS", "upstream.idle_timeout_seconds", "int"}, {"WB2A_USER_AGENT", "upstream.user_agent", ""},
+		{"WB2A_TLS_FINGERPRINT", "upstream.tls_fingerprint", ""},
 		{"WB2A_CLIENT_VERSION", "upstream.client_version", ""}, {"WB2A_CLI_VERSION", "upstream.cli_version", ""},
 		{"WB2A_CLIENT_NAME", "upstream.client_name", ""}, {"WB2A_DEVICE_TOKEN", "upstream.device_token", ""},
 		{"WB2A_DEVICE_TOKEN_FILE", "upstream.device_token_file", ""}, {"WB2A_PASSTHROUGH_IP", "upstream.passthrough_ip", "bool"},

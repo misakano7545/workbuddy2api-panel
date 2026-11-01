@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -828,6 +829,15 @@ type Client struct {
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
 	IdleTimeout time.Duration
 
+	// TLSFingerprint 出站 ClientHello 指纹档位："node"（默认，复刻官方
+	// Node/OpenSSL 形态）或 "go"（crypto/tls 原生，排障/回滚用）。
+	// 空值等价 "node"。用 SetTLSFingerprint 改，别直接赋值——直接赋值不会
+	// 重建拨号闭包，等于没生效。
+	TLSFingerprint string
+	// dialer 出站拨号器（SetDNSDialer 会替换它）。存一份引用是为了让
+	// SetTLSFingerprint 能重建闭包时不丢失自定义 DNS。
+	dialer *net.Dialer
+
 	// DumpRequestMax 落盘文件里出站请求体片段的上限（字节）；0 = 默认 256 KB。
 	// 见 dump.go。
 	DumpRequestMax int
@@ -935,10 +945,15 @@ type CreditObserver func(uid string, credits int64)
 // TLS 握手超时 / 短 keepalive 探测 / 失败清池，参数见 transport.go——吸收上游
 // kongjianguan 4 连击实测经验）。
 func New() *Client {
+	d := newDialer()
 	tr := newTransport()
+	tr.DialContext = d.DialContext
+	tr.DialTLSContext = newTLSDialer(d, nil, TLSFingerprintNode)
 	c := &Client{
-		HTTP:     &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		ChatHTTP: &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		HTTP:           &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		ChatHTTP:       &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		TLSFingerprint: TLSFingerprintNode,
+		dialer:         d,
 		// ChatBaseCN 取官方桌面端的 endpoint（product.json），不是备选入口
 		// copilot.tencent.com —— 后者是官方 NetworkFailover 里的备选，主入口才是
 		// www.workbuddy.cn。生产实测（同一账号）：/v3/config、billing 汇总、chat

@@ -9,9 +9,12 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 // 连接层参数集中定义（与 server/backoff.go 同风格：一处定义，测试可回读断言）。
@@ -106,19 +109,31 @@ func NewDNSDialer(servers []string) *net.Dialer {
 	return d
 }
 
-// newTLSDialer 构造出站 TLS 拨号函数：TCP → TLS 握手 → 头序包装。
+// newTLSDialer 构造出站 TLS 拨号函数：TCP →（可选指纹复刻）TLS 握手 → 头序包装。
 //
 // 为什么必须接管整个 TLS 拨号（而不是只包 DialContext）：http.Transport 在
 // DialContext 之上自己完成 TLS 握手，写进 conn 的是**加密记录**，在那一层
 // 看不到也改不了请求头。只有 DialTLSContext 返回「已完成的 TLS conn」时，
 // 上层写入的才是明文 HTTP 字节，headOrderConn 才能重排。
 //
+// 同一位置也承担 ClientHello 指纹复刻：fp="node" 时用 uTLS 手搓官方
+// Node/OpenSSL 形态（见 tlsfingerprint.go），fp="go" 时走 crypto/tls 原生。
+// 两件事共用一个拨号钩子，互不干扰。
+//
 // 代价：设了 DialTLSContext 之后，Transport 的 TLSHandshakeTimeout 与
 // TLSClientConfig 都不再生效，握手超时与 ServerName 由本函数自行保证。
 //
 // cfg 为 nil 时用最小默认配置；测试注入 InsecureSkipVerify 用自签 httptest
 // 服务器验证整条链路（生产恒 nil）。
-func newTLSDialer(d *net.Dialer, cfg *tls.Config) func(context.Context, string, string) (net.Conn, error) {
+func newTLSDialer(d *net.Dialer, cfg *tls.Config, fp string) func(context.Context, string, string) (net.Conn, error) {
+	insecure := cfg != nil && cfg.InsecureSkipVerify
+	// sniOverride 允许调用方显式指定 SNI（测试把连接指到 127.0.0.1 但仍要发
+	// 真实域名的 SNI，否则 uTLS 对 IP 地址按 RFC 不发 SNI，抓到的 ClientHello
+	// 会少一个扩展、JA3/JA4 全跑偏）。生产 cfg 恒 nil，行为不受影响。
+	sniOverride := ""
+	if cfg != nil {
+		sniOverride = cfg.ServerName
+	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		raw, err := d.DialContext(ctx, network, addr)
 		if err != nil {
@@ -128,6 +143,32 @@ func newTLSDialer(d *net.Dialer, cfg *tls.Config) func(context.Context, string, 
 		if splitErr != nil {
 			host = addr
 		}
+		if sniOverride != "" {
+			host = sniOverride
+		}
+		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+		defer cancel()
+
+		// 复刻路径：uTLS 手搓 ClientHello。ALPN 刻意留空——官方 Node 栈就是
+		// 不带 ALPN，这与 Transport 禁 h2 的口径一致（见 newTransport 注释）。
+		if useNodeFingerprint(fp) {
+			uc := utls.UClient(raw, &utls.Config{
+				ServerName:         host,
+				InsecureSkipVerify: insecure,
+				MinVersion:         tls.VersionTLS12,
+			}, utls.HelloCustom)
+			if perr := uc.ApplyPreset(officialHelloSpec()); perr != nil {
+				raw.Close()
+				return nil, fmt.Errorf("tls fingerprint preset: %w", perr)
+			}
+			if herr := uc.HandshakeContext(hctx); herr != nil {
+				raw.Close()
+				return nil, herr
+			}
+			return newHeadOrderConn(uc), nil
+		}
+
+		// 原生路径：crypto/tls。
 		var tc0 *tls.Config
 		if cfg != nil {
 			tc0 = cfg.Clone()
@@ -135,12 +176,8 @@ func newTLSDialer(d *net.Dialer, cfg *tls.Config) func(context.Context, string, 
 			tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
 		tc0.ServerName = host
-		// NextProtos 留空：与「禁 h2」口径一致——原 Transport 禁 h2 后
-		// 同样不发 ALPN，真机抓包复核过这一形态（见 transport.go:128 注释）。
 		tc0.NextProtos = nil
 		tc := tls.Client(raw, tc0)
-		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
-		defer cancel()
 		if herr := tc.HandshakeContext(hctx); herr != nil {
 			raw.Close()
 			return nil, herr
@@ -156,17 +193,42 @@ func (c *Client) SetDNSDialer(d *net.Dialer) {
 	if d == nil || d.Resolver == nil {
 		return
 	}
+	c.dialer = d
+	c.rebuildTLSDialer()
+}
+
+// rebuildTLSDialer 用当前的 dialer + 指纹档位重建两个 client 的拨号闭包。
+//
+// SetDNSDialer 与 SetTLSFingerprint 都改同一个闭包的输入，所以统一走这里，
+// 避免两处各自拼参数导致其中一项静默失效（比如换了 DNS 却把指纹改回原生）。
+func (c *Client) rebuildTLSDialer() {
+	d := c.dialer
+	if d == nil {
+		d = newDialer()
+	}
 	for _, cl := range []*http.Client{c.HTTP, c.ChatHTTP} {
 		if cl == nil {
 			continue
 		}
-		if t, ok := cl.Transport.(*http.Transport); ok {
+		if t, ok := cl.Transport.(*http.Transport); ok && t.DialTLSContext != nil {
 			t.DialContext = d.DialContext
-			if t.DialTLSContext != nil {
-				t.DialTLSContext = newTLSDialer(d, nil)
-			}
+			t.DialTLSContext = newTLSDialer(d, nil, c.TLSFingerprint)
 		}
 	}
+}
+
+// SetTLSFingerprint 切换出站 ClientHello 指纹档位（"node" 复刻官方 / "go" 原生）。
+//
+// 做成运行期可切换而不是构造期固定：一旦线上出现「换了指纹反而握手失败」的
+// 情况，改一行配置就能回滚到原生形态，不必重新发版。
+func (c *Client) SetTLSFingerprint(fp string) error {
+	norm, err := validateTLSFingerprint(fp)
+	if err != nil {
+		return err
+	}
+	c.TLSFingerprint = norm
+	c.rebuildTLSDialer()
+	return nil
 }
 
 // newTransport 构造共享出站 Transport（HTTP 与 ChatHTTP 同一实例，连接池不重复）。
@@ -183,7 +245,7 @@ func newTransport() *http.Transport {
 		DialContext: dialer.DialContext,
 		// DialTLSContext 接管整条 TLS 拨号：返回已握手的 conn（包了 headOrderConn），
 		// 让上层写入的明文请求头能被重排成官方顺序。见 newTLSDialer 注释。
-		DialTLSContext: newTLSDialer(dialer, nil),
+		DialTLSContext: newTLSDialer(dialer, nil, TLSFingerprintNode),
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
 		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。

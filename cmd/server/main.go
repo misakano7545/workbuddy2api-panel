@@ -188,6 +188,18 @@ func main() {
 
 	up := upstream.New()
 
+	// 出站 ClientHello 指纹档位：默认 node（复刻官方 Node/OpenSSL 的 JA3/JA4）。
+	// 配 go 才退回 crypto/tls 原生形态——唯一用途是指纹导致握手异常时紧急回滚。
+	if err := up.SetTLSFingerprint(cfg.Upstream.TLSFingerprint); err != nil {
+		log.Fatalf("CONFIG: %v", err)
+	}
+	if up.TLSFingerprint == upstream.TLSFingerprintNode {
+		log.Printf("[upstream] TLS 指纹复刻已启用（JA3 %s / JA4 %s）",
+			upstream.OfficialJA3MD5, upstream.OfficialJA4)
+	} else {
+		log.Printf("[upstream] TLS 指纹为原生 Go 形态（JA3/JA4 与官方客户端不一致）")
+	}
+
 	// 出站 DNS（config dns_servers / WB2A_DNS）：显式指定解析器，绕开系统配置。
 	// 典型场景是 Android（无 /etc/resolv.conf，Go 解析器退回 [::1]:53 全域名失败）
 	// 与本地 DNS 被污染。未配置时保持系统解析器，行为零变化。
