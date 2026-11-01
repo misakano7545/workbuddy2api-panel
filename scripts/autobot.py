@@ -42,7 +42,7 @@ def say(lines, text=""):
     print(text, flush=True)
 
 
-def agent(task, timeout):
+def agent(task, timeout, expect):
     """跑一次 Hermes（ACP 模式），思考/回复/工具调用全部实时回显。
 
     shortcut: 不用 `hermes -z`——它设计上只打印最终答案（No tool previews），
@@ -51,12 +51,18 @@ def agent(task, timeout):
     429 是限流的常态，退避重试三次再认输。用 Popen.wait 而不是
     subprocess.run(capture_output)：后者要读完管道才算完，工具子进程继承管道后
     kill 主进程也不返回（实测挂到 job 超时 48 分钟）。
+
+    expect 是这一轮必须写出的文件：**有产物就是成功**，不看日志内容。日志里出现
+    「429」完全可能是 agent 在读或写的文本（本仓自己就在处理 429），拿子串判定会
+    把已经跑完的整轮丢掉重放，重试次数一路涨到 5 却每轮都有产出（实测）。
     """
     # CI 里没人点审批弹窗：config 的 approvals.mode=off + HERMES_YOLO_MODE，
     # ACP 客户端的 session/request_permission 也一律允许
     cmd = [sys.executable, os.path.join(ROOT, "scripts", "acp_run.py"), task]
     tail = ""
     for attempt in range(5):
+        if os.path.isfile(expect):
+            os.remove(expect)   # 上一轮残留不算本轮产出
         log_f = "/tmp/autobot-agent.log"
         pipe = " ".join(shlex.quote(c) for c in cmd) + " 2>&1 | tee " + shlex.quote(log_f)
         p = subprocess.Popen(
@@ -78,7 +84,7 @@ def agent(task, timeout):
         tail = " / ".join(keep)[:300]
         # 只看日志不看退出码：agent 吞掉 429 之后仍以 0 退出，按 code==0 放行
         # 会把这轮当成「跑完了但没产出」（真踩过，17 片里 1 片这么挂的）。
-        if "429" not in out:
+        if os.path.isfile(expect) or "429" not in out:
             return code, tail
         # 免费档是「允许突发 30、持续 10 RPM」：agent 一阵工具调用就会打满，
         # 退避要够长才能等到窗口滑过去，30→300s 封顶。
@@ -169,7 +175,7 @@ def analyze(src, lines):
         "「本仓」列必须点名真实 文件:函数；没有就写「缺失」，没核实就写「未核实」。"
         "本仓已有等价实现的项，值得度给 0-1，不要报 3。\n"
     )
-    code, out = agent(task, int(os.environ.get("AGENT_ANALYZE_TIMEOUT") or 1800))
+    code, out = agent(task, int(os.environ.get("AGENT_ANALYZE_TIMEOUT") or 1800), rp)
     if not os.path.isfile(rp):
         say(lines, f"{src}: agent 未产出报告（退出码 {code}）｜{out}")
         return ""
@@ -237,7 +243,7 @@ def implement(src, idea, lines):
         f"把改动方案写进 {plan_f}：要改哪个 文件:函数、改成什么、测试加在哪，"
         "每处给出准确位置与代码。\n"
         "不要写实现文件、不要写 diff、不要跑 go build。直接写文件，不要回说明。\n",
-        int(os.environ.get("AGENT_PLAN_TIMEOUT") or 1800))
+        int(os.environ.get("AGENT_PLAN_TIMEOUT") or 1800), plan_f)
     if not os.path.isfile(plan_f):
         say(lines, f"{src}: 改动方案未产出（退出码 {code}，prompt 材料已落文件）｜{out}")
         return False, ""
@@ -253,7 +259,7 @@ def implement(src, idea, lines):
         "--- a/internal/foo.go\n+++ b/internal/foo.go\n@@ -10,6 +10,8 @@\n 上下文行\n-旧行\n+新行\n"
         "只能修改已存在的文件；测试加进已存在的 _test.go。直接写 patch，不要回说明。\n"
         f"写完再写 autobot-pr.md，只含五行：问题 / 改动 / 位置 / 优缺点 / 影响。\n",
-        int(os.environ.get("AGENT_IMPLEMENT_TIMEOUT") or 1800))
+        int(os.environ.get("AGENT_IMPLEMENT_TIMEOUT") or 1800), patch)
     if not os.path.isfile(patch):
         say(lines, f"{src}: 实现未产出（退出码 {code}）｜{out}")
         return False, ""
