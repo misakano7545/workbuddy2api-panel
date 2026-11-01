@@ -594,3 +594,57 @@ func TestAnthropicToolResultImagesMoveToUserMessage(t *testing.T) {
 		t.Fatalf("msgs=%#v", m)
 	}
 }
+
+// TestCountTokensEndpoint 钉住官方计数端点：两个路径都 200、返回 input_tokens、
+// 且 40KB base64 图片不会被按字符计入（否则 Claude Code 会误判上下文爆满）。
+func TestCountTokensEndpoint(t *testing.T) {
+	h := NewHandler(Config{Pool: pool.New(""), Upstream: &upstream.Client{}, APIKey: "k"})
+	body := `{"model":"glm-5.2","system":"你是助手","messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"hello world"},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` +
+		strings.Repeat("A", 40000) + `"}}]}],` +
+		`"tools":[{"name":"Bash","description":"run a command","input_schema":{"type":"object"}}]}`
+	for _, path := range []string{"/v1/messages/count_tokens", "/messages/count_tokens"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", path, strings.NewReader(body))
+		req.Header.Set("x-api-key", "k")
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s code=%d body=%s", path, rec.Code, rec.Body.Bytes())
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &obj); err != nil {
+			t.Fatal(err)
+		}
+		n, _ := obj["input_tokens"].(float64)
+		if n < 1600 || n > 3000 {
+			t.Fatalf("%s input_tokens=%v（图片应按固定开销、不应按 base64 长度）", path, n)
+		}
+	}
+}
+
+// TestCountTokensAuth 缺 key 时按 Anthropic 错误信封 401，而不是 OpenAI 口径。
+func TestCountTokensAuth(t *testing.T) {
+	h := NewHandler(Config{Pool: pool.New(""), Upstream: &upstream.Client{}, APIKey: "k"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/messages/count_tokens",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code=%d", rec.Code)
+	}
+	var obj map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &obj)
+	if obj["type"] != "error" || asString(obj["error"].(map[string]any)["type"]) != "authentication_error" {
+		t.Fatalf("body=%v", obj)
+	}
+}
+
+// TestEstimateTextTokens 口径单测：CJK 按字、ASCII 按 4 字符向上取整。
+func TestEstimateTextTokens(t *testing.T) {
+	cases := map[string]int{"": 0, "你好": 2, "abcd": 1, "ab": 1, "a你b": 2}
+	for in, want := range cases {
+		if got := estimateTextTokens(in); got != want {
+			t.Errorf("estimateTextTokens(%q)=%d want %d", in, got, want)
+		}
+	}
+}

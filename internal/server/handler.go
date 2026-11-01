@@ -140,12 +140,136 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 // 大小写不敏感）命中映射 → 返回真实模型名（原样，可再带 realm 前缀跨域指向）；
 // 未命中 → ("", false)。查找键与 livecfg.NormalizeModelAliases 的归一化口径配对：
 // realm+":"+小写裸名。
+//
+// 精确键优先；未命中再按通配键（`*` 任意串、`?` 单字节，大小写不敏感）匹配。
+// map 无序，通配命中按「模式字面量更长优先、同长字典序」确定性择一，让
+// `cn:claude-*` 压过 `*`。匹配对象是归一化后的 realm 键，所以裸名模式
+// `claude-*`（被归一化成 cn:/global: 两条）在两域都命中。
 func (h *Handler) modelAlias(realm, bare string) (string, bool) {
 	if bare == "" {
 		return "", false
 	}
-	target, ok := h.loadLive().ModelAliases[strings.ToLower(realm)+":"+strings.ToLower(bare)]
-	return target, ok
+	live := h.loadLive()
+	key := strings.ToLower(realm) + ":" + strings.ToLower(bare)
+	if target, ok := live.ModelAliases[key]; ok {
+		return target, true
+	}
+	bestKey, bestTarget := "", ""
+	for pattern, target := range live.ModelAliases {
+		if target == "" || !strings.ContainsAny(pattern, "*?") {
+			continue
+		}
+		if !wildcardMatch(pattern, key) {
+			continue
+		}
+		if bestKey == "" || len(pattern) > len(bestKey) ||
+			(len(pattern) == len(bestKey) && pattern < bestKey) {
+			bestKey, bestTarget = pattern, target
+		}
+	}
+	if bestKey != "" {
+		return bestTarget, true
+	}
+	return "", false
+}
+
+// wildcardMatch 大小写不敏感的通配匹配：* 匹配任意串（含空）、? 匹配单字节。
+// 双指针 + 单回溯点（经典 glob），对 ASCII 模型名足够且零分配。
+func wildcardMatch(pattern, s string) bool {
+	p := []byte(strings.ToLower(pattern))
+	t := []byte(strings.ToLower(s))
+	pi, ti, star, mark := 0, 0, -1, 0
+	for ti < len(t) {
+		switch {
+		case pi < len(p) && (p[pi] == '?' || p[pi] == t[ti]):
+			pi++
+			ti++
+		case pi < len(p) && p[pi] == '*':
+			star = pi
+			pi++
+			mark = ti
+		case star != -1:
+			pi = star + 1
+			mark++
+			ti = mark
+		default:
+			return false
+		}
+	}
+	for pi < len(p) && p[pi] == '*' {
+		pi++
+	}
+	return pi == len(p)
+}
+
+// inboundFallbackModel 别名、目录、档位表全不命中时的回落模型：取目录里倍率
+// 最低的通用模型，避免未知模型名意外烧额度。
+const inboundFallbackModel = "glm-5.3-flash"
+
+// inboundTierModel 内置档位表：客户端语义 → 上游能力（近似对齐，不追求等价）。
+// 只在 models.aliases / 上游目录未命中时使用，用户配置永远优先。
+// 顺序有意义：haiku/mini 先于 sonnet，避免 "mini-sonnet" 类怪名落到主力档。
+func inboundTierModel(model string) string {
+	m := strings.ToLower(model)
+	switch {
+	case strings.Contains(m, "haiku"), strings.Contains(m, "mini"):
+		return "glm-5.3-flash"
+	case strings.Contains(m, "codex"):
+		return "kimi-k2.7"
+	case strings.Contains(m, "opus"):
+		return "deepseek-v4-pro"
+	case strings.Contains(m, "sonnet"), strings.HasPrefix(m, "gpt-"):
+		return "glm-5.2"
+	}
+	return ""
+}
+
+// applyInboundFallback 外来协议（/v1/messages、/v1/responses）的模型名兜底：
+// 别名与上游目录都不认识的名字，按内置档位表 → 默认模型重写转换后 chat body 的 model。
+//
+// 分层理由：models.aliases（精确 + 通配）在 chatCompletions 入口统一应用，命中的
+// 请求连响应回显都由既有逻辑处理；本函数只解决「别名和上游目录都不认识这个模型名」
+// 的剩余情况——Claude Code 发 claude-sonnet-4-5、Codex 发 gpt-5-codex 时上游只认
+// 自己的模型名，不兜底就是 400。零配置即可用，用户仍可用 models.aliases 覆盖任意一条。
+// 只挂在 /v1/messages 与 /v1/responses，**不碰 /v1/chat/completions**：OpenAI 直连
+// 用户的未知模型名保持原样，不被悄悄换掉。
+//
+// 返回原 slice 表示不改：别名命中（由 chat 入口换名并回显客户端原名）或模型在
+// 上游目录缓存里（用户直呼真实上游名）都保持原样。
+func (h *Handler) applyInboundFallback(chat []byte) []byte {
+	var obj map[string]any
+	if json.Unmarshal(chat, &obj) != nil {
+		return chat
+	}
+	model, _ := obj["model"].(string)
+	model = strings.TrimSpace(model)
+	realm, bare := resolveModel(model)
+	if bare == "" {
+		return chat
+	}
+	if _, ok := h.modelAlias(realm, bare); ok {
+		return chat
+	}
+	for _, mi := range cachedModelsSnapshot() {
+		if strings.EqualFold(mi.ID, bare) {
+			return chat
+		}
+	}
+	target := inboundTierModel(bare)
+	if target == "" {
+		target = inboundFallbackModel
+	}
+	// 客户端显式带域前缀 → 保持域不变（global 客户端不该被悄悄路由到 CN）。
+	if strings.HasPrefix(model, "cn:") || strings.HasPrefix(model, "global:") {
+		target = realm + ":" + target
+	}
+	obj["model"] = target
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return chat
+	}
+	log.Printf("INFO: [server] inbound model fallback: %s -> %s", model, target)
+	return out
 }
 
 // softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认）。
@@ -220,6 +344,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/embeddings", h.withAuth(h.embeddings))
 	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))
 	h.mux.HandleFunc("POST /messages", h.withAnthropicAuth(h.messages))
+	// Claude Code 的上下文预警会调官方计数端点；上游没有对应接口，本地按字符估算
+	// （见 messages.go:countTokens）。两条路径与 /v1/messages 的别名关系保持一致。
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAnthropicAuth(h.countTokens))
+	h.mux.HandleFunc("POST /messages/count_tokens", h.withAnthropicAuth(h.countTokens))
 	// 官方 agenttool 联网检索/抓页的网关透传（非对话端点，与 images 同套取号/失败处置）。
 	h.mux.HandleFunc("POST /v1/search", h.withAuth(h.search))
 	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。

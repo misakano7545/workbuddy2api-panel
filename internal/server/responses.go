@@ -41,6 +41,9 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 			chat = augmented
 		}
 	}
+	// 外来模型名兜底（见 handler.go:applyInboundFallback）：Codex 发 gpt-5-codex 这类
+	// 上游不认的名字时按档位表换名，别名/目录命中的请求保持原样。
+	chat = h.applyInboundFallback(chat)
 	var peek struct {
 		Stream bool `json:"stream"`
 	}

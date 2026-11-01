@@ -1,7 +1,8 @@
 // messages.go Anthropic Messages 入站：POST /v1/messages 与 /messages ↔ 现有 chatCompletions。
 // ponytail: 不存会话；客户端每轮带全量 messages。上游 reasoning_content 无 signature，
 // 作为 thinking 块下发展示；客户端回传的 thinking 块丢弃（不触发签名校验）。
-// top_k / cache_control / context_management / betas / count_tokens 上游 chat 没有对应物，丢掉。
+// top_k / cache_control / context_management / betas / count_tokens 请求体字段上游 chat 没有对应物，
+// 丢掉（count_tokens 端点本身由本地估算提供，见 messages.go:countTokens）。
 // 服务端工具：web_search 有网关侧执行器（见 searchtool.go，探测→检索→结果注入）；
 // 其余（code_execution / bash_* …）没有执行器，丢掉并在 system 里写明。
 // usage 语义对齐 relaykit：input_tokens 不含缓存读/写（Claude 口径），截断映射 refusal。
@@ -82,6 +83,9 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 			chat, prelude = augmented, blocks
 		}
 	}
+	// 外来模型名兜底（inboundmodel 语义见 handler.go:applyInboundFallback）：
+	// 别名与上游目录都不认识的 Claude 模型名按档位表换成上游真实名，否则上游 400。
+	chat = h.applyInboundFallback(chat)
 	var peek struct {
 		Stream bool `json:"stream"`
 	}
@@ -92,6 +96,115 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	rw := &messagesWriter{ResponseWriter: w, stream: peek.Stream, prelude: prelude}
 	defer rw.finish()
 	h.chatCompletions(rw, r2)
+}
+
+// countTokens POST /v1/messages/count_tokens：Anthropic 官方的 token 计数端点。
+//
+// Claude Code 在上下文将满时先调它决定是否压缩；上游没有计数接口，这里按字符
+// 粗估（CJK 1 字≈1 token、其余 4 字符≈1 token，另加消息/工具固定开销）。估算值
+// 只影响客户端提示，不影响真实请求，偏差不致命；缺这个端点客户端会直接报错。
+func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "read body: "+err.Error())
+		return
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": estimateMessagesTokens(obj)})
+}
+
+// estimateMessagesTokens 粗估一次 Anthropic Messages 请求的 input token 数。
+// 口径与 messagesToChat 一致：system 走 systemText，消息内容按块类型分别估，
+// 工具按「名字+描述+input_schema 序列化长度」估。
+func estimateMessagesTokens(obj map[string]any) int {
+	total := estimateTextTokens(systemText(obj["system"]))
+	if msgs, ok := obj["messages"].([]any); ok {
+		for _, it := range msgs {
+			m, ok := it.(map[string]any)
+			if !ok {
+				continue
+			}
+			total += 3 // 每条消息的角色/边界开销
+			total += estimateContentTokens(m["content"])
+		}
+	}
+	if tools, ok := obj["tools"].([]any); ok {
+		for _, it := range tools {
+			m, ok := it.(map[string]any)
+			if !ok {
+				continue
+			}
+			total += estimateTextTokens(asString(m["name"]) + " " + asString(m["description"]))
+			if raw, err := json.Marshal(m["input_schema"]); err == nil {
+				total += len(raw) / 4
+			}
+			total += 8 // 每个工具的声明开销
+		}
+	}
+	return total
+}
+
+// estimateContentTokens 估算 string 或 content block 数组的 token 数。
+// 图片按固定开销估，**绝不按 base64 字符数**——否则一张截图就能把估算顶到几十万，
+// Claude Code 会立刻误判上下文爆满。
+func estimateContentTokens(v any) int {
+	switch c := v.(type) {
+	case string:
+		return estimateTextTokens(c)
+	case []any:
+		total := 0
+		for _, it := range c {
+			m, ok := it.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch asString(m["type"]) {
+			case "text":
+				total += estimateTextTokens(asString(m["text"]))
+			case "thinking", "redacted_thinking":
+				total += estimateTextTokens(asString(m["thinking"]))
+			case "tool_use", "server_tool_use":
+				total += estimateTextTokens(asString(m["name"]))
+				if raw, err := json.Marshal(m["input"]); err == nil {
+					total += estimateTextTokens(string(raw))
+				}
+			case "tool_result":
+				txt, imgs := splitToolResultImages(m["content"])
+				total += estimateTextTokens(txt)
+				total += len(imgs) * 1600
+			case "image":
+				total += 1600 // 单图固定估算（约 1.6k），不解 base64
+			case "document":
+				total += estimateTextTokens(documentText(m))
+			default:
+				total += estimateTextTokens(blockText(m))
+			}
+		}
+		return total
+	}
+	return 0
+}
+
+// estimateTextTokens 混合中英文本的 token 估算：CJK 字符 1 个 ≈ 1 token，
+// 其余每 4 字符 ≈ 1 token（向上取整）。
+func estimateTextTokens(s string) int {
+	if s == "" {
+		return 0
+	}
+	cjk, other := 0, 0
+	for _, r := range s {
+		if r >= 0x2E80 && r <= 0x9FFF || r >= 0xF900 && r <= 0xFAFF ||
+			r >= 0xFF00 && r <= 0xFF6F || r >= 0x3000 && r <= 0x303F {
+			cjk++
+		} else {
+			other++
+		}
+	}
+	return cjk + (other+3)/4
 }
 
 func writeAnthropicError(w http.ResponseWriter, status int, typ, msg string) {
