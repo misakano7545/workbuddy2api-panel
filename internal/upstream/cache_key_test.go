@@ -152,7 +152,8 @@ func TestChatMetaCacheKeySource(t *testing.T) {
 			var gotConv string
 			c := testClient(func(r *http.Request) (*http.Response, error) {
 				gotBody, _ = io.ReadAll(r.Body)
-				gotConv = r.Header.Get("X-Conversation-ID")
+				// headerFold 而非 Get：出站 key 已是官方拼写 X-Conversation-ID
+				gotConv = headerFold(r.Header, "X-Conversation-ID")
 				return &http.Response{StatusCode: 200,
 					Header: http.Header{"Content-Type": []string{"text/event-stream"}},
 					Body:   io.NopCloser(strings.NewReader("data: [DONE]\n\n"))}, nil

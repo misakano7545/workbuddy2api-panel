@@ -4,6 +4,10 @@
 //
 // 作用：把各出站路径**真实写出的字节**抓下来（裸 TCP 抓明文请求头 + 抓 TLS
 // ClientHello），用于对照官方客户端抓包做「头顺序 / 自动补头 / JA3 输入」审计。
+//
+// 必须经 c.do() 发请求：它是唯一出站口，头名拼写纠正（normalizeHeaderSpelling）
+// 就在里面。直接用 c.HTTP.Do() 会绕过生产逻辑，看到的不是线上真实字节。
+//
 // 常规 `go test ./...` 会跳过——它会 bind 本地端口并往 stdout 打印大段报文。
 package upstream
 
@@ -131,7 +135,7 @@ func TestProbeOutboundRequestBytes(t *testing.T) {
 	raw := rawCaptured(t, false, func(base string) {
 		req, _ := http.NewRequest(http.MethodPost, base+"/v2/chat/completions", bytes.NewReader([]byte(`{"model":"x","messages":[]}`)))
 		c.ChatHeaders(req, cn, "", meta)
-		resp, err := c.HTTP.Do(req)
+		resp, err := c.do(req, cn, true)
 		if err != nil {
 			fmt.Println("chat CN err:", err)
 			return
@@ -143,7 +147,7 @@ func TestProbeOutboundRequestBytes(t *testing.T) {
 	raw = rawCaptured(t, false, func(base string) {
 		req, _ := http.NewRequest(http.MethodPost, base+"/v2/chat/completions", bytes.NewReader([]byte(`{"model":"x","messages":[]}`)))
 		c.ChatHeaders(req, gl, "", meta)
-		resp, err := c.HTTP.Do(req)
+		resp, err := c.do(req, gl, true)
 		if err != nil {
 			fmt.Println("chat GL err:", err)
 			return
@@ -156,7 +160,7 @@ func TestProbeOutboundRequestBytes(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost, base+"/v2/report", bytes.NewReader([]byte(`[]`)))
 		c.CommonHeaders(req, cn)
 		req.Header.Set("Authorization", "Bearer AT-CN")
-		resp, err := c.HTTP.Do(req)
+		resp, err := c.do(req, cn, false)
 		if err != nil {
 			fmt.Println("rpc err:", err)
 			return
@@ -168,7 +172,7 @@ func TestProbeOutboundRequestBytes(t *testing.T) {
 	raw = rawCaptured(t, false, func(base string) {
 		req, _ := http.NewRequest(http.MethodPost, base+"/v2/plugin/auth/token/refresh", strings.NewReader("{}"))
 		c.RefreshHeaders(req, cn)
-		resp, err := c.HTTP.Do(req)
+		resp, err := c.do(req, cn, false)
 		if err != nil {
 			fmt.Println("refresh err:", err)
 			return
@@ -180,7 +184,7 @@ func TestProbeOutboundRequestBytes(t *testing.T) {
 	raw = rawCaptured(t, false, func(base string) {
 		req, _ := http.NewRequest(http.MethodPost, base+"/v2/billing/meter/get-user-resource", strings.NewReader("{}"))
 		c.BillingHeaders(req, cn)
-		resp, err := c.HTTP.Do(req)
+		resp, err := c.do(req, cn, false)
 		if err != nil {
 			fmt.Println("billing err:", err)
 			return

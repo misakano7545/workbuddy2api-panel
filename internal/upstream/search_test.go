@@ -60,8 +60,10 @@ func TestAgentToolSearchShape(t *testing.T) {
 		t.Fatalf("落点 %s%s want /agenttool/v1/search @ cn.example", s.host, s.path)
 	}
 	// 渠道校验三件套恒发（与 chat 同源头族）：缺任一个上游按 11-128 拒。
+	// 用 headerFold 而不是 Get：出站头 key 已被 normalizeHeaderSpelling 改成
+	// 官方拼写（X-Conversation-ID），Get 会 canonicalize 成 X-Conversation-Id 查不到。
 	for _, k := range []string{"X-Conversation-ID", "X-Conversation-Request-ID", "X-Conversation-Message-ID"} {
-		if s.header.Get(k) == "" {
+		if headerFold(s.header, k) == "" {
 			t.Fatalf("缺会话头 %s（零值 ChatMeta 必须自造，不得留空）", k)
 		}
 	}

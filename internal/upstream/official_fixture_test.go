@@ -29,6 +29,7 @@ import (
 type officialCase struct {
 	fixture string // testdata/official_xxx_head.txt
 	path    string // 对照的请求路径（夹具第一行里的）
+	chat    bool   // 走 chatHTTP（SSE 那条）而不是 HTTP
 	build   func(c *Client, a *auth.Auth, base string) *http.Request
 }
 
@@ -128,7 +129,7 @@ func TestOfficialParity(t *testing.T) {
 
 	cases := []officialCase{
 		{
-			fixture: "official_chat_head.txt", path: "/v2/chat/completions",
+			fixture: "official_chat_head.txt", path: "/v2/chat/completions", chat: true,
 			build: func(c *Client, a *auth.Auth, base string) *http.Request {
 				req, _ := http.NewRequest(http.MethodPost, base+"/v2/chat/completions",
 					strings.NewReader(`{"model":"x","messages":[]}`))
@@ -171,7 +172,12 @@ func TestOfficialParity(t *testing.T) {
 				if req == nil {
 					return // build 自己发了请求（如 ModelBusy）
 				}
-				resp, err := c.HTTP.Do(req)
+				// 必须经 do()：它是唯一出站口，头名拼写纠正（normalizeHeaderSpelling）
+				// 就在里面。直接 c.HTTP.Do() 会绕过它，看到的不是生产真实字节。
+				if tc.chat {
+					c.ChatBaseCN = base
+				}
+				resp, err := c.do(req, cn, tc.chat)
 				if err != nil {
 					return
 				}
