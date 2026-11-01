@@ -1514,6 +1514,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
 				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
+				// 6020 带 data.retry_after（实测 40s、position 2502）时不再换号：上游已给出
+				// 「N 秒后重试」的通道级口径，在这几毫秒内换号必然撞同一堵墙，只是把同一份
+				// 排队请求多发几次（issue #125；embeddings 链路早已同口径 fail-fast）。
+				// 6021（队列满、无 retry_after）保留轮转：那是间歇空窗，换号有机会碰上。
+				if uerr.RetryAfter > 0 {
+					break
+				}
 				if !rotateBackoff(i, r.Context()) {
 					break // ctx 取消：终止轮转（排队满载换号退避）
 				}
