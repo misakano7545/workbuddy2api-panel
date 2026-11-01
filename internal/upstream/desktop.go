@@ -198,6 +198,10 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	// 旧实现在 UA 取「RPC 族」的同时又补了 X-Requested-With，等于把两族的头各取一半
 	// 拼成第三族——两族都不像，比少一个头更显眼。
 	req.Header.Set("User-Agent", desktopUAFor(a))
+	// Accept-Encoding：真机 /v2/report 与 chat / billing 同族，四段全声明
+	// （夹具 official_report_cn_head.txt，cn 抓包 report 族 1/1 命中该值）。
+	// 显式声明会关闭 net/http 透明解压，响应由 doJSON→decodeResponseBody 解。
+	req.Header.Set("Accept-Encoding", "gzip, compress, deflate, br")
 	// X-Domain 是**主机名**不是 URL：真机实测 `X-Domain: www.workbuddy.ai`，
 	// 而 desktopBase 返回的是带 scheme 的 base，直接塞进去会发成
 	// `https://www.workbuddy.ai`——与本仓其它头（chat/billing 用 DomainValue 的裸域）
@@ -346,11 +350,27 @@ func DesktopAutomationCreateEvent(name string) DesktopEvent {
 	}
 }
 
-// ReportWebEvent 以 Web 端指纹向 www.workbuddy.cn/v2/report 上报单事件。
-// 与桌面指纹（copilot 域）不同：web 域事件是浏览器形状（os/machineId/userAgent），
-// 用于 Library_read 等页面行为类任务（实测 library_doc_intro_click 4 秒点亮）。
+// ReportWebEvent 以 **官方桌面端等价形态** 向 /v2/report 上报单事件。
+//
+// 2026-11-01 真机抓包修正（夹具 testdata/official_report_cn_head.txt）：
+// 官方 /v2/report 在 CN 侧 **只有一种形态**——Node/SDK 发的，11 个头：
+//
+//	Accept: application/json, text/plain, */*
+//	Content-Type: application/json;charset=UTF-8
+//	X-Request-ID / X-Product: SaaS
+//	User-Agent: WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+//	Authorization / X-User-Id / X-Domain: www.workbuddy.cn
+//
+// **没有** sec-ch-ua / Sec-Fetch-* / Origin / Referer / x-client-platform。
+// 旧实现造的是一条「浏览器 UA + Origin + Referer」的第三族请求，官方客户端
+// 从不发这种包——而且 UA 里的 `Chrome/152.0.0.0` 是不可能的值（Electron 37
+// 内置 Chromium 138，真机实测 `WorkBuddy/5.9.3 Chrome/138.0.7204.251
+// Electron/37.10.3`）。头与体各自自洽、彼此矛盾，是最容易被单条规则命中的形态。
+//
+// body 仍保留 web 事件形状（os/machineId/userAgent 等）：那条路径的业务载荷
+// 没有真机样本可比对，改头不动体是本轮能拿证据支撑的最小改动。
 func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, elementName string) error {
-	ua := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+	ua := c.userAgent(a)
 	ev := map[string]any{
 		"eventCode": eventCode, "timestamp": time.Now().UnixMilli(), "reportDelay": 0,
 		"pageURL": pageURL, "elementId": elementID, "elementName": elementName,
@@ -362,20 +382,32 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.webBase(a)+"/v2/report", bytes.NewReader(raw))
+	base := c.webBase(a)
+	req, err := http.NewRequest(http.MethodPost, base+"/v2/report", bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-client-platform", "web")
-	req.Header.Set("Origin", c.webBase(a))
-	req.Header.Set("Referer", pageURL)
+	// 以下逐项照抄真机夹具，顺序与取值都不自己发挥。
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("User-Agent", ua)
+	// X-Request-ID 用**纯随机 32 hex**（NewTraceID），不是 UUIDv7：
+	// 真机 report 样本 `4891f0b179cc4959be94b2c867c16e3c` 解不出时间位，
+	// 而同一客户端的 chat 请求才带毫秒前缀。两条链的 ID 规则不同。
+	req.Header.Set("X-Request-ID", session.NewTraceID())
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
+	// Accept-Encoding：同 /v2/report 真机族（四段全声明）。
+	req.Header.Set("Accept-Encoding", "gzip, compress, deflate, br")
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
+	// X-Domain 是**裸主机名**（真机 `X-Domain: www.workbuddy.cn`），不是 URL。
+	host := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"), "/")
+	if u, perr := url.Parse(base); perr == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
+	req.Header.Set("X-Domain", host)
 	_, err = c.doJSON(req, a)
 	return err
 }

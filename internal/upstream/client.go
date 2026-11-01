@@ -4,7 +4,9 @@ package upstream
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +22,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/andybalholm/brotli"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/cst"
@@ -1193,6 +1197,72 @@ func (c *Client) webBase(a *auth.Auth) string {
 	return "https://www.workbuddy.cn"
 }
 
+// decodeResponseBody 按 Content-Encoding 解压响应体。
+//
+// 为什么必须自己解：一旦请求显式声明 Accept-Encoding，net/http 就**关闭透明
+// 解压**（Transport 只在「自己加的 gzip」时才解）。不解这一层，doJSON 拿到
+// brotli/gzip 字节直接 json.Unmarshal → 所有 RPC 链路全废，而且 400 分支的
+// Classify 会把压缩体当文本分类，罚号逻辑跟着错。
+//
+// 支持 gzip / deflate / br —— 与真机 Accept-Encoding 声明的前三项对齐。
+// `compress`(LZW) 官方虽声明但服务端从不回，这里明确报错而不是返回乱码。
+func decodeResponseBody(resp *http.Response, raw []byte) ([]byte, error) {
+	enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if enc == "" || enc == "identity" || len(raw) == 0 {
+		return raw, nil
+	}
+	// 多段编码（如 "gzip, br"）按逆序解：最后声明的先解。
+	parts := strings.Split(enc, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		e := strings.TrimSpace(parts[i])
+		var err error
+		switch e {
+		case "", "identity":
+			continue
+		case "gzip", "x-gzip":
+			raw, err = io.ReadAll(gzipReader(bytes.NewReader(raw)))
+		case "deflate":
+			// RFC 7230 的 deflate 实际可能是 zlib 包装或裸 deflate，两种都试。
+			raw, err = inflate(raw)
+		case "br":
+			raw, err = io.ReadAll(brotli.NewReader(bytes.NewReader(raw)))
+		default:
+			return nil, fmt.Errorf("不支持的内容编码 %q（响应头 Content-Encoding）", e)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("解压 %s 失败: %w", e, err)
+		}
+	}
+	return raw, nil
+}
+
+// gzipReader 用标准库建 gzip 读取器（封一层便于统一错误处理）。
+func gzipReader(r io.Reader) io.Reader {
+	zr, err := gzip.NewReader(r)
+	if err != nil {
+		return errReader{err}
+	}
+	return zr
+}
+
+// inflate 解 deflate：先按 zlib 试，失败再按裸 deflate 试。
+func inflate(raw []byte) ([]byte, error) {
+	if zr, err := zlib.NewReader(bytes.NewReader(raw)); err == nil {
+		defer zr.Close()
+		if out, err := io.ReadAll(zr); err == nil {
+			return out, nil
+		}
+	}
+	fr := flate.NewReader(bytes.NewReader(raw))
+	defer fr.Close()
+	return io.ReadAll(fr)
+}
+
+// errReader 把构造期的错误推迟到 Read 时返回。
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
@@ -1205,6 +1275,10 @@ func (c *Client) doJSON(req *http.Request, a *auth.Auth) (json.RawMessage, error
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
+	}
+	// 必须在 Classify / Unmarshal 之前解压：这两步都按文本处理 raw。
+	if raw, err = decodeResponseBody(resp, raw); err != nil {
+		return nil, err
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))

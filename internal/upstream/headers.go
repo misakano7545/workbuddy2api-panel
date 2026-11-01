@@ -280,6 +280,17 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	// RPC 层（refresh / report / busy / console-as / user-asset / portal），
 	// 恒不带。chat 那条（SDK 链）**带**，由 ChatHeaders 自己补。
 	req.Header.Set("X-Product", "SaaS")
+	// Accept-Encoding：**与真机完全一致的四段声明**（夹具
+	// testdata/official_chat_head.txt / official_report_cn_head.txt 逐字节确认，
+	// chat / report / busy / refresh 全链路同值 `gzip, compress, deflate, br`）。
+	//
+	// 代价：显式声明会关闭 net/http 的透明解压，所以 RPC 链路的响应体必须由
+	// doJSON → decodeResponseBody 自己解 gzip/deflate/br。漏了那一步所有
+	// JSON 接口都会解析失败——这两处是一个整体，不能只改一头。
+	//
+	// chat 链路例外：ChatHeaders 会把这个头 Del 掉，交回 net/http 自动 gzip
+	// （SSE 长流的解压改造风险太大，见那边的注释）。
+	req.Header.Set("Accept-Encoding", "gzip, compress, deflate, br")
 	// Origin / Referer：**不发**。桌面端 RPC 层（refresh / v3-config / chat / busy /
 	// report）是 node fetch 调用，没有浏览器同源语义，5.9.3 真机这些路径一律不带这两个头
 	// （refresh idx 556、/v3/config idx 558 逐头确认）。旧实现在 CommonHeaders 里塞
@@ -438,10 +449,20 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	req.Header.Del("Accept-Language")
 	req.Header.Del("X-Machine-ID")
 	req.Header.Del("X-Session-ID")
+	// Accept-Encoding：**必须删掉交给 net/http 自己写 gzip**。
+	//
+	// CommonHeaders 已按真机声明 `gzip, compress, deflate, br`（RPC 链路由
+	// doJSON 的 decodeResponseBody 自己解压）。但 chat 是 **SSE 长流**：一旦显式
+	// 声明就关闭 net/http 的透明解压，resp.Body 变成压缩流，ChatStreamContext
+	// 原样透传给下游 → 客户端收到乱码。这条链路的解压改造要动 monitorBody /
+	// idle 监控 / 首包计时三处，风险远大于一个头带来的收益，故保持 Go 自动 gzip。
+	//
+	// 已知残留差异（写死在这里，别再当"忘了"）：真机 chat 是
+	// `Accept-Encoding: gzip, compress, deflate, br`，我们是 `gzip`。
+	req.Header.Del("Accept-Encoding")
 	// Accept 与官方 chat 完全一致：客户端只发 application/json，照样收 SSE 流
 	// （两版实测；旧值多带 ", text/event-stream" 属自造）。
-	// Accept-Encoding 刻意不设：官方发 br/gzip 全集，但显式设置会关闭 net/http 的
-	// 透明解压，收到 br 时网关没有 brotli 解码器 —— 收益（一个头）远小于风险。
+	// Accept-Encoding 的处理见上方 Del —— chat 保持 Go 自动 gzip。
 	req.Header.Set("Accept", "application/json")
 	// X-Requested-With：**chat 必带**（CommonHeaders 已不再设它，见那边的注释）。
 	// 2026-10-30 抓包：/v2/chat/completions 5/5 条全带 `x-requested-with: XMLHttpRequest`，
@@ -870,6 +891,9 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
+	// Accept-Encoding：真机 billing 族 21/21 条全是四段声明（抓包统计，
+	// 与 chat / report 同值）。显式声明关闭透明解压，响应由 doJSON 解。
+	req.Header.Set("Accept-Encoding", "gzip, compress, deflate, br")
 	// X-Request-ID：5.9.3 真机 billing 族必带（checkin 23 条、resource-summary 等全部有）。
 	// 值为纯随机 32 hex（无时间前缀）。
 	req.Header.Set("X-Request-ID", session.NewTraceID())
