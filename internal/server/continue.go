@@ -420,12 +420,49 @@ func (r *continueReader) continuationBody() ([]byte, error) {
 	return json.Marshal(obj)
 }
 
-// mergeUsage 跨段累计 usage：数字叶子求和（token 计费口径），结构取并集。
+// mergeUsage 跨段合并 usage。输出/计费侧数字叶子求和（completion、credit 等
+// 跨段真实累加）；prompt 侧取末段值——续写段的 prompt 天然包含整个上下文，
+// 求和会把上下文重复计入 N 段倍，客户端按 usage 判断上下文占用时会被虚高
+// 值误触发压缩（与真实上下文长度无关地提前全量压缩）。total_tokens 按
+// 「末段 prompt + 累计 completion」重算，保持口径自洽。
 func (r *continueReader) mergeUsage(u map[string]any) {
 	if r.usage == nil {
 		r.usage = map[string]any{}
 	}
-	sumInto(r.usage, u)
+	for k, v := range u {
+		switch k {
+		case "prompt_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "prompt_tokens_details":
+			r.usage[k] = v // 末段值
+		case "total_tokens":
+			// 先按末段留作兜底（段里没有 prompt_tokens 时不会重算），末尾统一
+			// 按 prompt(末段)+completion(累计) 覆盖。
+			r.usage[k] = v
+		default:
+			if f, ok := v.(float64); ok {
+				if d, ok2 := r.usage[k].(float64); ok2 {
+					r.usage[k] = d + f
+					continue
+				}
+				r.usage[k] = f
+				continue
+			}
+			if m, ok := v.(map[string]any); ok {
+				if dm, ok2 := r.usage[k].(map[string]any); ok2 {
+					sumInto(dm, m)
+				} else {
+					nm := map[string]any{}
+					sumInto(nm, m)
+					r.usage[k] = nm
+				}
+				continue
+			}
+			r.usage[k] = v
+		}
+	}
+	if p, ok := r.usage["prompt_tokens"].(float64); ok {
+		c, _ := r.usage["completion_tokens"].(float64)
+		r.usage["total_tokens"] = p + c
+	}
 }
 
 func sumInto(dst, src map[string]any) {
