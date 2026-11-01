@@ -337,10 +337,44 @@ def finish(src):
     return True, ""
 
 
+def branch_for(src, idea, pol):
+    """报告内容相同 → 分支名相同 → 同一件事只推一次（land_max 才能落到新工作上）。
+
+    shortcut: 去重靠内容 sha1，不比对语义；报告改一个字就是新分支，重复提案只能靠
+    人关 PR 兜住，升级点是给报告加稳定的 feature key。
+    """
+    slug = re.sub(r"[^a-z0-9-]+", "-", src.lower().replace("/", "-")).strip("-")
+    return f"{pol['branch_prefix']}{slug}-{hashlib.sha1(idea.encode()).hexdigest()[:7]}"
+
+
+def pick_candidates(reports, land_max, pol, exists):
+    """按值得度降序取前 land_max 条还没落地过的报告，返回 (picked, dups)。
+
+    分支名是报告内容的 sha1：同名分支已存在 = 这份报告上一轮已经推过，必须剔掉再数
+    名额，否则重复报告白占名额且 push 会因远端已存在而失败（实测连跑两次同一批报告，
+    第一条就 RuntimeError 退出、后两条根本没跑）。
+    """
+    fresh, dups = [], set()
+    for score, path in reports:
+        if score < 2:
+            continue
+        src = os.path.basename(path)[:-3].replace("__", "/")
+        idea = open(path, encoding="utf-8").read()
+        if exists(branch_for(src, idea, pol)):
+            dups.add(path)
+        else:
+            fresh.append((score, path))
+    return fresh[:land_max], dups
+
+
+def branch_exists(branch):
+    return run("git", "ls-remote", "--exit-code", "--heads", "origin", branch,
+               check=False)[0] == 0
+
+
 def land(src, rp, pol, args, lines):
     idea = open(rp, encoding="utf-8").read()
-    slug = re.sub(r"[^a-z0-9-]+", "-", src.lower().replace("/", "-")).strip("-")
-    branch = f"{pol['branch_prefix']}{slug}-{hashlib.sha1(idea.encode()).hexdigest()[:7]}"
+    branch = branch_for(src, idea, pol)
     # 上一条失败可能留下冲突 index，checkout -B 会报「resolve your index first」
     run("git", "reset", "-q", "--hard", "HEAD", check=False)
     run("git", "clean", "-qfd", check=False)
@@ -419,7 +453,7 @@ def main():
                 reports.append((report_score(open(p, encoding="utf-8").read()), p))
         reports.sort(reverse=True)
         land_max = int(up.get("land_max") or 2)
-        picked = [(s, p) for s, p in reports if s >= 2][:land_max]
+        picked, dups = pick_candidates(reports, land_max, pol, branch_exists)
         # 总决策表：每份报告的去向都留痕，人审时不用回头翻 68 个 job
         say(lines, f"## 决策表（{len(reports)} 份报告，land_max={land_max}）")
         say(lines, "| 仓库 | 值得度 | 摘要 | 决定 |")
@@ -431,6 +465,8 @@ def main():
                 why = "落地"
             elif sc < 2:
                 why = "值得度<2"
+            elif rp in dups:
+                why = "同报告已落地（分支已存在）"
             else:
                 why = "超出 land_max"
             say(lines, f"| {name} | {sc} | {report_head(open(rp, encoding='utf-8').read())} | {why} |")
