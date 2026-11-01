@@ -68,21 +68,43 @@ func TestAppJSLogIncrementalWiring(t *testing.T) {
 	}
 	s := string(raw)
 	// 增量请求：真正拼进 URL 的那行（不能只匹配注释里的字样——注释里也写了
-	// "?since="，删掉代码它照样能匹配上，这条断言就废了）。
-	if !strings.Contains(s, "const lq = logSince ? '?since='") {
-		t.Error("运行日志未使用 ?since= 增量参数（每轮会重拉全量 500 行）")
+	// "since_seq="，删掉代码它照样能匹配上，这条断言就废了）。
+	if !strings.Contains(s, "const lq = logSeq ? '?since_seq='") {
+		t.Error("运行日志未使用 ?since_seq= 增量参数（每轮会重拉全量 500 行）")
 	}
 	// 增量合并：把新行追加到本地窗口
 	if !strings.Contains(s, "logRows = logRows.concat(incoming)") {
 		t.Error("运行日志增量行未并入本地窗口（logRows.concat）")
 	}
 	// 游标推进
-	if !strings.Contains(s, "logSinceTs") {
-		t.Error("运行日志缺增量游标（logSinceTs）")
+	if !strings.Contains(s, "logSeq") {
+		t.Error("运行日志缺增量游标（logSeq）")
 	}
 	// 游标过期回落全量：长时间切走后服务端环形缓冲会淘汰中间行
 	if !strings.Contains(s, "LOG_CURSOR_MAX_AGE_MS") {
 		t.Error("运行日志缺游标过期回落（LOG_CURSOR_MAX_AGE_MS）")
+	}
+}
+
+// TestAppJSLogCursorUsesSeq 钉住「游标是服务端单调序号 seq，不是时间戳」。
+//
+// 回归位（用户实测）：游标曾按 ts 推进。入环 TS 来自 time.Now()，同一时钟刻度
+// 内的多次写入**完全相同**（Windows 实测 ~15.6ms 粒度），于是「最后一条」自己
+// 仍然满足 `TS > since`，每轮轮询都被重发、游标再也不前进——「运行日志」底部
+// 那行反复刷出来。曾经用 Date.toISOString() 取游标，毫秒截断让重复更严重。
+//
+// 断言的是**实际赋值的代码形态**，不是注释里的字样。
+func TestAppJSLogCursorUsesSeq(t *testing.T) {
+	raw, err := os.ReadFile(appJSPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "e.seq > logSeq) logSeq = e.seq") {
+		t.Error("运行日志游标未按服务端 seq 推进（按 ts 推进会在同一时钟刻度内卡死）")
+	}
+	if strings.Contains(s, "logSinceTs") {
+		t.Error("运行日志又退回 ts 游标（logSinceTs）：同一刻度内多条时间戳相同，必然重复或漏行")
 	}
 }
 

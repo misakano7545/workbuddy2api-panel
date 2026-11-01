@@ -410,11 +410,29 @@ func (p *Panel) updateSnapshot() any {
 // ?since=<RFC3339> 时只返回**该时刻之后**的条目（增量拉取）。面板「运行日志」页
 // 每 5 秒拉一次全量（500 行，~90KB），绝大多数轮次这 500 行根本没变。
 //
+// 增量优先认 ?since_seq=<uint64>（只回 Seq 更大的条目）——这是**唯一可靠**的游标：
+// TS 在同一时钟刻度内的多次写入完全相同（Windows 实测 ~15.6ms 粒度，一次 Write
+// 的多行 + 背靠背的多次 Write 都会撞），按 TS 过滤必然要么重复、要么整批漏掉。
+// 连「带纳秒的原始 TS 串」也救不了同一刻度内的多条。
+//
+// ?since 保留兼容（旧前端 / 手工 curl），语义仍是「TS 严格晚于 since」。
+//
 // 语义与全量一致：响应仍是 {entries, archive_error}，前端把新条目追加到已有列表。
 // 游标过期时客户端自己做一次全量拉（环形缓冲淘汰最旧行时，被淘汰的行不会再来）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 	entries := p.logs.Snapshot()
-	if raw := r.URL.Query().Get("since"); raw != "" {
+	q := r.URL.Query()
+	if raw := q.Get("since_seq"); raw != "" {
+		if since, ok := parseSeqParam(raw); ok {
+			filtered := entries[:0:0] // 新切片：不改 Snapshot 返回的底层数组
+			for _, e := range entries {
+				if e.Seq > since {
+					filtered = append(filtered, e)
+				}
+			}
+			entries = filtered
+		}
+	} else if raw := q.Get("since"); raw != "" {
 		if since, ok := parseSinceParam(raw); ok {
 			filtered := entries[:0:0] // 新切片：不改 Snapshot 返回的底层数组
 			for _, e := range entries {
@@ -426,6 +444,19 @@ func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "archive_error": p.logs.ArchiveError()})
+}
+
+// parseSeqParam 解析 ?since_seq=。
+//
+// 非法值回落全量（与 parseSinceParam 同口径：宁可多给不可少给）。
+// seq 初值是启动时刻的毫秒数（见 NewRing），远大于 0，故 since_seq=0 等价于
+// 全量——正是首次加载想要的语义。
+func parseSeqParam(raw string) (uint64, bool) {
+	v, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // parseSinceParam 解析 ?since= 参数。
