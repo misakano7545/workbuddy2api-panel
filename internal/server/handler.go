@@ -144,8 +144,48 @@ func (h *Handler) modelAlias(realm, bare string) (string, bool) {
 	if bare == "" {
 		return "", false
 	}
-	target, ok := h.loadLive().ModelAliases[strings.ToLower(realm)+":"+strings.ToLower(bare)]
-	return target, ok
+	aliases := h.loadLive().ModelAliases
+	key := strings.ToLower(realm) + ":" + strings.ToLower(bare)
+	if target, ok := aliases[key]; ok {
+		return target, true
+	}
+	// 精确键没中再看通配键（`claude-*` 这类）。map 无序，命中多个时按模式更长优先、
+	// 同长取字典序，保证 `cn:claude-*` 稳定压过 `*`。
+	bestKey, bestTarget := "", ""
+	for pattern, target := range aliases {
+		if target == "" || !strings.ContainsAny(pattern, "*?") || !wildcardMatch(pattern, key) {
+			continue
+		}
+		if bestKey == "" || len(pattern) > len(bestKey) ||
+			(len(pattern) == len(bestKey) && pattern < bestKey) {
+			bestKey, bestTarget = pattern, target
+		}
+	}
+	return bestTarget, bestKey != ""
+}
+
+// wildcardMatch 大小写不敏感通配：`*` 任意串（含空）、`?` 单字节。
+// 双指针 + 单回溯点，零分配；模型名是 ASCII，够用。
+func wildcardMatch(pattern, s string) bool {
+	p, t := strings.ToLower(pattern), strings.ToLower(s)
+	pi, ti, star, mark := 0, 0, -1, 0
+	for ti < len(t) {
+		switch {
+		case pi < len(p) && (p[pi] == '?' || p[pi] == t[ti]):
+			pi, ti = pi+1, ti+1
+		case pi < len(p) && p[pi] == '*':
+			star, pi, mark = pi, pi+1, ti
+		case star != -1:
+			pi, mark = star+1, mark+1
+			ti = mark
+		default:
+			return false
+		}
+	}
+	for pi < len(p) && p[pi] == '*' {
+		pi++
+	}
+	return pi == len(p)
 }
 
 // softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认）。
@@ -220,6 +260,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/embeddings", h.withAuth(h.embeddings))
 	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))
 	h.mux.HandleFunc("POST /messages", h.withAnthropicAuth(h.messages))
+	// Claude Code 上下文将满时会调官方计数端点，上游没有对应接口，这里本地估算
+	// （见 messages.go:countTokens）。缺这个端点客户端直接报错。
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAnthropicAuth(h.countTokens))
+	h.mux.HandleFunc("POST /messages/count_tokens", h.withAnthropicAuth(h.countTokens))
 	// 官方 agenttool 联网检索/抓页的网关透传（非对话端点，与 images 同套取号/失败处置）。
 	h.mux.HandleFunc("POST /v1/search", h.withAuth(h.search))
 	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。

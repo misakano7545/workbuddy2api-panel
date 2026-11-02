@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 )
@@ -92,6 +93,66 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	rw := &messagesWriter{ResponseWriter: w, stream: peek.Stream, prelude: prelude}
 	defer rw.finish()
 	h.chatCompletions(rw, r2)
+}
+
+// countTokens POST /v1/messages/count_tokens：Anthropic 官方计数端点。
+// Claude Code 上下文将满时会先调它决定要不要压缩；上游没有计数接口，只能本地估算。
+// 估算值只影响客户端何时压缩，不影响真实请求，偏差不致命；缺了这个端点客户端直接报错。
+func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "read body: "+err.Error())
+		return
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": estimateTokens(obj)})
+}
+
+// estimateTokens 走一遍请求 JSON 数所有字符串叶子：CJK 1 字≈1 token、其余 4 字符≈1 token。
+// 图片（source.data 的 base64）按每张固定 1600 算，绝不按字符数算——否则一张截图就能把
+// 估算顶到几十万，客户端会误判上下文已满。
+//
+// shortcut: 不区分字段语义（连 model 名、工具名一起算），几千 token 量级的误差在压缩阈值
+// 面前可以忽略；要精确得上游提供计数接口。
+func estimateTokens(v any) int {
+	switch x := v.(type) {
+	case string:
+		return textTokens(x)
+	case []any:
+		n := 0
+		for _, it := range x {
+			n += estimateTokens(it)
+		}
+		return n
+	case map[string]any:
+		n := 0
+		for k, it := range x {
+			if k == "data" {
+				n += 1600 // 图片 base64 只可能出现在 source.data
+				continue
+			}
+			n += estimateTokens(it)
+		}
+		return n
+	}
+	return 0
+}
+
+func textTokens(s string) int {
+	cjk, other := 0, 0
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) ||
+			unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r) {
+			cjk++
+		} else {
+			other++
+		}
+	}
+	return cjk + (other+3)/4
 }
 
 func writeAnthropicError(w http.ResponseWriter, status int, typ, msg string) {

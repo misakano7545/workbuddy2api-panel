@@ -145,6 +145,64 @@ func TestModelAliasLookup(t *testing.T) {
 	}
 }
 
+// TestModelAliasWildcard 通配键：`claude-*` 命中未知型号，精确键仍优先。
+func TestModelAliasWildcard(t *testing.T) {
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
+		Upstream: newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true }),
+		Live: livecfg.New(livecfg.Snapshot{
+			ModelAliases: livecfg.NormalizeModelAliases([]string{
+				"claude-*=glm-5.2", "cn:claude-sonnet-4-5=global:kimi-k2.7", "gpt-?=glm-5.3-flash",
+			}),
+		}),
+	})
+	// 通配命中：Claude Code 发什么都不用一条条配
+	if got, ok := h.modelAlias("cn", "claude-sonnet-4-6"); !ok || got != "glm-5.2" {
+		t.Errorf("通配未命中: %q ok=%v", got, ok)
+	}
+	// 精确键优先于通配
+	if got, ok := h.modelAlias("cn", "claude-sonnet-4-5"); !ok || got != "global:kimi-k2.7" {
+		t.Errorf("精确键应压过通配: %q ok=%v", got, ok)
+	}
+	// ? 匹配单字节
+	if got, ok := h.modelAlias("global", "gpt-5"); !ok || got != "glm-5.3-flash" {
+		t.Errorf("? 通配未命中: %q ok=%v", got, ok)
+	}
+	// 不认识的名字仍然不命中（不猜、不悄悄换模型）
+	if _, ok := h.modelAlias("cn", "something-else"); ok {
+		t.Error("未配置的名字不应被兜底")
+	}
+}
+
+// TestCountTokensEndpoint Claude Code 的计数端点：要 200 且给个正数，图片不能被算成
+// base64 长度（一张截图的 base64 有几十万字符，按字符算会直接报上下文爆满）。
+func TestCountTokensEndpoint(t *testing.T) {
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
+		Upstream: newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true }),
+	})
+	big := strings.Repeat("A", 400000) // 约一张 png 的 base64
+	body := `{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"你好，帮我看下这个问题"},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + big + `"}}]}]}`
+	for _, path := range []string{"/v1/messages/count_tokens", "/messages/count_tokens"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, rec.Code, rec.Body)
+		}
+		var out struct {
+			InputTokens int `json:"input_tokens"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("%s 响应解析失败: %v", path, err)
+		}
+		if out.InputTokens < 10 || out.InputTokens > 5000 {
+			t.Errorf("%s input_tokens=%d，超出粗估合理区间（图片按张算应约 1600+）", path, out.InputTokens)
+		}
+	}
+}
+
 // TestModelAliasUnmappedZeroChange 未命中映射的请求：出站 body 与响应都保持原样
 // （别名字段存在也不影响未映射模型）。
 func TestModelAliasUnmappedZeroChange(t *testing.T) {
