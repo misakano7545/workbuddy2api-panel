@@ -241,6 +241,17 @@ def adapt_brief(idea):
     return "\n\n".join(want)[:4000] or idea[:2500]
 
 
+def humanize_hint():
+    """PR 正文的「说人话」技能路径。
+
+    技能本身 36 KB，塞进 prompt 会让 agent 静默超时（实测十几 KB 的 prompt 30 分钟零输出），
+    所以只给路径，让它自己读。CI 由 workflow 把 .github/autobot-skills 拷进 $HERMES_HOME/skills。
+    """
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    return (f"写正文前先读 {os.path.join(home, 'skills', 'humanizer', 'SKILL.md')}"
+            "（怎么把话说成人话、哪些 AI 味要删）；文件不在就忽略这句。\n")
+
+
 def implement(src, idea, lines):
     """两次短调用：先出改动方案，再出 unified diff。
 
@@ -287,7 +298,8 @@ def implement(src, idea, lines):
         "只能修改已存在的文件；测试加进已存在的 _test.go。直接写 patch，不要回说明。\n"
         f"写完再写 autobot-pr.md，第一段用人话，四行，然后空一行，再接五行细节：\n"
         "人话四行——一句话说清这 PR 干了什么 / 合了之后日常用法有什么变化（没变化就直说）/ 会不会弄坏现在能用的东西（会就说是哪一处） / 要不要我拍板（比如映射是猜的就得人定）\n"
-        "细节五行：问题 / 改动 / 位置 / 优缺点 / 影响。\n",
+        "细节五行：问题 / 改动 / 位置 / 优缺点 / 影响。\n"
+        + humanize_hint(),
         int(os.environ.get("AGENT_IMPLEMENT_TIMEOUT") or 1800), patch)
     if not os.path.isfile(patch):
         say(lines, f"{src}: 实现未产出（退出码 {code}）｜{out}")

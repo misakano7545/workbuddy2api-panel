@@ -88,6 +88,8 @@ jobs:
         run: |
           pip install --quiet 'hermes-agent[acp]' pyyaml
           mkdir -p "$HERMES_HOME"
+          # 仓里的技能装进 CI 的 Hermes（humanize 讲怎么写人话，AutoBot 写 PR 正文前会读它）
+          mkdir -p "$HERMES_HOME/skills" && cp -r "$GITHUB_WORKSPACE/.github/autobot-skills/." "$HERMES_HOME/skills/"
           python3 - <<'PY'
           import os
           m = os.environ["LLM_MODEL"]
@@ -200,6 +202,8 @@ jobs:
         run: |
           pip install --quiet 'hermes-agent[acp]'
           mkdir -p "$HERMES_HOME"
+          # 仓里的技能装进 CI 的 Hermes（同上一个 job）
+          mkdir -p "$HERMES_HOME/skills" && cp -r "$GITHUB_WORKSPACE/.github/autobot-skills/." "$HERMES_HOME/skills/"
           python3 - <<'PY'
           import os
           m = os.environ["LLM_MODEL"]
