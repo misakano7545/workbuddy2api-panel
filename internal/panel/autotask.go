@@ -1460,12 +1460,23 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 
 	// have 本账号任务 code 全集（取自 mp 口径，它是默认口径的超集，见 upstream.ListTasksMP）。
 	// nil = 列表没拿到 → 不筛选，全部照旧跑（宁可白跑也不能因为一次读失败把所有任务跳过）。
-	var have map[string]bool
+	// done 同源：阶段 0 已确认「已领奖/已锁定/已完成」的 code，逐项阶段直接跳过，
+	// 不再让 executeAutoTask 每项重新拉一次列表（issue #149：17 个任务 24 次列表查询，
+	// 背靠背打出后撞 429）。只信「明确已完成」的判定，进度未知的照旧逐项回读。
+	var have, done map[string]bool
 
 	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
 	emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受)"})
 	if ctx.Err() == nil {
 		if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil && ctx.Err() == nil {
+			if done == nil {
+				done = make(map[string]bool, len(tasks))
+			}
+			for _, t := range tasks {
+				if t.Claimed || t.Locked {
+					done[t.TaskCode] = true
+				}
+			}
 			codes := acceptPendingCodes(tasks)
 			if len(codes) > 0 && ctx.Err() == nil {
 				emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受)"})
@@ -1498,8 +1509,12 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 		if ctx.Err() == nil {
 			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil && ctx.Err() == nil {
 				have = make(map[string]bool, len(mpTasks))
+				done = make(map[string]bool, len(mpTasks))
 				for _, t := range mpTasks {
 					have[t.TaskCode] = true
+					if t.Claimed || t.Locked {
+						done[t.TaskCode] = true
+					}
 				}
 				mpCodes := acceptPendingCodes(mpTasks)
 				if len(mpCodes) > 0 && ctx.Err() == nil {
@@ -1532,11 +1547,14 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 		if ctx.Err() != nil {
 			break
 		}
-		// 本账号没有这个任务就跳过：不 accept、不跑动作、不 report。上游下架或调走
-		// 某任务后，account 列表里消失、autoActions 还在，此前每轮为它白打一次上游
-		// 调用（26 个号 × 每个下架任务，还会撞软限流）。结果行照旧是 skipped。
-		if have != nil && !have[act.TaskCode] {
-			result := map[string]any{"task_code": act.TaskCode, "status": "skipped", "message": "该账号没有此任务"}
+		// 两个跳过条件共用一处输出：①本账号没有这个任务——上游下架或调走某任务后
+		// account 列表里消失、autoActions 还在，此前每轮为它白打一次上游调用（26 个
+		// 号 × 每个下架任务，还会撞软限流）；②阶段 0 快照已确认「已领奖 / 已锁定」
+		// ——不再每项重拉一次列表（issue #149：17 个任务 24 次列表查询），快照之后
+		// 的进度变化由下一轮补上（任务动作幂等，晚一轮无损失）。
+		// 这两类跳过都不打上游，所以不占 reportGap；节流留给真发请求的项。
+		if msg := autoSkipReason(act.TaskCode, have, done); msg != "" {
+			result := map[string]any{"task_code": act.TaskCode, "status": "skipped", "message": msg}
 			out = append(out, result)
 			emit(autoTaskRunEvent{Kind: "result", TaskCode: act.TaskCode, Result: result, Completed: true})
 			continue
@@ -1549,13 +1567,26 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 		result := outcome.resultMap(&act)
 		out = append(out, result)
 		emit(autoTaskRunEvent{Kind: "result", TaskCode: act.TaskCode, Result: result, Completed: true})
-		if outcome.ActionRun {
-			if !waitForContext(ctx, reportGap) {
-				break
-			}
+		// 每项之间统一留 reportGap：原来只在「真的执行了动作」后等，跳过/查询类
+		// 结果背靠背连发（issue #149）。统一节流后一轮多花十几秒，换来不打 429。
+		if !waitForContext(ctx, reportGap) {
+			break
 		}
 	}
 	return out
+}
+
+// autoSkipReason 逐项执行前的快照判据：账号没有此任务 / 已完成或未解锁 → 跳过
+// 原因；空串 = 照旧执行。have 为 nil（列表没拿到）时不按「没有此任务」筛，一次
+// 读失败不该把所有任务跳过。
+func autoSkipReason(code string, have, done map[string]bool) string {
+	if have != nil && !have[code] {
+		return "该账号没有此任务"
+	}
+	if done[code] {
+		return "任务已完成或尚未解锁（快照）"
+	}
+	return ""
 }
 
 func waitForContext(ctx context.Context, d time.Duration) bool {
