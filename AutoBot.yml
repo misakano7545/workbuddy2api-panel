@@ -9,16 +9,12 @@ upstream:
     # 官方客户端行为的对照实现最全的一个：product.json 取值、每类请求的头/体形状、
     # 备用入口与 HTTPDNS、业务码处置都有抓包依据，docs/official-client.md 是现成清单
     - yreidev/workbuddy2api-panel
-    # 上游停维护后最活跃的 fork：面板资源占用优化、.deb/systemd 打包、企业微信推送都出自这里
-    - LeisureLinux/workbuddy2api-panel
     - ardeyouxipianyi/workbuddy2api-hub
     - yuechuya/WorkBuddy2API-Gateway
     - HUIdada1/AgentHub
     - 3155498108/workbuddy-one
-    - sheng-du0521/workbuddy2api
     - OHCJ099/BuddyHub
     - hj01857655/WorkBuddy2api
-    - syan-anan/wb-syan
     - JackAIStudio/dsh-workbuddy-dual
     - smart-open/TraeWorkAssistant
     - deltrivx/AutoBuddy
@@ -85,7 +81,6 @@ upstream:
     - baiyea/workbuddy2api-ui
     - L0NE-6/WorkBuddy-Daily
     - hawklithm/workbuddy2api
-    - AI-Good-Tool/workbuddy-api
     # —— 多平台合集：Trae / Qoder / MiniMax / 豆包 的 IDE 账号池与签到池，看跨平台账号模型的抽象
     - xu20060420fan-cell/workbuddy2api-panel
     # 三协议 + 反检测头族 + 出站代理 + Prometheus 指标；mobile.css 与 /v1/search/messages 也回移自这里
@@ -104,8 +99,6 @@ upstream:
     - yang9582/workbuddy-connect
     # 三协议本地桥 + 网页控制台（启停 / 诊断 / 体检 / 对话测试），诊断面做得最全
     - Ianzhyh/workbuddy-to-dsh
-    # 按区域分键 + 额度感知故障转移 + 幂等维护窗口（时钟偏移不重复执行）
-    - weixiaokuan123/workbuddy-proxy
     # 少见的 /v2/embeddings 落地（bge-m3 1024 维，11351 未知模型），实验开关默认关
     - EchoPing07/Buddy-2API-Go
     # 九渠道合一：渠道内额度冷却与请求失败冷却分开记账，冷却期得分当 0 且路由硬剔除
