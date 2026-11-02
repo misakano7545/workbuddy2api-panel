@@ -2217,10 +2217,12 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 		t.Errorf("branch fingerprint not rewritten by sanitize in user msg: %s", out)
 	}
 	// 改写后的痕迹应在（证明 sanitize 层生效，不是"全删了"）。
-	if !strings.Contains(out, "official CLI tool for Claude.") {
+	// 具体候选按会话种子轮换（sanitize.go 的多候选表），这里只断言「仍是那句
+	// CLI 身份句、且不是原文」，不锁死某一个候选的措辞。
+	if !strings.Contains(out, "Anthropic's official ") || !strings.Contains(out, "for Claude") {
 		t.Errorf("sanitized identity rewrite missing: %s", out)
 	}
-	if !strings.Contains(out, "Default branch (you will usually use this for PRs)") {
+	if !strings.Contains(out, "branch (you will usually use this for PRs)") {
 		t.Errorf("sanitized branch rewrite missing: %s", out)
 	}
 	// 2) messages 头部恰好一条 system = 自有提示词（Rewrite 已删旧 system）。

@@ -594,3 +594,24 @@ func TestAnthropicToolResultImagesMoveToUserMessage(t *testing.T) {
 		t.Fatalf("msgs=%#v", m)
 	}
 }
+
+// TestMessagesWriterKeepAlive：只在本流真开过流之后发 ping。未开流时一个字节都
+// 不能写，否则 StreamHint 的首帧否决窗口（可无痕换号）就没了。
+func TestMessagesWriterKeepAlive(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := &messagesWriter{ResponseWriter: rec, stream: true}
+	if wrote, err := rw.KeepAlive(); wrote || err != nil {
+		t.Fatalf("未开流就保活: wrote=%v err=%v", wrote, err)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("未开流写出了字节: %q", rec.Body.String())
+	}
+	rw.x.started = true
+	wrote, err := rw.KeepAlive()
+	if !wrote || err != nil {
+		t.Fatalf("开流后保活失败: wrote=%v err=%v", wrote, err)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "event: ping") || !strings.Contains(body, `"type":"ping"`) {
+		t.Fatalf("ping 帧形态不对（Anthropic 官方是 event: ping）: %q", body)
+	}
+}

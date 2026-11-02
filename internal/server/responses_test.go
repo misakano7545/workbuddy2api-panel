@@ -1210,3 +1210,27 @@ func TestResponsesToolOutputImagesMoveToUserMessage(t *testing.T) {
 		t.Fatalf("纯文本=%#v", m)
 	}
 }
+
+// TestResponsesWriterKeepAlive：保活走 SSE 注释行，且不推进 sequence_number
+// （保活不属于事件序列，混进去会让客户端的序号校验错位）。
+func TestResponsesWriterKeepAlive(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := &responsesWriter{ResponseWriter: rec, stream: true}
+	if wrote, err := rw.KeepAlive(); wrote || err != nil {
+		t.Fatalf("未开流就保活: wrote=%v err=%v", wrote, err)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("未开流写出了字节: %q", rec.Body.String())
+	}
+	rw.x.created = true
+	seq := rw.x.seq
+	if wrote, err := rw.KeepAlive(); !wrote || err != nil {
+		t.Fatalf("开流后保活失败: wrote=%v err=%v", wrote, err)
+	}
+	if body := rec.Body.String(); body != ": keep-alive\n\n" {
+		t.Fatalf("心跳帧形态不对: %q", body)
+	}
+	if rw.x.seq != seq {
+		t.Fatalf("心跳推进了 sequence_number: %d -> %d", seq, rw.x.seq)
+	}
+}

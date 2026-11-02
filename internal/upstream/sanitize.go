@@ -123,24 +123,35 @@ var sanitizeIdentityVerbs = []string{
 // 去掉结尾标点后两种形态一并覆盖（替换串同样不带标点，让原有标点原样保留）。
 // 注意仍要求 "You are Claude Code, " 前缀，不做更宽的子串替换，
 // 以免误伤 TestExactMatchOnlyVariantNotTouched 所保护的零散文本。
+//
+// 替换串用 "|" 分隔多候选，按请求种子选一（见 pickRewrite）：单一改写句本身
+// 也是一条可被聚类的指纹——全网都换出同一句话，上游换个判据就能重新命中。
+// 第一候选保持历史行为不变，种子为 0（无会话标识）时逐字节等价于多候选之前。
 var sanitizeRewrites = [][2]string{
 	{
 		"You are Claude Code, Anthropic's official CLI for Claude",
-		"You are Claude Code, Anthropic's official CLI tool for Claude",
+		"You are Claude Code, Anthropic's official CLI tool for Claude|" +
+			"You are Claude Code, Anthropic's official command line client for Claude|" +
+			"You are Claude Code, Anthropic's official CLI app for Claude",
 	},
 	{
 		"Main branch (you will usually use this for PRs)",
-		"Default branch (you will usually use this for PRs)",
+		"Default branch (you will usually use this for PRs)|" +
+			"Primary branch (you will usually use this for PRs)|" +
+			"Base branch (you will usually use this for PRs)",
 	},
 	{
 		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
-		"You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.",
+		"You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.|" +
+			"You are a coding agent running in the Codex CLI program, a terminal-based coding assistant.",
 	},
 	{
 		// 反馈句：整句带 Anthropic 仓库链接，上游按整句拦截（只留链接或只留半边均不拦，
 		// 实测需整句同时出现）。give→provide 一词之差即可绕过，语义不变。
 		"To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
-		"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+		"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues|" +
+			"To send feedback, users should report the issue at https://github.com/anthropics/claude-code/issues|" +
+			"To share feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
 	},
 	{
 		// 上游反探测：只要请求体里出现裸数字 11128 就整单拦截（与该数字的上下文无关——
@@ -150,7 +161,7 @@ var sanitizeRewrites = [][2]string{
 		// 代价：用户对话中任何 11128 都会被改写——但这串数字出现在请求里本身就是拦截条件，
 		// 不改写必然失败。插入连字符保留可读性与指代（该数字串上零宽空格无效，实测上游会归一化）。
 		"11128",
-		"11-128",
+		"11-128|111-28",
 	},
 }
 
@@ -166,24 +177,70 @@ var sanitizeIdentityRewrites = [][2]string{
 	},
 }
 
-// sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
+// pickRewrite 从多候选替换串里按请求种子稳定选一。
+//
+// to 不含 "|" → 原样返回（单候选规则与种子无关，存量行为零变化）；多候选且
+// 种子为 0（请求没有会话标识）→ 固定取第一个，与未实现多候选时逐字节一致；
+// 其余情况 → (种子 ^ 规则原文哈希) 取模选一，各规则独立翻转，不必同步换候选。
+// 空候选（"|" 首尾或连续）等价于剥离语义，原样保留。
+func pickRewrite(to, from string, seed uint64) string {
+	if !strings.Contains(to, "|") {
+		return to
+	}
+	parts := strings.Split(to, "|")
+	if seed == 0 {
+		return parts[0]
+	}
+	idx := (seed ^ fnv1a(from)) % uint64(len(parts))
+	return parts[idx]
+}
+
+// fnv1a FNV-1a 64。选它是因为零依赖且跨进程稳定：候选选择必须可复现——
+// 同一会话里的同一条模板句每次都要换出同一候选，否则多轮对话前后措辞忽变。
+func fnv1a(s string) uint64 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime64
+	}
+	return h
+}
+
+// variantSeed 请求级改写种子。conversation 用 prompt_cache_key 的会话派生键：
+// 空串（无会话信息）→ 0，候选固定取第一个，与未实现多候选时逐字节一致；
+// 非空 → FNV-1a 哈希，同一会话稳定，不同会话各走各的候选。
+func variantSeed(conversation string) uint64 {
+	if conversation == "" {
+		return 0
+	}
+	return fnv1a(conversation)
+}
+
 // sanitizeText 单段文本净化（全局规则）：预检不中 → 返回原串（零分配）。
-func sanitizeText(text string) string { return sanitizeTextWith(text, false) }
+func sanitizeText(text string) string { return sanitizeTextWith(text, false, 0) }
 
 // sanitizeTextIdentity 身份消息（system/developer）专用：在全局规则之外再应用身份类规则
 // （品牌词）。sanitize_brand_scope=all 时非身份消息也走这条（与上游既有行为一致）。
-func sanitizeTextIdentity(text string) string { return sanitizeTextWith(text, true) }
+func sanitizeTextIdentity(text string) string { return sanitizeTextWith(text, true, 0) }
 
-// sanitizeTextWith 按「是否应用身份类规则」净化单段文本。
+// sanitizeTextWith 按「是否应用身份类规则」净化单段文本；seed 决定多候选模板句
+// 选哪一条（0 = 第一条，见 variantSeed）。
 //
 // 快路径同时看两类特征：只含品牌词的文本在 brand=false 时原样返回（不 TrimSpace，
 // 用户输入的空白不动），在 brand=true 时进入改写。
-func sanitizeTextWith(text string, brand bool) string {
+func sanitizeTextWith(text string, brand bool, seed uint64) string {
 	if !hasFingerprint(text) && !(brand && hasIdentityFingerprint(text)) {
 		return text
 	}
 	for _, rw := range sanitizeRewrites {
-		text = strings.ReplaceAll(text, rw[0], rw[1])
+		if !strings.Contains(text, rw[0]) {
+			continue
+		}
+		text = strings.ReplaceAll(text, rw[0], pickRewrite(rw[1], rw[0], seed))
 	}
 	if brand {
 		// 身份句式先于品牌词：正则要匹配原文里的品牌全名，先换品牌会让规则失配。
@@ -246,14 +303,13 @@ func hasIdentityFingerprint(text string) bool {
 }
 
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
+// brand 为 false 时不应用身份类规则（见 sanitizeMessages 的作用域选择）；
+// seed 决定多候选模板句选哪一条（见 variantSeed）。
 // 返回净化后的值及是否发生变化。
-// sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
-// brand 为 false 时不应用身份类规则（见 sanitizeMessages 的作用域选择）。
-// 返回净化后的值及是否发生变化。
-func sanitizeContent(v any, brand bool) (any, bool) {
+func sanitizeContent(v any, brand bool, seed uint64) (any, bool) {
 	switch c := v.(type) {
 	case string:
-		s := sanitizeTextWith(c, brand)
+		s := sanitizeTextWith(c, brand, seed)
 		return s, s != c
 	case []any:
 		changed := false
@@ -266,7 +322,7 @@ func sanitizeContent(v any, brand bool) (any, bool) {
 			if !ok {
 				continue
 			}
-			if s := sanitizeTextWith(text, brand); s != text {
+			if s := sanitizeTextWith(text, brand, seed); s != text {
 				m["text"] = s
 				changed = true
 			}
@@ -283,8 +339,8 @@ func sanitizeContent(v any, brand bool) (any, bool) {
 // 在 content 缺失时直接 continue，整条消息连 tool_calls 一起被跳过——
 // 于是历史里任何写进工具参数的被拦字符串（文件名、命令、写入内容）都会原样漏出。
 // sanitizeToolCalls 净化 assistant.tool_calls[].function.arguments（字符串化 JSON）。
-// brand 决定是否应用身份类规则（品牌词）；其余全局规则始终应用。
-func sanitizeToolCalls(v any, brand bool) bool {
+// brand 决定是否应用身份类规则（品牌词）；其余全局规则始终应用。seed 同 sanitizeContent。
+func sanitizeToolCalls(v any, brand bool, seed uint64) bool {
 	callList, ok := v.([]any)
 	if !ok {
 		return false
@@ -303,7 +359,7 @@ func sanitizeToolCalls(v any, brand bool) bool {
 		if !ok {
 			continue
 		}
-		if s := sanitizeTextWith(args, brand); s != args {
+		if s := sanitizeTextWith(args, brand, seed); s != args {
 			fn["arguments"] = s
 			changed = true
 		}
@@ -317,7 +373,10 @@ func sanitizeToolCalls(v any, brand bool) bool {
 // brandGlobal 来自 features.sanitize_brand_scope：true（默认 "all"）时身份类规则对所有
 // 消息角色生效，与上游既有行为一致；false（"identity"）时只对 system/developer 生效，
 // 其余角色的同名文本按用户数据原样透传（实测 user 里的品牌词不触发 11-128）。
-func sanitizeMessages(messages []any, brandGlobal bool) bool {
+//
+// seed 是请求级改写种子（见 variantSeed）：同一次请求里所有消息共用一个种子，
+// 换出的候选才前后一致。
+func sanitizeMessages(messages []any, brandGlobal bool, seed uint64) bool {
 	changed := false
 	for _, msg := range messages {
 		m, ok := msg.(map[string]any)
@@ -331,27 +390,27 @@ func sanitizeMessages(messages []any, brandGlobal bool) bool {
 		// content 与 tool_calls 各自独立判断：content 可以为 null（工具调用轮），
 		// 早期版本在此 continue，导致这类消息的 tool_calls 完全不被净化。
 		if c, ok := m["content"]; ok {
-			if nc, ch := sanitizeContent(c, brand); ch {
+			if nc, ch := sanitizeContent(c, brand, seed); ch {
 				m["content"] = nc
 				changed = true
 			}
 		}
 		// reasoning_content（思维链回填字段）实测同样携带指纹，与 content 同等净化。
 		if rc, ok := m["reasoning_content"].(string); ok {
-			if s := sanitizeTextWith(rc, brand); s != rc {
+			if s := sanitizeTextWith(rc, brand, seed); s != rc {
 				m["reasoning_content"] = s
 				changed = true
 			}
 		}
 		// reasoning：另一形态的思维链字段（backfillReasoningContent 会镜像一份）。
 		if r, ok := m["reasoning"].(string); ok {
-			if s := sanitizeTextWith(r, brand); s != r {
+			if s := sanitizeTextWith(r, brand, seed); s != r {
 				m["reasoning"] = s
 				changed = true
 			}
 		}
 		if tc, ok := m["tool_calls"]; ok {
-			if sanitizeToolCalls(tc, brand) {
+			if sanitizeToolCalls(tc, brand, seed) {
 				changed = true
 			}
 		}

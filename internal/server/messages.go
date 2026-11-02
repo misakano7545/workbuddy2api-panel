@@ -1247,3 +1247,16 @@ func (w *messagesWriter) emit(event string, payload map[string]any) error {
 	w.Flush()
 	return nil
 }
+
+// KeepAlive 实现 upstream.KeepAliver：上游静默期发 Anthropic 的 ping 事件。
+//
+// 只在 message_start 已写出（x.started）之后发：官方流的 ping 出现在
+// message_start 之后，早于它的 ping 不是官方形态，严格客户端可能判协议错误。
+// 未开流时回 (false, nil)——此时一个字节都还没写，StreamHint 保留首帧否决窗口。
+// 复用 emit：它补齐 SSE 头、序列化为 {"type":"ping"} 并 flush。
+func (w *messagesWriter) KeepAlive() (bool, error) {
+	if !w.stream || !w.x.started || w.x.failed || w.x.done {
+		return false, nil
+	}
+	return true, w.emit("ping", map[string]any{})
+}

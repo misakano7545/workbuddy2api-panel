@@ -1527,3 +1527,21 @@ func (w *responsesWriter) emit(typ string, payload map[string]any) error {
 	w.Flush()
 	return nil
 }
+
+// KeepAlive 实现 upstream.KeepAliver：上游静默期写一条 SSE 注释行。
+//
+// Responses 协议没有 ping 事件，注释行是唯一既不推进 sequence_number、也不新增
+// 事件的保活形态（Codex 等客户端的 SSE 解析按规范丢弃注释）。
+// response.created 之前不写，理由同 messagesWriter.KeepAlive：未开流时保留首帧否决。
+// 注释帧直接写底层 ResponseWriter（不经 emit）：emit 会推进 sequence_number，
+// 而保活不该出现在事件序列里。
+func (w *responsesWriter) KeepAlive() (bool, error) {
+	if !w.stream || !w.x.created || w.x.failed || w.x.completed {
+		return false, nil
+	}
+	if _, err := io.WriteString(w.ResponseWriter, ": keep-alive\n\n"); err != nil {
+		return false, err
+	}
+	w.Flush()
+	return true, nil
+}

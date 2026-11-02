@@ -90,7 +90,7 @@ func TestSanitizeMessagesScrubsReasoningField(t *testing.T) {
 		"content":   "hi",
 		"reasoning": ccIdentity,
 	}}
-	if !sanitizeMessages(ms, true) {
+	if !sanitizeMessages(ms, true, 0) {
 		t.Fatal("reasoning 字段里的指纹未被净化")
 	}
 	got, _ := ms[0].(map[string]any)["reasoning"].(string)
@@ -111,7 +111,7 @@ func TestToolCallArgumentsSanitized(t *testing.T) {
 			}},
 		}},
 	}
-	if !sanitizeMessages(msgs, true) {
+	if !sanitizeMessages(msgs, true, 0) {
 		t.Fatal("sanitizeMessages 未报告任何改动，tool_calls 被跳过")
 	}
 	fn := msgs[1].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
@@ -211,7 +211,7 @@ func TestMultimodalTextPartOnly(t *testing.T) {
 		map[string]any{"type": "text", "text": ccIdentity},
 		imgPart,
 	}
-	out, changed := sanitizeContent(content, true)
+	out, changed := sanitizeContent(content, true, 0)
 	if !changed {
 		t.Fatal("expected change")
 	}
@@ -524,7 +524,7 @@ func TestBrandScopeAllRewritesUserMessages(t *testing.T) {
 		map[string]any{"role": "system", "content": "You are DeepSeek Harness."},
 		map[string]any{"role": "user", "content": "read DeepSeek Harness docs"},
 	}
-	if !sanitizeMessages(msgs, true) {
+	if !sanitizeMessages(msgs, true, 0) {
 		t.Fatal("sanitizeMessages all: 未报告改动")
 	}
 	for i, m := range msgs {
@@ -546,7 +546,7 @@ func TestBrandScopeIdentityLeavesUserMessages(t *testing.T) {
 			}}},
 		},
 	}
-	if !sanitizeMessages(msgs, false) {
+	if !sanitizeMessages(msgs, false, 0) {
 		t.Fatal("sanitizeMessages identity: system 未改写")
 	}
 	if got := msgs[0].(map[string]any)["content"].(string); !strings.Contains(got, "DeepSeekRuntime") {
@@ -682,5 +682,88 @@ func TestPrepareBodyRewritesDshPaths(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "Paths beginning with @") {
 		t.Fatalf("出站 body 未被改写: %s", out)
+	}
+}
+
+// TestRewriteSeedZeroKeepsLegacy：种子 0（请求没有会话标识）必须落到第一候选，
+// 与多候选之前的单句改写逐字节一致——存量行为不回归的判据。
+func TestRewriteSeedZeroKeepsLegacy(t *testing.T) {
+	if got := sanitizeTextWith(ccIdentity, false, 0); !strings.Contains(got, "official CLI tool for Claude") {
+		t.Fatalf("身份句种子 0 未落到第一候选: %q", got)
+	}
+	if got := sanitizeTextWith(ccBranch, false, 0); !strings.Contains(got, "Default branch") {
+		t.Fatalf("分支句种子 0 未落到第一候选: %q", got)
+	}
+	if got := pickRewrite("a|b|c", "x", 0); got != "a" {
+		t.Fatalf("pickRewrite(seed=0) = %q, want 第一条候选", got)
+	}
+}
+
+// TestRewriteSingleCandidateIgnoresSeed：单候选规则不受种子影响——品牌词这类
+// 「只有一个等价改写」的规则不能被种子搅出别的东西。
+func TestRewriteSingleCandidateIgnoresSeed(t *testing.T) {
+	for _, seed := range []uint64{0, 1, 42, 1 << 40} {
+		if got := pickRewrite("DeepSeekRuntime", "DeepSeek Harness", seed); got != "DeepSeekRuntime" {
+			t.Fatalf("seed=%d 单候选被改写: %q", seed, got)
+		}
+	}
+}
+
+// TestRewriteCandidatesStablePerConversation：同一会话种子稳定选同一候选，
+// 不同会话之间必须出现第二个候选——否则多候选等于没做，全网还是同一句。
+func TestRewriteCandidatesStablePerConversation(t *testing.T) {
+	if n := len(strings.Split(sanitizeRewrites[0][1], "|")); n < 2 {
+		t.Fatalf("身份句规则只有 %d 个候选，轮换无从谈起", n)
+	}
+	seed := variantSeed("conv-a")
+	first := sanitizeTextWith(ccIdentity, false, seed)
+	if again := sanitizeTextWith(ccIdentity, false, seed); again != first {
+		t.Fatalf("同一会话选出了不同候选: %q vs %q", first, again)
+	}
+	seen := map[string]bool{first: true}
+	for _, conv := range []string{"conv-b", "conv-c", "conv-d", "conv-e", "conv-f", "conv-g", "conv-h"} {
+		seen[sanitizeTextWith(ccIdentity, false, variantSeed(conv))] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("不同会话始终换出同一句，轮换失效: %v", seen)
+	}
+	// 轮换出来的每一句都必须真的破坏原指纹（改错候选等于没改）。
+	for got := range seen {
+		if strings.Contains(got, "official CLI for Claude") {
+			t.Fatalf("候选仍命中上游指纹: %q", got)
+		}
+	}
+}
+
+// TestVariantSeedFromConversation：会话键为空 → 0（关闭轮换）；非空 → 稳定哈希。
+func TestVariantSeedFromConversation(t *testing.T) {
+	if variantSeed("") != 0 {
+		t.Fatalf("空会话键应得种子 0，got %d", variantSeed(""))
+	}
+	if variantSeed("conv-a") != variantSeed("conv-a") {
+		t.Fatal("同一会话键算出不同种子，候选会前后跳变")
+	}
+	if variantSeed("conv-a") == variantSeed("conv-b") {
+		t.Fatal("不同会话键算出同一种子，轮换退化")
+	}
+}
+
+// TestPrepareBodyRotatesRewriteByConversation：多候选要真的接进线上路径——
+// 会话键不同的两个请求，出站 body 至少有一处不同。
+func TestPrepareBodyRotatesRewriteByConversation(t *testing.T) {
+	body, err := json.Marshal(map[string]any{
+		"model":    "glm-5.2",
+		"messages": []any{map[string]any{"role": "system", "content": ccIdentity}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, conv := range []string{"conv-a", "conv-b", "conv-c", "conv-d", "conv-e", "conv-f"} {
+		out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", nil, "uid", conv, false, 0)
+		seen[string(out)] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("不同会话的出站 body 完全一样，轮换没接上: %v", seen)
 	}
 }

@@ -775,3 +775,89 @@ func TestPrepareBodyPrefixedModelUsesBareForCatalogAndEffort(t *testing.T) {
 		t.Fatalf("effort = %q, want high", effort)
 	}
 }
+
+// TestMergeConsecutiveUserMessages：连续 user 合并成一条（空行分隔），其余顺序不变。
+// Anthropic / Responses 投影成 chat 后这是常态，上游按会话协议会 400。
+func TestMergeConsecutiveUserMessages(t *testing.T) {
+	body := []byte(`{"model":"glm-5.2","messages":[` +
+		`{"role":"user","content":"first"},` +
+		`{"role":"user","content":"second"},` +
+		`{"role":"assistant","content":"ok"},` +
+		`{"role":"user","content":"third"}]}`)
+	var obj map[string]any
+	if err := json.Unmarshal(PrepareBodyOpt(body, false), &obj); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("消息数 = %d, want 3: %v", len(msgs), msgs)
+	}
+	if got := msgs[0].(map[string]any)["content"]; got != "first\n\nsecond" {
+		t.Fatalf("合并后 content = %q, want %q", got, "first\n\nsecond")
+	}
+	if got := msgs[1].(map[string]any)["content"]; got != "ok" {
+		t.Fatalf("assistant 消息被动了: %q", got)
+	}
+}
+
+// TestMergeSameRoleSkipsToolMessages：带 tool_calls / tool_call_id / name 的消息
+// 一律不合并——这些字段拼起来语义没有定义，拼错比不合更糟。
+func TestMergeSameRoleSkipsToolMessages(t *testing.T) {
+	msgs := []any{
+		map[string]any{"role": "user", "content": "a"},
+		map[string]any{"role": "user", "content": "b", "name": "bob"},
+		map[string]any{"role": "tool", "content": "r1", "tool_call_id": "c1"},
+		map[string]any{"role": "tool", "content": "r2", "tool_call_id": "c2"},
+	}
+	out, changed := mergeSameRoleMessages(msgs)
+	if changed || len(out) != 4 {
+		t.Fatalf("不该合并的消息被合并了: changed=%v len=%d", changed, len(out))
+	}
+	if &out[0] != &msgs[0] {
+		t.Fatal("零改动时应原样返回入参 slice")
+	}
+}
+
+// TestMergeSameRoleKeepsReasoning：带 reasoning_content 的连续 assistant 不合并
+// （两段思维链拼起来没有意义，还会把回填字段写坏）。
+func TestMergeSameRoleKeepsReasoning(t *testing.T) {
+	msgs := []any{
+		map[string]any{"role": "assistant", "content": "a", "reasoning_content": "r1"},
+		map[string]any{"role": "assistant", "content": "b", "reasoning_content": "r2"},
+	}
+	if out, changed := mergeSameRoleMessages(msgs); changed || len(out) != 2 {
+		t.Fatalf("带 reasoning_content 的消息被合并: %v", out)
+	}
+}
+
+// TestMergeSameRoleContentParts：parts 数组按顺序拼接；字符串与数组混合时
+// 字符串包成 text part（Anthropic 投影后最常见的形态）。
+func TestMergeSameRoleContentParts(t *testing.T) {
+	img := map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "x"}}
+	msgs := []any{
+		map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "look"}}},
+		map[string]any{"role": "user", "content": []any{img}},
+	}
+	out, changed := mergeSameRoleMessages(msgs)
+	if !changed || len(out) != 1 {
+		t.Fatalf("parts 数组未合并: changed=%v len=%d", changed, len(out))
+	}
+	parts := out[0].(map[string]any)["content"].([]any)
+	if len(parts) != 2 || parts[0].(map[string]any)["text"] != "look" {
+		t.Fatalf("parts 拼接顺序错: %v", parts)
+	}
+
+	mixed := []any{
+		map[string]any{"role": "user", "content": "plain"},
+		map[string]any{"role": "user", "content": []any{img}},
+	}
+	out, changed = mergeSameRoleMessages(mixed)
+	if !changed || len(out) != 1 {
+		t.Fatalf("字符串 + parts 未合并: changed=%v len=%d", changed, len(out))
+	}
+	parts = out[0].(map[string]any)["content"].([]any)
+	head, _ := parts[0].(map[string]any)
+	if head["type"] != "text" || head["text"] != "plain" {
+		t.Fatalf("字符串未包成 text part: %v", parts)
+	}
+}

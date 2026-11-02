@@ -168,7 +168,15 @@ func prepareBodyOpt(src []byte, sanitize, brandGlobal bool, efforts map[string][
 	backfillReasoningContent(obj)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
-			sanitizeMessages(msgs, brandGlobal)
+			// 种子取会话派生键：同一会话稳定选同一改写候选，跨会话各走各的。
+			sanitizeMessages(msgs, brandGlobal, variantSeed(cacheConversation))
+		}
+	}
+	// 连续同角色消息合并（见 mergeSameRoleMessages）：Anthropic / Responses 投影成
+	// chat 后常出现连续 user，上游按会话协议会 400。
+	if msgs, ok := obj["messages"].([]any); ok {
+		if merged, changed := mergeSameRoleMessages(msgs); changed {
+			obj["messages"] = merged
 		}
 	}
 	// prompt_cache_key：与 body 改写共用同一次 map，避免再 Unmarshal/Marshal 一遍。
@@ -182,6 +190,119 @@ func prepareBodyOpt(src []byte, sanitize, brandGlobal bool, efforts map[string][
 		return src, requested, effort
 	}
 	return out, requested, effort
+}
+
+// mergeSameRoleMessages 合并相邻的同角色消息。
+//
+// 为什么需要：/v1/messages 与 /v1/responses 投影成 chat 之后，连续两条 user
+// 是常态（客户端把工具结果与下一句发问分开发，投影后中间没有 assistant 隔开）；
+// 上游按会话协议逐轮校验，遇到连续同角色直接 400，整个请求作废。
+//
+// 只合并「只有 role + content 两条键」的纯消息：带 tool_calls / tool_call_id /
+// name / reasoning_content 等任何附加字段的一律不动。这些字段合并后语义没有定义
+// （两段 reasoning 怎么拼、两个 name 取哪个），拼错比不合更糟。
+func mergeSameRoleMessages(msgs []any) ([]any, bool) {
+	out := make([]any, 0, len(msgs))
+	changed := false
+	for _, m := range msgs {
+		cur, ok := m.(map[string]any)
+		if !ok || len(out) == 0 {
+			out = append(out, m)
+			continue
+		}
+		prev, ok := out[len(out)-1].(map[string]any)
+		if !ok {
+			out = append(out, m)
+			continue
+		}
+		merged, ok := mergeTwoSameRole(prev, cur)
+		if !ok {
+			out = append(out, m)
+			continue
+		}
+		out[len(out)-1] = merged
+		changed = true
+	}
+	if !changed {
+		// 零改动返回原 slice（调用方据此跳过回写，与没有这个功能时等价）。
+		return msgs, false
+	}
+	return out, true
+}
+
+// mergeTwoSameRole 尝试把 cur 并进 prev；不满足条件时 ok=false，调用方原样保留两条。
+func mergeTwoSameRole(prev, cur map[string]any) (map[string]any, bool) {
+	role, ok := plainRoleContent(prev)
+	if !ok {
+		return nil, false
+	}
+	curRole, ok := plainRoleContent(cur)
+	if !ok || curRole != role {
+		return nil, false
+	}
+	switch role {
+	case "user", "assistant": // tool / system / developer 不合并：各有协议约束
+	default:
+		return nil, false
+	}
+	joined, ok := joinContent(prev["content"], cur["content"])
+	if !ok {
+		return nil, false
+	}
+	return map[string]any{"role": prev["role"], "content": joined}, true
+}
+
+// plainRoleContent 判断消息是不是「只有 role + content」的纯消息，返回归一化的 role。
+func plainRoleContent(m map[string]any) (string, bool) {
+	if len(m) != 2 {
+		return "", false
+	}
+	role, ok := m["role"].(string)
+	if !ok || strings.TrimSpace(role) == "" {
+		return "", false
+	}
+	if _, ok := m["content"]; !ok {
+		return "", false
+	}
+	return strings.ToLower(strings.TrimSpace(role)), true
+}
+
+// joinContent 拼接两段 content：字符串 + 字符串用空行隔开（保持段落边界），
+// parts 数组 + parts 数组按顺序接，字符串与数组混合时把字符串包成一个 text part。
+// 其余形态（null、数字、对象）返回 ok=false —— 不认识的内容不猜。
+func joinContent(a, b any) (any, bool) {
+	as, aStr := a.(string)
+	bs, bStr := b.(string)
+	if aStr && bStr {
+		switch {
+		case as == "":
+			return bs, true
+		case bs == "":
+			return as, true
+		}
+		return as + "\n\n" + bs, true
+	}
+	ap, aArr := a.([]any)
+	bp, bArr := b.([]any)
+	parts := func(head []any, tail ...any) []any {
+		joined := make([]any, 0, len(head)+len(tail))
+		joined = append(joined, head...)
+		return append(joined, tail...)
+	}
+	switch {
+	case aArr && bArr:
+		return parts(ap, bp...), true
+	case aArr && bStr:
+		return parts(ap, textPart(bs)), true
+	case aStr && bArr:
+		return parts([]any{textPart(as)}, bp...), true
+	}
+	return nil, false
+}
+
+// textPart 把裸字符串包成 content parts 里的 text part（OpenAI / Anthropic 同形）。
+func textPart(s string) map[string]any {
+	return map[string]any{"type": "text", "text": s}
 }
 
 // trimHistory 只保留最近 keep 轮对话（issue #99）：一轮 = 一条 user 消息，连同其后

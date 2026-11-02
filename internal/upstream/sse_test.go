@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1347,5 +1349,167 @@ func TestStreamWithoutMarkupRepairIsUnchanged(t *testing.T) {
 	}
 	if base.Body.String() != disabled.Body.String() {
 		t.Fatalf("未声明 tools 时输出被改动\nbase=%s\ngot =%s", base.Body.String(), disabled.Body.String())
+	}
+}
+
+// withKeepAlive 把心跳间隔压到毫秒级并在用例结束时还原（KeepAliveEvery 是包级变量）。
+func withKeepAlive(t *testing.T, every time.Duration) {
+	t.Helper()
+	old := KeepAliveEvery
+	KeepAliveEvery = every
+	t.Cleanup(func() { KeepAliveEvery = old })
+}
+
+// TestStreamHintKeepAliveDuringSilence：上游静默期必须出现 SSE 注释帧，且注释帧
+// 不能把 data: 帧切碎（按空行切段，每段只能是 data: 帧或注释）。
+func TestStreamHintKeepAliveDuringSilence(t *testing.T) {
+	withKeepAlive(t, 20*time.Millisecond)
+	pr, pw := io.Pipe()
+	rec := httptest.NewRecorder()
+	done := make(chan error, 1)
+	go func() { done <- Stream(rec, pr) }()
+
+	if _, err := io.WriteString(pw, `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hi"}}]}`+"\n\n"); err != nil {
+		t.Fatalf("write first frame: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // 静默 5 个周期
+	_, _ = io.WriteString(pw, "data: [DONE]\n\n")
+	_ = pw.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	body := rec.Body.String()
+	if n := strings.Count(body, ": keep-alive\n\n"); n < 2 {
+		t.Fatalf("心跳帧数 = %d, want >= 2；body=%q", n, body)
+	}
+	for _, seg := range strings.Split(strings.TrimSpace(body), "\n\n") {
+		seg = strings.TrimSpace(seg)
+		if seg == "" || strings.HasPrefix(seg, "data: ") || strings.HasPrefix(seg, ":") {
+			continue
+		}
+		t.Fatalf("帧被心跳切碎: %q（完整 body=%q）", seg, body)
+	}
+}
+
+// TestStreamHintKeepAliveDisabled：KeepAliveEvery <= 0 时一个保活帧都不写，
+// 行为与未实现心跳时一致。
+func TestStreamHintKeepAliveDisabled(t *testing.T) {
+	withKeepAlive(t, 0)
+	pr, pw := io.Pipe()
+	rec := httptest.NewRecorder()
+	done := make(chan error, 1)
+	go func() { done <- Stream(rec, pr) }()
+
+	time.Sleep(60 * time.Millisecond)
+	_, _ = io.WriteString(pw, `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hi"}}]}`+"\n\n")
+	_, _ = io.WriteString(pw, "data: [DONE]\n\n")
+	_ = pw.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if strings.Contains(rec.Body.String(), "keep-alive") {
+		t.Fatalf("关闭心跳后仍写出保活帧: %q", rec.Body.String())
+	}
+}
+
+// kaRecorder 模拟翻译层（messagesWriter / responsesWriter）：未开流时拒绝保活，
+// 开流后每次保活写一帧协议内事件。
+type kaRecorder struct {
+	*httptest.ResponseRecorder
+	mu      sync.Mutex
+	started bool
+	pings   int
+}
+
+func (k *kaRecorder) KeepAlive() (bool, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.started {
+		return false, nil
+	}
+	k.pings++
+	if _, err := io.WriteString(k.ResponseRecorder, "event: ping\ndata: {\"type\":\"ping\"}\n\n"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (k *kaRecorder) setStarted(v bool) { k.mu.Lock(); k.started = v; k.mu.Unlock() }
+func (k *kaRecorder) pingCount() int    { k.mu.Lock(); defer k.mu.Unlock(); return k.pings }
+
+// TestStreamHintKeepAliveDelegatesToKeepAliver：w 实现 KeepAliver 时心跳交给它，
+// 且未开流期间不得写出任何字节（首帧否决窗口必须保留）。
+func TestStreamHintKeepAliveDelegatesToKeepAliver(t *testing.T) {
+	withKeepAlive(t, 20*time.Millisecond)
+	ka := &kaRecorder{ResponseRecorder: httptest.NewRecorder()}
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- Stream(ka, pr) }()
+
+	time.Sleep(80 * time.Millisecond)
+	if body := ka.Body.String(); body != "" {
+		t.Fatalf("未开流就向客户端写了字节，首帧否决窗口被废: %q", body)
+	}
+	ka.setStarted(true)
+	if _, err := io.WriteString(pw, `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hi"}}]}`+"\n\n"); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	_, _ = io.WriteString(pw, "data: [DONE]\n\n")
+	_ = pw.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if ka.pingCount() == 0 {
+		t.Fatalf("开流后上游静默仍未走 KeepAlive；body=%q", ka.Body.String())
+	}
+	if strings.Contains(ka.Body.String(), ": keep-alive") {
+		t.Fatalf("翻译层路径不该写 SSE 注释帧（会被翻译层当上游帧吞掉）: %q", ka.Body.String())
+	}
+}
+
+// TestStreamHintKeepAliveKeepsHeadVeto：心跳跑了几轮但一字节未写出时，
+// 首帧 error 仍必须走首帧否决（调用方才能无痕换号）。
+func TestStreamHintKeepAliveKeepsHeadVeto(t *testing.T) {
+	withKeepAlive(t, 20*time.Millisecond)
+	ka := &kaRecorder{ResponseRecorder: httptest.NewRecorder()}
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- Stream(ka, pr) }()
+
+	time.Sleep(60 * time.Millisecond)
+	_, _ = io.WriteString(pw, `data: {"error":{"message":"6004 rate limited"}}`+"\n\n")
+	_ = pw.Close()
+	err := <-done
+	var hv *HeadVetoError
+	if !errors.As(err, &hv) {
+		t.Fatalf("err = %v, want HeadVetoError（心跳未写出字节，否决窗口应仍在）", err)
+	}
+	if body := ka.Body.String(); body != "" {
+		t.Fatalf("否决路径不得写出字节: %q", body)
+	}
+}
+
+// TestStreamHintKeepAliveClosesHeadVeto：心跳已写出字节之后，error 帧不得再返回
+// HeadVetoError——响应头提交了，换号重试会让客户端收到两段内容。
+func TestStreamHintKeepAliveClosesHeadVeto(t *testing.T) {
+	withKeepAlive(t, 20*time.Millisecond)
+	pr, pw := io.Pipe()
+	rec := httptest.NewRecorder()
+	done := make(chan error, 1)
+	go func() { done <- Stream(rec, pr) }()
+
+	time.Sleep(80 * time.Millisecond) // 注释帧已写出
+	_, _ = io.WriteString(pw, `data: {"error":{"message":"6004 rate limited"}}`+"\n\n")
+	_ = pw.Close()
+	err := <-done
+	var hv *HeadVetoError
+	if errors.As(err, &hv) {
+		t.Fatalf("心跳已提交响应头，不该再否决换号: %v", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, ": keep-alive") || !strings.Contains(body, "6004 rate limited") {
+		t.Fatalf("保活帧或 error 帧缺失: %q", body)
 	}
 }

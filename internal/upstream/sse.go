@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -58,6 +60,28 @@ func (e *HeadVetoError) Error() string {
 // 同一判据（!sawDone）本文件下方处理残缺 tool_calls 时早已在用：代码知道这是截断，
 // 只是此前没让它出现在客户端可见的协议字段里。
 const TruncationFinishReason = "length"
+
+// KeepAliveEvery SSE 静默心跳间隔。变量而非常量：单测把它压到毫秒级。<=0 关闭心跳，
+// 行为与未实现心跳时逐字节一致。
+//
+// 取 15s 而不是更短：写心跳即提交响应头，首帧否决（HeadVetoError，可无痕换号）
+// 随之失效。15s 足够覆盖「上游快速拒绝」（error 帧实测都在秒级到达），又远小于
+// 反代/LB 的 idle timeout（60s 起），两头都占。
+var KeepAliveEvery = 15 * time.Second
+
+// sseKeepAliveComment chat 直通路径的保活帧：SSE 注释行（冒号开头），规范要求
+// 客户端无条件忽略——但对反代 / LB 而言是实打实的字节，连接不会被判空闲。
+const sseKeepAliveComment = ": keep-alive\n\n"
+
+// KeepAliver 由流式翻译层实现（/v1/messages 的 messagesWriter、/v1/responses 的
+// responsesWriter）：StreamHint 检测到上游静默时调用它，让翻译层发**自己协议**认的
+// 保活，而不是把 SSE 注释写进翻译层（那会被翻译层当上游帧吃掉，客户端一个字节都收不到）。
+//
+// 返回 wrote 表示这次是否真的写出了字节：尚未开流（还没有 message_start /
+// response.created）时翻译层回 (false, nil)，StreamHint 据此保留首帧否决窗口。
+type KeepAliver interface {
+	KeepAlive() (wrote bool, err error)
+}
 
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
@@ -645,15 +669,40 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	toolFinishSent := false
 	finishSeen := false
 
-	// writeSSE 原样写出一帧并 flush。
-	writeSSE := func(payload string) error {
-		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
+	// wmu 串行化「主循环写帧」与「心跳 goroutine 写保活」：SSE 帧必须整帧连续写出，
+	// 两条路径交错会把 data: 行截断。lastWrite 是最近一次写出字节的时刻（心跳判
+	// 静默用），wroteAny 是「已经向客户端写出过任何字节」——首帧否决窗口的判据。
+	var (
+		wmu       sync.Mutex
+		lastWrite time.Time
+		wroteAny  atomic.Bool
+	)
+
+	// writeBytesLocked 写字节 + flush + 记账。**调用方必须持有 wmu**。
+	writeBytesLocked := func(s string) error {
+		if _, werr := io.WriteString(w, s); werr != nil {
 			return werr
 		}
 		if fl != nil {
 			fl.Flush()
 		}
+		lastWrite = time.Now()
+		wroteAny.Store(true)
 		return nil
+	}
+
+	// writeSSE 原样写出一帧并 flush。
+	writeSSE := func(payload string) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		return writeBytesLocked("data: " + payload + "\n\n")
+	}
+
+	// writeLine 原样写出一行（上游注释行透传；换行由上游原文带进来）。
+	writeLine := func(line string) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		return writeBytesLocked(line)
 	}
 
 	// writeChunk 把一个 chunk 对象按规范白名单重建后写出并 flush，同时维护三件跨帧
@@ -783,13 +832,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		if hint := frameGatewayHint(hintFn, payload); hint != "" {
 			payload = attachHintToErrorFrame(payload, hint)
 		}
-		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
-			return werr
-		}
-		if fl != nil {
-			fl.Flush()
-		}
-		return nil
+		// hint 组装留在锁外：JSON 解析不该进临界区。
+		wmu.Lock()
+		defer wmu.Unlock()
+		return writeBytesLocked("data: " + payload + "\n\n")
 	}
 
 	// writeFrame 把 payload 按规范白名单重建后以 data: 帧写出并 flush。
@@ -829,6 +875,64 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		return 1, nil
 	}
 
+	// 静默心跳：主循环阻塞在 br.ReadString 上时，中间层按「N 秒无字节」回收长连接。
+	// 独立 goroutine 按 KeepAliveEvery 在上游静默期写一帧保活，两条路径分流：
+	//   - chat 直通（w 不是翻译层）：写 SSE 注释行 sseKeepAliveComment；
+	//   - /v1/messages、/v1/responses（w 是翻译层）：交给 w.KeepAlive()，
+	//     由翻译层发 Anthropic 的 event: ping / Responses 的注释行。
+	// 记账：心跳真的写出字节后置 wroteAny，首帧否决窗口随之关闭（见下方读循环与空流分支）。
+	// 客户端断连时心跳写失败只结束 goroutine，不抢先返回错误——主循环下一次写帧
+	// 会拿到同一个错误并按既有路径退出。
+	every := KeepAliveEvery
+	stop := make(chan struct{})
+	var hbWG sync.WaitGroup
+	var stopOnce sync.Once
+	stopKeepAlive := func() { stopOnce.Do(func() { close(stop); hbWG.Wait() }) }
+	if every > 0 {
+		hbWG.Add(1)
+		go func() {
+			defer hbWG.Done()
+			t := time.NewTicker(every)
+			defer t.Stop()
+			start := time.Now()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					// 只有「确实静默满一个周期」才写：上游帧密集时不需要注释帧。
+					wmu.Lock()
+					ref := lastWrite
+					if ref.IsZero() {
+						ref = start
+					}
+					idle := time.Since(ref)
+					wmu.Unlock()
+					if idle < every {
+						continue
+					}
+					wmu.Lock()
+					var werr error
+					if ka, ok := w.(KeepAliver); ok {
+						var wrote bool
+						wrote, werr = ka.KeepAlive()
+						if wrote {
+							lastWrite = time.Now()
+							wroteAny.Store(true)
+						}
+					} else {
+						werr = writeBytesLocked(sseKeepAliveComment)
+					}
+					wmu.Unlock()
+					if werr != nil {
+						return
+					}
+				}
+			}
+		}()
+		defer stopKeepAlive()
+	}
+
 	br := bufio.NewReaderSize(r, 64*1024)
 	validFrames := 0
 	// headOpen 首帧否决窗口：尚未向客户端写出任何字节。窗口内遇到上游 error 帧
@@ -848,20 +952,25 @@ readLoop:
 			payload := strings.TrimPrefix(trimmed, "data: ")
 			if headOpen {
 				headOpen = false
-				// 带 error 键的帧即上游 error-passthrough 形态（判据同 writeFrame）：
-				// 它不含可用正文，换号重试对客户端无痕。
-				var probe map[string]any
-				if json.Unmarshal([]byte(payload), &probe) == nil {
-					if _, hasErr := probe["error"]; hasErr {
-						return &HeadVetoError{Payload: payload}
-					}
-					// 流内失败帧（HTTP 200 内嵌顶层 {code,msg}，无 choices；判据同
-					// writeFrame 的 StreamErrorFrame）：首帧即失败同样否决换号——否则
-					// 响应头一旦提交，可重试的失败（11140 审核拦截、6021 队列满）就只能
-					// 以「200 + error 帧」透给客户端。payload 改写成标准 error 帧后再带出，
-					// FrameKind 与末端错误映射的口径和 writeFrame 的透出形态一致。
-					if code, msg, ok := StreamErrorFrame(probe); ok {
-						return &HeadVetoError{Payload: streamErrorPayload(code, msg, payload)}
+				// 心跳可能已经提交过响应头（wroteAny）：此时再返回 HeadVetoError
+				// 就是「已经写出字节却让调用方换号重试」，客户端会收到两段内容
+				// （前一段只有注释）。只有零字节时才允许否决。
+				if !wroteAny.Load() {
+					// 带 error 键的帧即上游 error-passthrough 形态（判据同 writeFrame）：
+					// 它不含可用正文，换号重试对客户端无痕。
+					var probe map[string]any
+					if json.Unmarshal([]byte(payload), &probe) == nil {
+						if _, hasErr := probe["error"]; hasErr {
+							return &HeadVetoError{Payload: payload}
+						}
+						// 流内失败帧（HTTP 200 内嵌顶层 {code,msg}，无 choices；判据同
+						// writeFrame 的 StreamErrorFrame）：首帧即失败同样否决换号——否则
+						// 响应头一旦提交，可重试的失败（11140 审核拦截、6021 队列满）就只能
+						// 以「200 + error 帧」透给客户端。payload 改写成标准 error 帧后再带出，
+						// FrameKind 与末端错误映射的口径和 writeFrame 的透出形态一致。
+						if code, msg, ok := StreamErrorFrame(probe); ok {
+							return &HeadVetoError{Payload: streamErrorPayload(code, msg, payload)}
+						}
 					}
 				}
 			}
@@ -875,11 +984,8 @@ readLoop:
 			// shortcut: 这一行就提交了响应头，首帧否决窗口随之关闭（首帧即注释的
 			// 形态罕见，不为此缓冲整段头部）。
 			headOpen = false
-			if _, werr := io.WriteString(w, line); werr != nil {
+			if werr := writeLine(line); werr != nil {
 				return werr
-			}
-			if fl != nil {
-				fl.Flush()
 			}
 		}
 		// 空行（帧分隔）吞掉：本函数自产 "\n\n"
@@ -890,6 +996,9 @@ readLoop:
 			return err
 		}
 	}
+	// 读循环已结束：先停心跳，避免注释帧插到 repair 尾部帧 / [DONE] 中间
+	// （[DONE] 之后还写注释帧会让严格客户端报「流已结束仍有数据」）。
+	stopKeepAlive()
 	// 标记修复的尾部收尾：流结束时仍未判定的字节一律原文回吐（绝不吞字节，未闭合
 	// 的块连起始标记一起交还）；若本流还原过调用、但上游从未给出收尾帧，补一帧
 	// finish_reason: tool_calls，保证客户端不会把「工具调用回合」读成「模型只说了话」。
@@ -923,17 +1032,16 @@ readLoop:
 	// 网关本地空流兜底帧走 hintFn=nil 的直写路径：该形态未覆盖（不编造 hint），
 	// 且 writeRaw 的 hintFn 闭包在空流路径下可能携带上一帧的上下文造成误配。
 	if validFrames == 0 {
-		if headOpen {
+		// 心跳已写出字节时不能再走首帧否决：响应头已提交，换号重试会让客户端
+		// 收到两段内容。此形态按空流兜底（error 帧 + [DONE]，调用方记 502 观测）。
+		if headOpen && !wroteAny.Load() {
 			return &HeadVetoError{}
 		}
 		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
 	}
-	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
-	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。writeSSE 自带 flush 与记账。
+	if err := writeSSE("[DONE]"); err != nil {
 		return err
-	}
-	if fl != nil {
-		fl.Flush()
 	}
 	if validFrames == 0 {
 		return errEmptyStream
