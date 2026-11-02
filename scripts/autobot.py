@@ -401,7 +401,7 @@ def past_attempts():
     owner, name = repo.split("/", 1)
     q = ('query{repository(owner:%s,name:%s){pullRequests(states:CLOSED,first:100,'
          'orderBy:{field:CREATED_AT,direction:DESC})'
-         '{nodes{number title url mergedAt closedAt '
+         '{nodes{number title url mergedAt closedAt headRefName '
          'files(first:80){nodes{path}} comments(last:3){nodes{body}}}}}}')
     code, out = run("gh", "api", "graphql", "-f",
                     "query=" + (q % (json.dumps(owner), json.dumps(name))),
@@ -427,6 +427,7 @@ def past_attempts():
             "number": n["number"],
             "title": title,
             "closed": (n.get("closedAt") or "")[:10],
+            "branch": n.get("headRefName") or "",
             "files": [f["path"] for f in (n.get("files") or {}).get("nodes") or []],
             "why": why[:400],
         })
@@ -450,17 +451,22 @@ def hist_brief(hist):
 COOLDOWN_DAYS = 14
 
 
-def cooling_down(hist, days=COOLDOWN_DAYS):
+def cooling_down(hist, repos, days=COOLDOWN_DAYS):
     """仓库 → 上次被关的日期（冷却期内）。人关一次 PR 就是一次明确否决。
 
     按仓库而不是按文件冷却：panel.go 这种主文件几乎所有改动都会碰，按文件拦会把
     正常的新功能一起拦掉；「这个仓库刚被否过」才是稳定的信号。
+
+    仓库取自 PR 的分支名而不是标题：标题 38e4f3970 起改成人话第一行，不再含仓库名，
+    按标题正则提取的 gate 会让之后每个 PR 都提取不到、冷却永不生效（#145 实测）。
+    分支名是 branch_for 生成的，不随标题口径变。
     """
     cutoff = time.time() - days * 86400
+    slugs = {slug_of(r): r for r in repos}
     cool = {}
     for h in hist:
-        m = re.search(r"借鉴 (\S+) 的实现|吸收 (\S+)@", h["title"])
-        src = (m.group(1) or m.group(2)) if m else ""
+        br = (h.get("branch") or "").rsplit("/", 1)[-1]  # 去掉 autobot/ 前缀
+        src = next((r for s, r in slugs.items() if br.startswith(s + "-")), "")
         if not src:
             continue
         try:
@@ -472,14 +478,18 @@ def cooling_down(hist, days=COOLDOWN_DAYS):
     return {k: (v[1], v[2]) for k, v in cool.items()}
 
 
+def slug_of(src):
+    """owner/repo → 分支名里的那段 slug（branch_for 与冷却判定共用）。"""
+    return re.sub(r"[^a-z0-9-]+", "-", src.lower().replace("/", "-")).strip("-")
+
+
 def branch_for(src, idea, pol):
     """报告内容相同 → 分支名相同 → 同一件事只推一次（land_max 才能落到新工作上）。
 
     shortcut: 去重靠内容 sha1，不比对语义；报告改一个字就是新分支，重复提案只能靠
     人关 PR 兜住，升级点是给报告加稳定的 feature key。
     """
-    slug = re.sub(r"[^a-z0-9-]+", "-", src.lower().replace("/", "-")).strip("-")
-    return f"{pol['branch_prefix']}{slug}-{hashlib.sha1(idea.encode()).hexdigest()[:7]}"
+    return f"{pol['branch_prefix']}{slug_of(src)}-{hashlib.sha1(idea.encode()).hexdigest()[:7]}"
 
 
 def proposal_part(idea):
@@ -594,7 +604,7 @@ def main():
     lines = ["# AutoBot 报告", ""]
     hist = past_attempts()
     if hist:
-        say(lines, f"历史：{len(hist)} 个已关掉的 AutoBot PR（冷却中的仓库 {len(cooling_down(hist))} 个）")
+        say(lines, f"历史：{len(hist)} 个已关掉的 AutoBot PR（冷却中的仓库 {len(cooling_down(hist, repos))} 个）")
 
     if args.phase in ("analyze", "all"):
         todo = shard(repos, args.shard)
@@ -622,7 +632,7 @@ def main():
             return 1
         land_max = int(up.get("land_max") or 2)
         picked, dups, banned = pick_candidates(reports, land_max, pol, branch_exists,
-                                              cooling_down(hist))
+                                              cooling_down(hist, repos))
         # 总决策表：每份报告的去向都留痕，人审时不用回头翻 68 个 job
         say(lines, f"## 决策表（{len(reports)} 份报告，land_max={land_max}）")
         say(lines, "| 仓库 | 值得度 | 摘要 | 决定 |")
