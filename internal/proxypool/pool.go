@@ -153,6 +153,7 @@ type Manager struct {
 	transports map[string]*http.Transport
 	base       *http.Transport
 	dialer     *net.Dialer
+	tlsOver    TLSOverFunc // 经代理的 HTTPS 用它在隧道上握手（SetTLSOver）；nil = net/http 原生握手
 	closed     bool
 	wake       chan struct{}
 	// Shared by periodic and manual probes, including concurrent HTTP handlers.

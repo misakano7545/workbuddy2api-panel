@@ -126,64 +126,73 @@ func NewDNSDialer(servers []string) *net.Dialer {
 // cfg 为 nil 时用最小默认配置；测试注入 InsecureSkipVerify 用自签 httptest
 // 服务器验证整条链路（生产恒 nil）。
 func newTLSDialer(d *net.Dialer, cfg *tls.Config, fp string) func(context.Context, string, string) (net.Conn, error) {
-	insecure := cfg != nil && cfg.InsecureSkipVerify
-	// sniOverride 允许调用方显式指定 SNI（测试把连接指到 127.0.0.1 但仍要发
-	// 真实域名的 SNI，否则 uTLS 对 IP 地址按 RFC 不发 SNI，抓到的 ClientHello
-	// 会少一个扩展、JA3/JA4 全跑偏）。生产 cfg 恒 nil，行为不受影响。
-	sniOverride := ""
-	if cfg != nil {
-		sniOverride = cfg.ServerName
-	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		raw, err := d.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err
 		}
-		host, _, splitErr := net.SplitHostPort(addr)
-		if splitErr != nil {
-			host = addr
-		}
-		if sniOverride != "" {
-			host = sniOverride
-		}
-		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
-		defer cancel()
+		return tlsHandshake(ctx, raw, addr, cfg, fp)
+	}
+}
 
-		// 复刻路径：uTLS 手搓 ClientHello。ALPN 刻意留空——官方 Node 栈就是
-		// 不带 ALPN，这与 Transport 禁 h2 的口径一致（见 newTransport 注释）。
-		if useNodeFingerprint(fp) {
-			uc := utls.UClient(raw, &utls.Config{
-				ServerName:         host,
-				InsecureSkipVerify: insecure,
-				MinVersion:         tls.VersionTLS12,
-			}, utls.HelloCustom)
-			if perr := uc.ApplyPreset(officialHelloSpec()); perr != nil {
-				raw.Close()
-				return nil, fmt.Errorf("tls fingerprint preset: %w", perr)
-			}
-			if herr := uc.HandshakeContext(hctx); herr != nil {
-				raw.Close()
-				return nil, herr
-			}
-			return newHeadOrderConn(uc), nil
-		}
+// TLSOver 在已建好的原始连接上做与直连完全相同的 TLS 握手（同一指纹档位、同一请求头重排）。
+// 代理池用它包住经代理建立的隧道：Transport 一旦配了代理或自定义 DialContext，就不再
+// 调用直连的 DialTLSContext，经代理的流量会退回 Go 原生握手；SOCKS 时更糟，直连的
+// DialTLSContext 会绕过代理直接出网。raw 由调用方建立，握手失败时由本函数关闭。
+func (c *Client) TLSOver(ctx context.Context, raw net.Conn, addr string) (net.Conn, error) {
+	return tlsHandshake(ctx, raw, addr, nil, c.TLSFingerprint)
+}
 
-		// 原生路径：crypto/tls。
-		var tc0 *tls.Config
-		if cfg != nil {
-			tc0 = cfg.Clone()
-		} else {
-			tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
+// tlsHandshake 在 raw 上按指纹档位握手，返回包了请求头重排的明文连接；失败时关闭 raw。
+func tlsHandshake(ctx context.Context, raw net.Conn, addr string, cfg *tls.Config, fp string) (net.Conn, error) {
+	insecure := cfg != nil && cfg.InsecureSkipVerify
+	// cfg.ServerName 允许调用方显式指定 SNI（测试把连接指到 127.0.0.1 但仍要发
+	// 真实域名的 SNI，否则 uTLS 对 IP 地址按 RFC 不发 SNI，抓到的 ClientHello
+	// 会少一个扩展、JA3/JA4 全跑偏）。生产 cfg 恒 nil，行为不受影响。
+	host, _, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		host = addr
+	}
+	if cfg != nil && cfg.ServerName != "" {
+		host = cfg.ServerName
+	}
+	hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+	defer cancel()
+
+	// 复刻路径：uTLS 手搓 ClientHello。ALPN 刻意留空——官方 Node 栈就是
+	// 不带 ALPN，这与 Transport 禁 h2 的口径一致（见 newTransport 注释）。
+	if useNodeFingerprint(fp) {
+		uc := utls.UClient(raw, &utls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: insecure,
+			MinVersion:         tls.VersionTLS12,
+		}, utls.HelloCustom)
+		if perr := uc.ApplyPreset(officialHelloSpec()); perr != nil {
+			raw.Close()
+			return nil, fmt.Errorf("tls fingerprint preset: %w", perr)
 		}
-		tc0.ServerName = host
-		tc0.NextProtos = nil
-		tc := tls.Client(raw, tc0)
-		if herr := tc.HandshakeContext(hctx); herr != nil {
+		if herr := uc.HandshakeContext(hctx); herr != nil {
 			raw.Close()
 			return nil, herr
 		}
-		return newHeadOrderConn(tc), nil
+		return newHeadOrderConn(uc), nil
 	}
+
+	// 原生路径：crypto/tls。
+	var tc0 *tls.Config
+	if cfg != nil {
+		tc0 = cfg.Clone()
+	} else {
+		tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	tc0.ServerName = host
+	tc0.NextProtos = nil
+	tc := tls.Client(raw, tc0)
+	if herr := tc.HandshakeContext(hctx); herr != nil {
+		raw.Close()
+		return nil, herr
+	}
+	return newHeadOrderConn(tc), nil
 }
 
 // SetDNSDialer 把拨号器挂到现役两个 http.Client 上（覆盖 DialContext 与
