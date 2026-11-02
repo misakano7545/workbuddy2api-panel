@@ -6,8 +6,11 @@ name: autobot
 # 不会再触发其它 workflow，PR 上就不会有 binaries 的 test 与四平台构建。
 
 on:
-  schedule:
-    - cron: "30 1 * * *" # UTC 01:30 = 上海 09:30
+  # 定时已停（2026-11-03）：模型网关 anthropic.kunbot.org 回 530/1033（Cloudflare 隧道
+  # 源站断开），每片 analyze 都死在「探活模型网关」，一轮白烧 23 个 job。网关恢复后把
+  # 下面两行取消注释即恢复上海 09:30 的每日跑，别另加 cron。
+  # schedule:
+  #   - cron: "30 1 * * *" # UTC 01:30 = 上海 09:30
   workflow_dispatch:
     inputs:
       repo:
