@@ -615,6 +615,11 @@ def main():
                 p = os.path.join(REPORT_DIR, f)
                 reports.append((report_score(open(p, encoding="utf-8").read()), p))
         reports.sort(reverse=True)
+        if not reports and not args.dry_run:
+            # 分析阶段全挂 / 报告没传过来时这里一份输入都没有，别把「什么都没干」报成绿
+            say(lines, "没有任何输入报告，落地步骤无事可做")
+            write_report(lines)
+            return 1
         land_max = int(up.get("land_max") or 2)
         picked, dups, banned = pick_candidates(reports, land_max, pol, branch_exists,
                                               cooling_down(hist))
