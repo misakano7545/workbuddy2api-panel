@@ -14,6 +14,26 @@ func newTestPanel() *Panel {
 	return New(Config{Version: "test", APIKey: "test-key"})
 }
 
+// 默认拒绝：页面静态资源之外一律要密钥，包括尚未注册的路径。
+// 将来新增路由即便忘了包鉴权，也不会静默公开。
+func TestPanelDefaultDeny(t *testing.T) {
+	p := newTestPanel()
+	for _, path := range []string{"/panel/api/overview", "/panel/api/config", "/panel/api/nonexistent"} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s: code=%d, want 401", path, rec.Code)
+		}
+	}
+	for _, path := range []string{"/panel/", "/panel/app.js", "/panel/theme.js"} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: code=%d, want 200", path, rec.Code)
+		}
+	}
+}
+
 // 面板安全响应头必须覆盖：页面、静态脚本、鉴权失败响应。
 func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 	p := newTestPanel()

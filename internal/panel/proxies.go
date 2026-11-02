@@ -17,15 +17,15 @@ func (p *Panel) proxySnapshot() any {
 }
 
 func (p *Panel) proxyRoutes() {
-	p.mux.HandleFunc("GET /panel/api/proxies", p.withAuth(p.proxies))
-	p.mux.HandleFunc("POST /panel/api/proxies", p.withAuth(p.proxyImport))
-	p.mux.HandleFunc("PATCH /panel/api/proxies/{id}", p.withAuth(p.proxyUpdate))
-	p.mux.HandleFunc("DELETE /panel/api/proxies/{id}", p.withAuth(p.proxyDelete))
-	p.mux.HandleFunc("POST /panel/api/proxies/check", p.withAuth(p.proxyCheck))
-	p.mux.HandleFunc("POST /panel/api/proxies/{id}/check", p.withAuth(p.proxyCheck))
-	p.mux.HandleFunc("PUT /panel/api/proxies/health", p.withAuth(p.proxyHealth))
-	p.mux.HandleFunc("PUT /panel/api/accounts/{uid}/proxy", p.withAuth(p.accountProxy))
-	p.mux.HandleFunc("PUT /panel/api/proxies/realm/{realm}", p.withAuth(p.realmProxy))
+	p.mux.HandleFunc("GET /panel/api/proxies", p.proxies)
+	p.mux.HandleFunc("POST /panel/api/proxies", p.proxyImport)
+	p.mux.HandleFunc("PATCH /panel/api/proxies/{id}", p.proxyUpdate)
+	p.mux.HandleFunc("DELETE /panel/api/proxies/{id}", p.proxyDelete)
+	p.mux.HandleFunc("POST /panel/api/proxies/check", p.proxyCheck)
+	p.mux.HandleFunc("POST /panel/api/proxies/{id}/check", p.proxyCheck)
+	p.mux.HandleFunc("PUT /panel/api/proxies/health", p.proxyHealth)
+	p.mux.HandleFunc("PUT /panel/api/accounts/{uid}/proxy", p.accountProxy)
+	p.mux.HandleFunc("PUT /panel/api/proxies/realm/{realm}", p.realmProxy)
 }
 
 func (p *Panel) proxyReady(w http.ResponseWriter) bool {

@@ -234,81 +234,83 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/theme.js", p.themeScript)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
-	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
+	p.mux.HandleFunc("GET /panel/api/overview", p.overview)
 	p.proxyRoutes()
-	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
-	p.mux.HandleFunc("GET /panel/api/error_summary", p.withAuth(p.errorSummary))
-	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
-	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
-	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
-	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
+	p.mux.HandleFunc("GET /panel/api/logs", p.logsHandler)
+	p.mux.HandleFunc("GET /panel/api/error_summary", p.errorSummary)
+	p.mux.HandleFunc("GET /panel/api/request_metrics", p.requestMetrics)
+	p.mux.HandleFunc("GET /panel/api/request_logs", p.requestLogs)
+	p.mux.HandleFunc("GET /panel/api/credit_history", p.creditHistory)
+	p.mux.HandleFunc("GET /panel/api/models", p.models)
 	// (账号 × 模型) 手动开关：运维显式禁用某账号的某模型（永久语义，仅手动解）。
 	// 与上游触发的临时冷却（6004/11102）正交，且手动优先。
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_toggle", p.withAuth(p.modelToggle))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_toggle", p.modelToggle)
 	// 封禁账号探活：只读探测上游是否已解封，不 revive、不参与选号。
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/probe_ban", p.withAuth(p.accountProbeBan))
-	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
-	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
-	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
-	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
-	p.mux.HandleFunc("POST /panel/api/accounts/add_apikey", p.withAuth(p.addAPIKey))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
-	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.withAuth(p.accountTasks))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.withAuth(p.accountTaskAccept))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.withAuth(p.taskAcceptAll))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.withAuth(p.accountTaskClaim))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.withAuth(p.accountTaskAuto))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
-	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
-	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
-	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
-	p.mux.HandleFunc("GET /panel/api/tasks/jobs", p.withAuth(p.taskJobsHandler))
-	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks/job", p.withAuth(p.taskJobStatus))
-	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
-	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/travel", p.withAuth(p.accountTravel))
-	p.mux.HandleFunc("POST /panel/api/activity_all", p.withAuth(p.activityAll))
-	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.withAuth(p.keepaliveAll))
-	p.mux.HandleFunc("POST /panel/api/balance_all", p.withAuth(p.balanceAll))
-	p.mux.HandleFunc("GET /panel/api/packages", p.withAuth(p.packages))
-	p.mux.HandleFunc("GET /panel/api/balance_history", p.withAuth(p.balanceHistory))
-	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
-	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
-	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
-	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
-	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
-	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
-	p.mux.HandleFunc("POST /panel/api/model_hidden", p.withAuth(p.setModelHidden))
-	p.mux.HandleFunc("POST /panel/api/model_effort", p.withAuth(p.setModelEffort))
-	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))
-	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.checkUpdate))
-	p.mux.HandleFunc("POST /panel/api/update/install", p.withAuth(p.installUpdate))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/probe_ban", p.accountProbeBan)
+	p.mux.HandleFunc("POST /panel/api/login/start", p.loginStart)
+	p.mux.HandleFunc("GET /panel/api/login/poll", p.loginPoll)
+	p.mux.HandleFunc("GET /panel/api/login/regions", p.loginRegions)
+	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.importCockpit)
+	p.mux.HandleFunc("POST /panel/api/accounts/add_apikey", p.addAPIKey)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.accountRevive)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.accountDisable)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.accountPause)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.accountResume)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.accountCheckin)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.accountBalance)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.accountRemove)
+	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.accountTasks)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.accountTaskAccept)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.taskAcceptAll)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.accountTaskClaim)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.accountTaskAuto)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.accountTaskAutoAll)
+	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.tasksScanAll)
+	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.tasksRunQueue)
+	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.tasksQueueStatus)
+	p.mux.HandleFunc("GET /panel/api/tasks/jobs", p.taskJobsHandler)
+	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks/job", p.taskJobStatus)
+	p.mux.HandleFunc("POST /panel/api/checkin_all", p.checkinAll)
+	p.mux.HandleFunc("POST /panel/api/travel_all", p.travelAll)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/travel", p.accountTravel)
+	p.mux.HandleFunc("POST /panel/api/activity_all", p.activityAll)
+	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.keepaliveAll)
+	p.mux.HandleFunc("POST /panel/api/balance_all", p.balanceAll)
+	p.mux.HandleFunc("GET /panel/api/packages", p.packages)
+	p.mux.HandleFunc("GET /panel/api/balance_history", p.balanceHistory)
+	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.schoolVouchers)
+	p.mux.HandleFunc("GET /panel/api/usage", p.usage)
+	p.mux.HandleFunc("POST /panel/api/usage/save", p.usageSave)
+	p.mux.HandleFunc("GET /panel/api/model_probes", p.modelProbes)
+	p.mux.HandleFunc("GET /panel/api/config", p.getConfig)
+	p.mux.HandleFunc("POST /panel/api/config", p.saveConfig)
+	p.mux.HandleFunc("POST /panel/api/model_hidden", p.setModelHidden)
+	p.mux.HandleFunc("POST /panel/api/model_effort", p.setModelEffort)
+	p.mux.HandleFunc("GET /panel/api/update", p.updateStatus)
+	p.mux.HandleFunc("POST /panel/api/update/check", p.checkUpdate)
+	p.mux.HandleFunc("POST /panel/api/update/install", p.installUpdate)
+}
+
+// publicPanelPaths 免鉴权的精确路径：静态页面与脚本本身不含秘密，其余一律要密钥。
+var publicPanelPaths = map[string]struct{}{
+	"/panel/":         {},
+	"/panel/theme.js": {},
+	"/panel/app.js":   {},
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
 // 与 401 错误响应全都带上（API 也可能在浏览器里被直接打开）。
+//
+// 鉴权在这里默认拒绝，而不是逐条包在路由上：逐条包的话，新增一条路由忘了包
+// 就是静默公开；这里的失效方向是「忘了登记白名单 → 401」，看得见。
 func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	p.mux.ServeHTTP(w, r)
-}
-
-// withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
-// api_key 为空时放行。密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求
-// 即用新值（无需重启）。
-func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, p.apiKey()) {
-			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
-			return
-		}
-		next(w, r)
+	if _, ok := publicPanelPaths[r.URL.Path]; !ok && !httpauth.VerifyBearer(r, p.apiKey()) {
+		// 密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求即用新值。
+		writeErr(w, http.StatusUnauthorized, "invalid_api_key")
+		return
 	}
+	p.mux.ServeHTTP(w, r)
 }
 
 // apiKey 当前生效密钥（Live 优先，回落静态字段）。
