@@ -285,7 +285,9 @@ def implement(src, idea, lines):
         f"把它写成标准 unified diff 存进 {patch}，不要动工作区任何文件：\n"
         "--- a/internal/foo.go\n+++ b/internal/foo.go\n@@ -10,6 +10,8 @@\n 上下文行\n-旧行\n+新行\n"
         "只能修改已存在的文件；测试加进已存在的 _test.go。直接写 patch，不要回说明。\n"
-        f"写完再写 autobot-pr.md，只含五行：问题 / 改动 / 位置 / 优缺点 / 影响。\n",
+        f"写完再写 autobot-pr.md，第一段用人话，四行，然后空一行，再接五行细节：\n"
+        "人话四行——一句话说清这 PR 干了什么 / 合了之后日常用法有什么变化（没变化就直说）/ 会不会弄坏现在能用的东西（会就说是哪一处） / 要不要我拍板（比如映射是猜的就得人定）\n"
+        "细节五行：问题 / 改动 / 位置 / 优缺点 / 影响。\n",
         int(os.environ.get("AGENT_IMPLEMENT_TIMEOUT") or 1800), patch)
     if not os.path.isfile(patch):
         say(lines, f"{src}: 实现未产出（退出码 {code}）｜{out}")
@@ -499,6 +501,15 @@ def branch_exists(branch):
                check=False)[0] == 0
 
 
+def pr_title(summary, src):
+    """标题用人话第一行。摘要为空才回落仓库名（旧标题等于没说干什么）。"""
+    for line in (summary or "").splitlines():
+        line = re.sub(r"[*#`]", "", re.sub(r"^[>\-\s]+", "", line)).strip()
+        if line and not line.startswith(("问题", "改动", "位置", "优缺点", "影响")):
+            return "autobot: " + line
+    return f"autobot: 借鉴 {src} 的实现"
+
+
 def land(src, rp, pol, args, lines):
     idea = open(rp, encoding="utf-8").read()
     branch = branch_for(src, idea, pol)
@@ -531,7 +542,7 @@ def land(src, rp, pol, args, lines):
     body = (summary or f"分析报告：`{os.path.basename(rp)}`\n") + \
         "\n- `go build` / `go vet` / `go test ./...` 已通过；合并前请人工确认行为等价。\n"
     run("gh", "pr", "create", "--repo", os.environ["GITHUB_REPOSITORY"], "--base", pol["base"],
-        "--head", branch, "--title", f"autobot: 借鉴 {src} 的实现"[:120],
+        "--head", branch, "--title", pr_title(summary, src)[:120],
         "--body", body, "--label", pol["label"])
     say(lines, f"已开 PR：{branch}")
     run("git", "checkout", "-q", pol["base"])
