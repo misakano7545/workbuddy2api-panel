@@ -150,6 +150,7 @@ jobs:
 
       - name: 分析这一片
         env:
+          GH_TOKEN: ${{ secrets.AUTOBOT_TOKEN }} # past_attempts() 用 gh 读已关 PR，没有它历史恒为空
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
