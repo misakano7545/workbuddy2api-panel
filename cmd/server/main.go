@@ -155,6 +155,7 @@ func main() {
 	p.SetCreditFloorMaxRate(cfg.Pool.CreditFloorMaxRate) // 保底兜底的目录倍率上限（0 = 严格模式）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetReserveCredits(*cfg.Pool.ReserveCredits) // 保留积分：余额低于阈值停止接单（0 = 关闭，缺省 10）
+	p.SetReserveCreditsByRealm(cfg.Pool.ReserveCreditsByRealm)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring, cfg.ExpiringSoonDur)
 	p.SetAccountPriority(cfg.Pool.AccountPriority) // 账号优先级/占比（issue #62）：空表 = 不启用
 	p.SetAccountShare(cfg.Pool.AccountShare)
@@ -891,8 +892,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring, newCfg.ExpiringSoonDur)
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	sch.SetKeepaliveRefreshWindow(newCfg.KeepaliveRefreshWindowDur)
-	p.SetReserveCredits(*newCfg.Pool.ReserveCredits)  // 保留积分热生效（0 = 关闭，缺省 10）
-	p.SetAccountPriority(newCfg.Pool.AccountPriority) // 账号优先级/占比热生效（issue #62）
+	p.SetReserveCredits(*newCfg.Pool.ReserveCredits)              // 保留积分热生效（0 = 关闭，缺省 10）
+	p.SetReserveCreditsByRealm(newCfg.Pool.ReserveCreditsByRealm) // 按域覆盖热生效（issue #147）
+	p.SetAccountPriority(newCfg.Pool.AccountPriority)             // 账号优先级/占比热生效（issue #62）
 	p.SetAccountShare(newCfg.Pool.AccountShare)
 	sch.Reconfigure(scheduler.ScheduleParams{
 		CheckinHours:   newCfg.Schedule.CheckinHours,

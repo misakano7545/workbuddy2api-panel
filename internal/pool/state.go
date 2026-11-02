@@ -669,7 +669,8 @@ func (p *Pool) reserveBlocked(e *entry, modelFree bool) bool {
 	if modelFree {
 		return false
 	}
-	return p.reserveCredits > 0 && e.creditsTotal > 0 && e.credits <= p.reserveCredits
+	t := p.reserveThreshold(e.a.Realm())
+	return t > 0 && e.creditsTotal > 0 && e.credits <= t
 }
 
 // modelFreeOf 报告 (账号域, 模型) 是否免费档：上游目录倍率数值为 0。

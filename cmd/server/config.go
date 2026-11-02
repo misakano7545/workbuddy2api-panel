@@ -377,6 +377,10 @@ type Config struct {
 		// 被用到 0。未配置（键缺席）→ 默认 10；显式写 0 = 关闭；从未查到余额的账号不受影响。
 		// 指针类型用于区分「未配置」（nil → 默认 10）与「显式 0」（关闭）。
 		ReserveCredits *int64 `json:"reserve_credits"`
+		// ReserveCreditsByRealm 按域覆盖上面的阈值（issue #147）：键 "cn"/"global"，
+		// 值为该域阈值（0 = 该域关闭）。场景是国内版留 1000 分养号、国际版只留 350
+		// 分接低流量模型——两域共用一个数值时只能取更严的那个。未写的域用全局值。
+		ReserveCreditsByRealm map[string]int64 `json:"reserve_credits_by_realm"`
 		// AccountPriority / AccountShare 账号级路由偏好（issue #62）。键 = uid（面板账号
 		// 行的短 uid，悬停看完整值）。缺省/空表 = 全部未配置，选号行为与旧版完全一致。
 		//   account_priority: {"<uid>": 1} 小 = 先消耗。配了的号构成「先烧层」，层内号
@@ -1028,6 +1032,17 @@ func (c *Config) normalize() error {
 		c.Pool.ReserveCredits = &v
 	case *c.Pool.ReserveCredits < 0:
 		*c.Pool.ReserveCredits = 0
+	}
+	// 保留积分按域覆盖（issue #147）：非法键剔除，负值归零（0 = 该域关闭）。
+	// 未写的域回落 reserve_credits。删除时不能边遍历边 delete 之外还改值——先收集再改。
+	for k, v := range c.Pool.ReserveCreditsByRealm {
+		if k != "cn" && k != "global" {
+			delete(c.Pool.ReserveCreditsByRealm, k)
+			continue
+		}
+		if v < 0 {
+			c.Pool.ReserveCreditsByRealm[k] = 0
+		}
 	}
 	// 账号优先级/占比（issue #62）：非正值视为「未配置」直接剔除——0 在这里不是有意义的
 	// 配置（不是"最低优先级"，也不是"零占比"），留着会让语义有两种解释。剔除后空表与

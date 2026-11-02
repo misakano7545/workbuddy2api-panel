@@ -84,6 +84,9 @@ type Pool struct {
 	// 任务（签到/猫猫旅行本身赚积分），充值后自动恢复。上游余额耗尽会发提醒短信，
 	// 设阈值即避免被用到 0。
 	reserveCredits int64
+	// reserveByRealm 按域覆盖 reserveCredits（issue #147；键 "cn"/"global"）。
+	// nil/空表 = 全部回落全局阈值。
+	reserveByRealm map[string]int64
 	// accountPriority 账号优先级（uid → 正整数，小 = 先消耗；SetAccountPriority 注入）。
 	// issue #62：配了的账号构成「先烧层」——层内有号可用时未配置的号一律不接单，
 	// 等价于「先把这批号的余额烧完，再换下一批」。硬过滤而非排序：排序只改抽签次序，
@@ -225,6 +228,26 @@ func (p *Pool) SetReserveCredits(v int64) {
 		return
 	}
 	p.reserveCredits = v
+}
+
+// SetReserveCreditsByRealm 注入按域覆盖表（issue #147；键 "cn"/"global"）。
+// nil/空表 = 全部回落全局阈值。config 校验已剔非法键与负值，这里不再防御。
+func (p *Pool) SetReserveCreditsByRealm(m map[string]int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reserveByRealm = m
+}
+
+// reserveThreshold 该域的保留积分阈值：按域覆盖优先，未写回落全局值。
+// 调用方须持锁；realm 为空当 "cn"（与 Auth.Realm 的归一化口径一致）。
+func (p *Pool) reserveThreshold(realm string) int64 {
+	if realm == "" {
+		realm = "cn"
+	}
+	if v, ok := p.reserveByRealm[realm]; ok {
+		return v
+	}
+	return p.reserveCredits
 }
 
 // SetPreferExpiring 注入最早到期优先路由开关与快过期窗口（main 从 config 解析后调用）。
