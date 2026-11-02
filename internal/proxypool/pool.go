@@ -562,8 +562,24 @@ func (m *Manager) selectLocked(uid, realm string) (node, bool, error) {
 			b = rb
 		}
 	}
-	if b.Mode == "direct" || (b.Mode != "fixed" && len(m.data.Nodes) == 0) {
+	// 随机绑定下「一条启用中的代理都没有」= 直连：原来只看节点条数，代理全部被手工
+	// 停用时仍进抽签、count==0，于是每个请求都 503「no healthy proxy available」
+	// （issue #150）。停用即关闭，与「一条代理都没配」同义。
+	// 只对非 fixed 生效：显式钉住的代理不可用时静默直连，等于把本机 IP 暴露给上游。
+	if b.Mode == "direct" {
 		return node{}, false, nil
+	}
+	if b.Mode != "fixed" {
+		anyEnabled := false
+		for _, n := range m.data.Nodes {
+			if n.Enabled {
+				anyEnabled = true
+				break
+			}
+		}
+		if !anyEnabled {
+			return node{}, false, nil
+		}
 	}
 	var selected node
 	count := 0

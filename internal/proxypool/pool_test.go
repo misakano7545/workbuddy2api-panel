@@ -284,8 +284,10 @@ func TestRoutingRandomFixedDirectAndRedirect(t *testing.T) {
 	if err := m.Update(ids[1], Input{Enabled: &off}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := request("u"); !IsError(err) {
-		t.Fatal("exhausted pool silently used direct")
+	// 全部停用 = 代理池关掉，随机绑定回落直连（issue #150）；fixed 仍须报错——
+	// 显式钉住的代理不可用时静默直连会把本机 IP 泄漏给上游（上面那条已验）。
+	if body, err := request("u"); err != nil || body != "direct" {
+		t.Fatalf("all proxies disabled should fall back to direct: %q %v", body, err)
 	}
 }
 

@@ -1851,6 +1851,37 @@ func TestReserveCreditsParksAccount(t *testing.T) {
 	}
 }
 
+// TestReserveCreditsByRealm 按域覆盖（issue #147）：cn 留 1000 养号、global 只留 350
+// 接低流量模型——同一张表里各写各的；未写的域回落全局阈值；0 = 该域关闭。
+func TestReserveCreditsByRealm(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	cnA := &auth.Auth{UID: "cnA"}
+	glA := &auth.Auth{UID: "glA", Domain: "u.workbuddy.ai"} // domain 推断 → global（Auth 无公开的 realm 写入口）
+	glA.BackfillRealm()
+	p.Add(cnA)
+	p.Add(glA)
+	p.SetCredits("cnA", 900, 1000)
+	p.SetCredits("glA", 900, 1000)
+	p.SetReserveCredits(1000)
+	p.SetReserveCreditsByRealm(map[string]int64{"global": 350})
+
+	// global 覆盖生效：900 > 350 → 不停牌；cn 未写 → 用全局 1000 → 停牌。
+	if st, _ := p.Status("glA"); st.ReserveBlocked {
+		t.Fatalf("global 900 应高于覆盖阈值 350: %+v", st)
+	}
+	if st, _ := p.Status("cnA"); !st.ReserveBlocked {
+		t.Fatalf("cn 未写覆盖，900 <= 全局 1000 应停牌: %+v", st)
+	}
+
+	// 覆盖 0 = 该域关闭：global 余额再低也不停牌。
+	p.SetCredits("glA", 1, 100)
+	p.SetReserveCreditsByRealm(map[string]int64{"global": 0})
+	if st, _ := p.Status("glA"); st.ReserveBlocked {
+		t.Fatalf("覆盖 0 应关闭该域阈值: %+v", st)
+	}
+}
+
 func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
