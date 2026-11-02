@@ -24,7 +24,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORT = os.path.join(ROOT, "autobot-report.md")
 REPORT_DIR = "/tmp/autobot-reports"
 UP_DIR = "/tmp/up"
-FORBIDDEN = {".github/workflows/", "AGENTS.md", "config.example.json"}
 # 只在自产提交上用 -c 传身份；写 git config 会污染本机手写提交（真出过事故）
 BOT = ("-c", "user.name=github-actions[bot]",
        "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com")
@@ -133,6 +132,27 @@ def report_score(text):
     return int(m.group(1)) if m else 0
 
 
+def policy_hit(files, text, pol):
+    """policy.never 按路径、policy.off_limits 按内容，命中返回一句说明，否则 ""。
+
+    这两张表写在 AutoBot.yml 里，但在 PR #141 之前没有任何代码读它——「硬禁项」没人拦
+    就等于没有（当时脚本里还留着一个没人用的 FORBIDDEN 常量）。所以闸门必须落在代码里。
+    """
+    for n in (pol.get("never") or []):
+        if "/" not in n and "." not in n:
+            continue            # push_main / merge 这类是动作，不是路径
+        base = n.rstrip("*").rstrip("/")
+        for f in files:
+            if f == base or f.startswith(base + "/"):
+                return f"policy.never 命中 {n}（{f}）"
+    low = (text or "").lower()
+    for r in (pol.get("off_limits") or []):
+        for k in (r.get("match") or []):
+            if str(k).lower() in low:
+                return f"不做清单「{r.get('name')}」命中 {k}"
+    return ""
+
+
 def own_brief():
     """本仓 Go 文件清单：让 agent 判「本仓现状」时有据可依，而不是靠猜。
 
@@ -141,7 +161,7 @@ def own_brief():
     return run("git", "ls-files", "*.go", check=False)[1].splitlines()[:250]
 
 
-def analyze(src, lines):
+def analyze(src, lines, pol):
     """clone → agent 读代码 → 差异报告。返回报告路径（失败为 ""）。"""
     up = up_clone(src)
     if not up:
@@ -159,6 +179,9 @@ def analyze(src, lines):
         if readme:
             f.write("\n## README 摘要\n" + readme + "\n")
         f.write("\n## 本仓 Go 文件清单（写「差异」时对照）\n" + "\n".join(own_brief()) + "\n")
+    rules = pol.get("off_limits") or []
+    ban = ("本仓明确不做的能力（值得度一律 0，也不要写进「适配」）：\n"
+           + "\n".join(f"- {r.get('name')}：{r.get('why', '')}" for r in rules) + "\n") if rules else ""
     task = (
         f"先读 {up_f}。本仓是 WorkBuddy 的 Go 网关（当前目录）。\n"
         "任务：把这个上游仓库与本仓**逐功能一一对照**——逐个功能点判断本仓有没有、"
@@ -174,6 +197,7 @@ def analyze(src, lines):
         "影响: 行为/配置/性能风险\n"
         "「本仓」列必须点名真实 文件:函数；没有就写「缺失」，没核实就写「未核实」。"
         "本仓已有等价实现的项，值得度给 0-1，不要报 3。\n"
+        + ban
     )
     code, out = agent(task, int(os.environ.get("AGENT_ANALYZE_TIMEOUT") or 1800), rp)
     if not os.path.isfile(rp):
@@ -304,7 +328,7 @@ def read_summary():
     return text
 
 
-def finish(src):
+def finish(src, pol):
     """落地闸：外星文件、孤儿实现、build/vet/test 全绿才提交。返回 (ok, 说明)。"""
     status = run("git", "status", "--porcelain", "-uall", check=False)[1].strip()
     if not status:
@@ -328,6 +352,13 @@ def finish(src):
     # 只新增文件、没接线到既有代码 = 孤儿实现：能编译过测试，但行为没变
     if all(f not in tracked for f in changed):
         return False, f"只新增 {changed[:5]}、未接线到既有文件"
+    # 先 add 再按 --cached 取 diff：新增文件不在 git diff HEAD 里，而 PR #141 那种
+    # 「整包加一张密钥表」正是新增文件，只看工作区 diff 会漏掉一半改动。
+    run("git", "add", "-A", check=False)
+    hit = policy_hit([l[3:] for l in status.splitlines()],
+                     run("git", "diff", "--cached", check=False)[1], pol)
+    if hit:
+        return False, f"闸门拦下 —— {hit}"
     for cmd in (["go", "build", "./..."], ["go", "vet", "./..."], ["go", "test", "./..."]):
         code, out = run(*cmd, check=False)
         if code != 0:
@@ -354,17 +385,20 @@ def pick_candidates(reports, land_max, pol, exists):
     名额，否则重复报告白占名额且 push 会因远端已存在而失败（实测连跑两次同一批报告，
     第一条就 RuntimeError 退出、后两条根本没跑）。
     """
-    fresh, dups = [], set()
+    fresh, dups, banned = [], set(), {}
     for score, path in reports:
         if score < 2:
             continue
         src = os.path.basename(path)[:-3].replace("__", "/")
         idea = open(path, encoding="utf-8").read()
-        if exists(branch_for(src, idea, pol)):
+        hit = policy_hit([], idea, pol)
+        if hit:
+            banned[path] = hit
+        elif exists(branch_for(src, idea, pol)):
             dups.add(path)
         else:
             fresh.append((score, path))
-    return fresh[:land_max], dups
+    return fresh[:land_max], dups, banned
 
 
 def branch_exists(branch):
@@ -384,7 +418,7 @@ def land(src, rp, pol, args, lines):
     if not ok:
         run("git", "checkout", "-q", pol["base"])
         return 0
-    ok, why = finish(src)
+    ok, why = finish(src, pol)
     if not ok:
         say(lines, f"{src}: 闸门拦下 —— {why}")
         run("git", "reset", "-q", "--hard", "HEAD")
@@ -438,7 +472,7 @@ def main():
         say(lines, f"分析 {len(todo)} 个仓库（共 {len(repos)}，分片 {args.shard or '全部'}）")
         made = 0
         for src in todo:
-            made += 1 if analyze(src, lines) else 0
+            made += 1 if analyze(src, lines, pol) else 0
         if todo and not made:
             # 一个报告都没产出（典型原因：模型额度 429）必须让 job 红，别假装成功
             say(lines, "本片没有产出任何报告")
@@ -453,7 +487,7 @@ def main():
                 reports.append((report_score(open(p, encoding="utf-8").read()), p))
         reports.sort(reverse=True)
         land_max = int(up.get("land_max") or 2)
-        picked, dups = pick_candidates(reports, land_max, pol, branch_exists)
+        picked, dups, banned = pick_candidates(reports, land_max, pol, branch_exists)
         # 总决策表：每份报告的去向都留痕，人审时不用回头翻 68 个 job
         say(lines, f"## 决策表（{len(reports)} 份报告，land_max={land_max}）")
         say(lines, "| 仓库 | 值得度 | 摘要 | 决定 |")
@@ -465,6 +499,8 @@ def main():
                 why = "落地"
             elif sc < 2:
                 why = "值得度<2"
+            elif rp in banned:
+                why = f"禁区：{banned[rp]}"
             elif rp in dups:
                 why = "同报告已落地（分支已存在）"
             else:

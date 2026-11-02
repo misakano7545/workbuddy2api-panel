@@ -146,3 +146,22 @@ policy:
     - .github/workflows/**
     - AGENTS.md
     - config.example.json
+
+  # 「不做」清单：不是禁动作，是这个仓明确不要的能力。加一条只改这里。
+  # 三处都生效：分析提示词里带上（免得 agent 给 3 分）、报告命中的不落地（省掉 30 分钟实现）、
+  # 改动命中的在提交前驳回（报告写得干净、实现照做的也兜得住）。
+  # match 是不区分大小写的子串，会在报告正文和 diff 里各扫一遍。
+  off_limits:
+    - name: 多密钥 / 多人共用
+      why: 本仓只有一把管理员 api_key（httpauth.VerifyBearer 单串比对），不提供按人分发密钥、按人计量与限额。要多人用就自己搭一层反代。
+      match:
+        - client_keys
+        - clientkeys
+        - ClientKey
+        - api_keys
+        - admin_key_required
+        - 客户端密钥
+        - 多密钥
+        - 多 API Key
+        - 按人计量
+        - 按人限额
