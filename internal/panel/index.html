@@ -1588,6 +1588,17 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <div class="pad">
             <div class="switch"><span class="lb">启用思考档位策略</span>
               <input type="checkbox" name="thinking_enabled"></div>
+            <label class="fld"><span class="lb">默认网关档位</span>
+              <select name="thinking_default_effort">
+                <option value="max">max（最高档）</option>
+                <option value="xhigh">xhigh</option>
+                <option value="high">high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+                <option value="minimal">minimal</option>
+              </select>
+              <span class="hint">模型没配单独档位时用这一档（客户端没传档位时网关补它；网关优先模式下也是改写目标）；模型不支持时落到不高于它的最高支持档。单个模型可在「模型与档位」页的「网关档位」列覆盖</span>
+              <span class="hint" id="effortDowngradeNote" style="color:var(--warn)"></span></label>
             <label class="fld"><span class="lb">网关优先 / 客户端优先</span>
               <div class="radios">
                 <label><input type="radio" name="thinking_mode" value="client">
@@ -1597,7 +1608,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <label><input type="radio" name="thinking_mode" value="all">
                   网关优先 · 档位与开关一起覆盖：连客户端「关闭思考」也改写成开启 + 「网关档位」</label>
               </div>
-              <span class="hint">目标档位在「模型与档位」页每行的「网关档位」下拉里选：选项即该模型「支持的思考档位」原样（可关思考的模型另有 off），默认选中最高档；客户端没传档位时网关用它补，模型不支持所选档时落到不高于它的最高支持档</span></label>
+              <span class="hint">逐模型的目标档在「模型与档位」页每行的「网关档位」列（选项即该模型「支持的思考档位」原样，可关思考的模型另有 off），未单独配置时用上面的「默认网关档位」；模型不支持所选档时落到不高于它的最高支持档</span></label>
           </div>
         </div>
 

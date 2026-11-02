@@ -842,6 +842,8 @@ func (p *Panel) storeModelsCache(entry *modelsCacheEntry) {
 //   - gateway_effort：按当前策略算出的**实际会注入的档位**——先按
 //     model_defaults → 全局 default_effort 求目标档，再由模型真实支持的档位解析
 //     （与出站 applyEffortPolicy 同一套 ResolveGatewayEffort，列表与注入不再漂移）。
+//   - gateway_effort_wanted：解析前的目标档。与 gateway_effort 不同即说明该模型
+//     不支持这一档、会降级（前端据此给「默认网关档位」下拉做实时提示）。
 //
 // 返回浅拷贝切片，缓存条目本身不被改写——并发请求共享同一份缓存。
 func (p *Panel) withLiveFlags(entries []map[string]any) []map[string]any {
@@ -873,8 +875,14 @@ func (p *Panel) withLiveFlags(entries []map[string]any) []map[string]any {
 				realm, bare = "", id
 			}
 			supported, _ := e["supported_efforts"].([]string)
-			if eff := upstream.ResolveGatewayEffort(policy.DefaultEffortFor(realm, bare), supported); eff != "" {
+			want := policy.DefaultEffortFor(realm, bare)
+			if eff := upstream.ResolveGatewayEffort(want, supported); eff != "" {
 				cp["gateway_effort"] = eff
+			}
+			// 目标档独立给出（即使解析不出实际档也保留）：前端拿它与 gateway_effort
+			// 对比，判断「这个模型会降级吗」，进而给默认档下拉做聚合提示。
+			if want != "" {
+				cp["gateway_effort_wanted"] = want
 			}
 		}
 		out[i] = cp
