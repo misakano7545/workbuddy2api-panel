@@ -32,6 +32,12 @@ type cockpitAccount struct {
 	CheckinStreak  int    `json:"checkin_streak"`
 	CreatedAt      int64  `json:"created_at"`
 	LastUsed       int64  `json:"last_used"`
+
+	// EnterpriseID 兼容导出工具的两种写法：cockpit 字段多为 snake_case，
+	// auth 文件与登录接口用 camelCase。任一带值即视为企业版，供签到 /
+	// 成长任务门控与额度口径使用（见 auth.IsEnterprise）。
+	EnterpriseID      string `json:"enterprise_id"`
+	EnterpriseIDCamel string `json:"enterpriseId"`
 }
 
 // importCockpit 接收 cockpit tools 导出的 JSON 文件，批量导入账号到池中。
@@ -100,6 +106,10 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(nickname) == "" {
 			nickname = acc.Email
 		}
+		enterpriseID := strings.TrimSpace(acc.EnterpriseID)
+		if enterpriseID == "" {
+			enterpriseID = strings.TrimSpace(acc.EnterpriseIDCamel)
+		}
 
 		a := &auth.Auth{
 			AccessToken:  at,
@@ -107,6 +117,7 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:    expiresAt,
 			Domain:       acc.Domain,
 			UID:          uid,
+			EnterpriseID: enterpriseID,
 			Nickname:     nickname,
 			FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", uid)),
 		}
@@ -144,7 +155,12 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 				log.Printf("panel: import global trial uid=%s 已领", uid)
 			}
 		} else {
-			if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
+			// 企业版 / 静态 API Key 无个人成长体系：CN 签到端点对企业号直接
+			// 400 code 10001「企业账号不支持该操作」。跳过签到，但下方余额查询
+			// 照常（企业额度走 get-enterprise-user-usage 口径）。
+			if !a.SupportsPersonalGrowth() {
+				log.Printf("panel: import 跳过签到 uid=%s（企业版/API Key 无个人成长体系）", uid)
+			} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 				log.Printf("panel: import checkin uid=%s: %v", uid, err)
 			}
 		}

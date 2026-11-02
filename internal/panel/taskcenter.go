@@ -10,6 +10,7 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -244,6 +245,11 @@ func (p *Panel) RunGrowthQueueNow() (int, string) {
 			continue
 		}
 		if _, fresh, err := p.StartAccountTaskJob(st.UID, "daily"); err != nil {
+			// 企业版 / API Key 的门控在 StartAccountTaskJob 内统一处理；这里静默跳过，
+			// 避免每日排程对无个人成长体系的账号反复报同一行错。
+			if errors.Is(err, errTaskJobNoGrowth) {
+				continue
+			}
 			log.Printf("panel: 定时后台任务 uid=%s: %v", st.UID, err)
 		} else if fresh {
 			started++

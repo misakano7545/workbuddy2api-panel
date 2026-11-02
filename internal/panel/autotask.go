@@ -857,6 +857,9 @@ func (p *Panel) executeAutoTask(a *auth.Auth, act *autoAction) (out autoTaskOutc
 	if a.IsGlobal() {
 		return autoTaskOutcome{Status: "error", Message: globalTaskWriteMessage}
 	}
+	if !a.SupportsPersonalGrowth() {
+		return autoTaskOutcome{Status: "skipped", Message: noPersonalTaskMessage}
+	}
 	if act == nil {
 		return autoTaskOutcome{Status: "skipped", Message: "未配置该任务的自动动作"}
 	}
@@ -1453,6 +1456,11 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 	}
 	if a.IsGlobal() {
 		return []map[string]any{{"task_code": "(全部)", "status": "error", "message": globalTaskWriteMessage}}
+	}
+	// 兜底门控：企业版 / 静态 API Key 无个人成长体系。正常情况下作业入口已拒绝，
+	// 但直接调用 runAutoAll 的路径也必须不发起任何上游请求。
+	if !a.SupportsPersonalGrowth() {
+		return []map[string]any{{"task_code": "(全部)", "status": "skipped", "message": noPersonalTaskMessage}}
 	}
 	if ctx.Err() != nil {
 		return out
