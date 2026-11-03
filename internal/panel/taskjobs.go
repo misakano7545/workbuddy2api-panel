@@ -368,7 +368,12 @@ func (p *Panel) ListTaskJobs() []TaskJob {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]TaskJob, 0, len(m.jobs))
-	for _, job := range m.jobs {
+	for uid, job := range m.jobs {
+		// 账号已删除（issue #155）：作业记录留在表里会让任务中心显示幽灵账号的任务。
+		// 只过滤展示——删号前已经在跑的作业仍在用旧凭证跑完（run 只在启动时校验账号）。
+		if p.cfg.Pool == nil || p.cfg.Pool.AuthByUID(uid) == nil {
+			continue
+		}
 		out = append(out, cloneTaskJob(job))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
