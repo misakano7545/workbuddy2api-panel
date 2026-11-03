@@ -521,10 +521,11 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		} else if claimed {
 			log.Printf("panel: global trial uid=%s 已领", acct.UID)
 		}
-	} else if !a.IsEnterprise() {
-		// 企业版跳过签到：上游 POST /v2/billing/meter/daily-checkin 对企业号
-		// 400 code 10001「企业账号不支持该操作」，发了只会把该错误写进登录返回。
-		// 下方 UserResource 余额查询照常（企业额度走 get-enterprise-user-usage 口径）。
+	} else if a.SupportsPersonalGrowth() {
+		// 无个人成长体系的账号跳过签到：企业号上游 400 code 10001「企业账号不支持该
+		// 操作」，静态 API Key（ck_/pt_）根本没有个人账号身份——发了只会把错误写进登录
+		// 返回。判据与 import / 签到端点 / 成长任务同一把闸（SupportsPersonalGrowth），
+		// 不再单看 IsEnterprise 而漏掉 API Key。下方 UserResource 余额查询照常。
 		if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 			checkinMsg = err.Error()
 		}
