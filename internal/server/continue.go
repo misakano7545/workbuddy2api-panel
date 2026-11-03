@@ -26,6 +26,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"strings"
@@ -78,6 +79,11 @@ type continueReader struct {
 	starvedTried bool // 空截断救援已用（每请求一次；见 tryStarvedRetry）
 
 	lastClientAt time.Time // 上次客户端可见输出/keepalive 的时刻（静默节流）
+
+	// readErr 本段结束时的读错误（nil = 上游 [DONE] 正常收尾）。用于区分「上游
+	// 断流」与「客户端先断开」——两者的 err 都是非 nil，但归因完全不同：后者是
+	// 人走了，不是上游故障，报成「疑似上游断流」会把排障引向错误方向。
+	readErr error
 
 	usage map[string]any // 跨段累计 usage（数字叶子求和）
 	done  bool
@@ -139,10 +145,18 @@ func (r *continueReader) step() {
 	case strings.HasPrefix(trimmed, "data: "):
 		r.frame(strings.TrimPrefix(trimmed, "data: "))
 	case trimmed != "":
+		// 注释/心跳等非 data 行原样透传。必须**补一个空行**恢复帧边界：
+		// 上游的 ": heartbeat\n" 后面跟着的是下一帧的 "data: ..."（本层吞掉了
+		// 上游的分隔空行），不补的话 Responses/Messages 适配器按 "\n\n" 切帧
+		// 会拿到 ": heartbeat\ndata: {...}" 粘连帧——没有 "data: " 前缀整帧
+		// 被丢，恰好吞掉紧随其后的那个 content/tool_calls 增量（实测 GLM 的
+		// 工具调用首帧带 id+name，被吞后整个调用消失、output 变 null）。
 		r.out = append(r.out, line...)
+		r.out = append(r.out, '\n')
 	}
 	if err != nil {
-		r.endSegment(false) // 含 io.EOF 与读错误：交给 endSegment 决定续/降级/结束
+		r.readErr = err // 含 io.EOF 与读错误：交给 endSegment 归因并决定续/降级/结束
+		r.endSegment(false)
 	}
 }
 
@@ -312,12 +326,21 @@ func (r *continueReader) endSegment(sawDone bool) {
 	// 本层早就知道的事实落到客户端可见的协议字段里（本文件开头那条契约：上层看到
 	// 的永远是「一条完整且恰好一个终态」的流；此前只记日志、没落帧）。
 	if r.cutNoFinish(sawDone) {
-		log.Printf("WARN: [continue] acct=%s 段无 finish 结束（疑似上游断流，按截断终态降级）",
-			logfmt.Label(r.acct.UID, r.acct.Nickname))
-		// 有真实输出才补终态：零输出段不能补——否则 StreamHint 的 validEvents 从 0
-		// 变 1，空流本该收敛的 502 观测会被伪装成「有内容的 200」。
-		if r.text.Len() > 0 || r.reason.Len() > 0 || r.toolSeen {
-			r.emitTruncationTerminal()
+		// 归因分流：读错误是「客户端先断开」时，上游只是被动跟着断——报成「疑似
+		// 上游断流」会把排障引向错误方向（实测就踩过：189s 那条被当成上游故障，
+		// 实际是客户端 189s 后放弃、上游随之 cancel）。客户端断开也不补截断终态：
+		// 连接已经没人读了，补帧没意义。真正的上游断流才降级为截断终态。
+		if r.clientGone() {
+			log.Printf("INFO: [continue] acct=%s 客户端先断开，段随之结束（非上游故障，不补截断终态）",
+				logfmt.Label(r.acct.UID, r.acct.Nickname))
+		} else {
+			log.Printf("WARN: [continue] acct=%s 段无 finish 结束（疑似上游断流，按截断终态降级）",
+				logfmt.Label(r.acct.UID, r.acct.Nickname))
+			// 有真实输出才补终态：零输出段不能补——否则 StreamHint 的 validEvents 从 0
+			// 变 1，空流本该收敛的 502 观测会被伪装成「有内容的 200」。
+			if r.text.Len() > 0 || r.reason.Len() > 0 || r.toolSeen {
+				r.emitTruncationTerminal()
+			}
 		}
 	}
 	// 不续/续写失败：回放 tail（含 finish/末端帧，客户端行为与未接线时一致），
@@ -331,6 +354,26 @@ func (r *continueReader) endSegment(sawDone bool) {
 		r.emit(string(raw))
 	}
 	r.done = true
+}
+
+// clientGone 报告本段结束是否由「客户端先断开」引起：ctx 已取消，或读错误是
+// context.Canceled（上游连接被本地 cancel 掉时典型表现）。两者都说明上游只是
+// 被动跟随断连，不是它自己断流。
+//
+// 注意 io.ErrUnexpectedEOF / 网络错误不走这里：那些是上游侧的真实中断。
+func (r *continueReader) clientGone() bool {
+	if r.ctx != nil && r.ctx.Err() != nil {
+		return true
+	}
+	if r.readErr != nil && errors.Is(r.readErr, context.Canceled) {
+		return true
+	}
+	// 上游 body 被本地 cancel 时，读错误常被包成 url.Error / net.OpError，
+	// 底层仍是 context.Canceled。
+	if r.readErr != nil && strings.Contains(r.readErr.Error(), "context canceled") {
+		return true
+	}
+	return false
 }
 
 // cutNoFinish 本段是否「没有任何正常收尾就结束」（上游断流）：既没给 finish_reason、
@@ -371,6 +414,11 @@ func (r *continueReader) emitTruncationTerminal() {
 func (r *continueReader) canContinue(sawDone bool) bool {
 	switch {
 	case r.seg >= maxContinueSegments-1:
+		return false
+	case r.clientGone():
+		// 客户端已断连：ctx 取消后重试请求发不出去，只会白烧一次上游额度。
+		// 实测就踩过（15:31:24 那条 seg=1 续写失败 context canceled）——门禁
+		// 在发请求前就拦掉，别让日志里出现一次注定失败的续写。
 		return false
 	case r.errSeen:
 		return false
