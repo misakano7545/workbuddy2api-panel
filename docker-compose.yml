@@ -1,12 +1,15 @@
 services:
   wb2api:
-    build:
-      context: .
-      # Dockerfile 已支持 ARG APP_VERSION，但这里没传，导致自建镜像的
-      # appVersion 回落 dev：面板显示 vdev，且 updater 解析失败会把
-      # UpdateAvailable 恒判为 true。在 .env 里写 APP_VERSION 即可。
-      args:
-        APP_VERSION: ${APP_VERSION:-dev}
+    # 默认使用上游预编译镜像：docker compose pull && docker compose up -d --no-build。
+    # latest 跟随 main；固定版本可用 :2026.11.1.905（镜像标签不带 v）。
+    image: ghcr.io/misakano7545/workbuddy2api-panel:latest
+    # 源码构建：注释 image，取消下面 build 段的注释，
+    # 再 git pull && docker compose up -d --build；两种方式二选一。
+    # build:
+    #   context: .
+    #   args:
+    #     APP_VERSION: ${APP_VERSION:-dev}
+    # 自建版本默认 dev；如需版本比较，在 .env 设置 APP_VERSION（例如 2026.11.3.820）。
     container_name: workbuddy2api
     restart: unless-stopped
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
