@@ -44,8 +44,15 @@ func TestUpdateStatusAndUnsupportedInstall(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Code != http.StatusOK || status.CurrentVersion != "dev" || status.CanInstall || !status.AutoEnabled || status.AutoTime != "06:30" {
+	if rec.Code != http.StatusOK || status.CurrentVersion != "dev" || status.CurrentKnown || status.CanInstall || !status.AutoEnabled || status.AutoTime != "06:30" {
 		t.Fatalf("unexpected status: %d %+v", rec.Code, status)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["current_known"] != false {
+		t.Fatalf("API must expose current_known=false: %s", rec.Body.String())
 	}
 	req = httptest.NewRequest(http.MethodPost, "/panel/api/update/install", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -64,12 +71,13 @@ func TestUpdateFrontendStates(t *testing.T) {
 	script := `
 const fs = require('fs'), vm = require('vm'), assert = require('assert');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const nodes = new Map();
-let response, fail = false, navigated;
+const nodes = new Map(), toasts = [];
+let response, fail = false, navigated, opened;
 const ctx = {
   $: id => { if (!nodes.has(id)) nodes.set(id, {textContent:'', scrollIntoView(){}}); return nodes.get(id); },
   api: async () => { if(fail) throw Error('offline'); return response; },
-  toast(){}, confirm: () => true, go: v => { navigated = v; }
+  toast: (...args) => toasts.push(args), confirm: () => true, go: v => { navigated = v; },
+  open: (...args) => { opened = args; }
 };
 vm.createContext(ctx);
 vm.runInContext('let updateData = null, updateBusy = false;\n' +
@@ -91,6 +99,52 @@ vm.runInContext('let updateData = null, updateBusy = false;\n' +
   assert(nodes.get('updateNote').textContent.includes('checksum mismatch'));
   ctx.renderUpdateStatus({...response, can_install:false});
   assert.equal(nodes.get('btnUpdateInstall').hidden, true, 'unsupported platform hides install');
+  const knownResponse = response;
+  for (const current_version of ['dev', 'vdev', '', 'v1.2.3', 'v2026.11.3', '2026.11.1.0905']) {
+    response = {current_version, current_known:false, latest_version:'2026.11.1.905',
+      update_available:false, can_install:false,
+      release_url:'https://github.com/example/project/releases/tag/v2026.11.1.905'};
+    await ctx.checkForUpdates();
+    assert.equal(nodes.get('navUpdate').hidden, true, 'unknown build hides update badge');
+    assert.equal(nodes.get('navUpdate').title, '');
+    assert.equal(nodes.get('btnUpdateInstall').hidden, true);
+    assert.equal(nodes.get('btnUpdateRelease').hidden, false, 'unknown build keeps Release link');
+    assert(nodes.get('updateNote').textContent.includes('无法比较'));
+    assert(nodes.get('updateNote').textContent.includes('最新 Release v2026.11.1.905'));
+    assert.equal(toasts.at(-1)[0], nodes.get('updateNote').textContent);
+    assert(!toasts.at(-1)[0].includes('已是最新版本'), 'unknown must not mean up to date');
+    if (!current_version || current_version.replace(/^v/, '') === 'dev') {
+      assert.equal(nodes.get('navVer').textContent, 'dev');
+      assert(nodes.get('updateNote').textContent.includes('开发构建'));
+    } else {
+      assert(!nodes.get('updateNote').textContent.includes('开发构建'), 'invalid release is not necessarily a dev build');
+    }
+    ctx.openLatestRelease();
+    assert.equal(opened[0], response.release_url);
+    assert.equal(opened[2], 'noopener');
+    ctx.renderUpdateStatus({...response, release_url:''});
+    assert.equal(nodes.get('btnUpdateRelease').hidden, true, 'no URL means no Release button');
+    ctx.renderUpdateStatus({...response, latest_version:'', release_url:''});
+    assert(!nodes.get('updateNote').textContent.includes('最新'));
+    ctx.renderUpdateStatus({...response, last_error:'offline'});
+    assert.equal(nodes.get('updateNote').textContent, '更新失败：offline');
+    ctx.renderUpdateStatus({...response, last_error:'offline', installing:true});
+    assert.equal(nodes.get('updateNote').textContent, '正在准备更新…');
+    assert.equal(nodes.get('btnUpdateCheck').disabled, true);
+    ctx.renderUpdateStatus(response);
+  }
+  for (const current_version of ['2026.11.1.905', '2026.11.2.2117']) {
+    response = {...response, current_version, current_known:true};
+    await ctx.checkForUpdates();
+    assert.equal(nodes.get('navUpdate').hidden, true);
+    assert.equal(nodes.get('btnUpdateRelease').hidden, true);
+    assert.equal(toasts.at(-1)[0], '当前已是最新版本');
+  }
+  response = {...knownResponse, current_known:true};
+  await ctx.checkForUpdates();
+  assert.equal(nodes.get('navUpdate').hidden, false);
+  assert.equal(nodes.get('btnUpdateInstall').hidden, false);
+  assert.equal(toasts.at(-1)[0], '发现新版本 v' + response.latest_version);
   response = {status:{...response, installing:true}};
   ctx.renderUpdateStatus(response.status);
   assert.equal(nodes.get('btnUpdateInstall').disabled, true);

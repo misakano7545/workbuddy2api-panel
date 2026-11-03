@@ -686,9 +686,15 @@ function displayVersion(version) {
   return value === 'dev' ? 'dev' : 'v' + value;
 }
 
+function unknownVersionNote(update) {
+  const label = displayVersion(update.current_version) === 'dev' ? '开发构建 · 无法比较版本' : '当前版本无法比较';
+  return label + (update.latest_version ? ' · 最新 Release v' + update.latest_version : '');
+}
+
 function renderUpdateStatus(update) {
   if (!update) return;
   updateData = update;
+  const unknown = update.current_known === false;
   const local = displayVersion(update.current_version);
   $('navSub').textContent = local;
   $('navVer').textContent = local;
@@ -700,6 +706,8 @@ function renderUpdateStatus(update) {
     note.textContent = '正在准备更新…';
   } else if (update.last_error) {
     note.textContent = '更新失败：' + update.last_error;
+  } else if (unknown) {
+    note.textContent = unknownVersionNote(update);
   } else if (update.update_available) {
     note.textContent = '发现新版本 v' + update.latest_version + (update.can_install ? '' : ' · 请手动更新');
   } else if (update.latest_version) {
@@ -709,7 +717,7 @@ function renderUpdateStatus(update) {
   }
   $('btnUpdateInstall').hidden = !update.update_available || !update.can_install;
   $('btnUpdateInstall').disabled = updateBusy || !!update.installing;
-  $('btnUpdateRelease').hidden = !update.update_available || !!update.can_install || !update.release_url;
+  $('btnUpdateRelease').hidden = (!update.update_available && !unknown) || !!update.can_install || !update.release_url;
   $('btnUpdateCheck').disabled = updateBusy || !!update.installing;
 }
 
@@ -722,7 +730,10 @@ async function checkForUpdates() {
   try {
     const update = await api('update/check', { method: 'POST' });
     renderUpdateStatus(update);
-    toast(update.update_available ? '发现新版本 v' + update.latest_version : '当前已是最新版本', update.update_available ? 'ok' : '');
+    let message = '当前已是最新版本';
+    if (update.current_known === false) message = unknownVersionNote(update);
+    else if (update.update_available) message = '发现新版本 v' + update.latest_version;
+    toast(message, update.update_available ? 'ok' : '');
   } catch (e) {
     try { renderUpdateStatus(await api('update')); } catch (_) {}
     toast('检查更新失败：' + e.message, 'err');
