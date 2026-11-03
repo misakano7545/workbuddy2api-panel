@@ -105,7 +105,8 @@ func IsEffortLevel(s string) bool {
 // ResolveGatewayEffort 把愿望档（"max" / "high" / …）解析成模型实际支持的档位：
 //   - off/none/disabled → "off"（关闭思考，调用方转到 thinking 开关处理）；
 //   - ""/"max" → 支持列表中的最高档（列表里没有可识别档位时取最后一项）；
-//   - 具体档位 → 支持则原样；不支持取 ≤ 该档的最高支持档；没有更低的则取最低档；
+//   - 具体档位 → 支持则原样；不支持取 ≤ 该档的最高支持档；没有更低的正档则取最低
+//     **正**档（off 只作为显式目标，不参与降级——否则「要弱一档」会静默变成「关掉思考」）；
 //   - 无法识别的愿望档 / 空支持列表 → ""（调用方不改写）。
 func ResolveGatewayEffort(want string, supported []string) string {
 	want = strings.ToLower(strings.TrimSpace(want))
@@ -139,6 +140,15 @@ func ResolveGatewayEffort(want string, supported []string) string {
 		}
 		if strings.EqualFold(strings.TrimSpace(s), want) {
 			return s
+		}
+		// off 不是可降级的档位，只作为**显式**的「关闭思考」目标（上面 isOffEffort
+		// 已单独处理）。留着它参与降级会造出静默的破坏性行为：glm-5.2 /
+		// deepseek-v4-pro 的支持列表是 [off, high, xhigh]，默认档填 medium 或 low
+		// 时「没有更低的正档」会落到 off —— 操作员想要弱一档，拿到的是把该模型的
+		// 思考完全关掉，而面板上显示的还是 medium。越过 off 后取最低正档（high）。
+		// 与 normalizeReasoningEffort 的口径一致：off 只由客户端显式表达。
+		if idx == effortRank[EffortOff] {
+			continue
 		}
 		if idx < lowestRank {
 			lowest, lowestRank = s, idx
