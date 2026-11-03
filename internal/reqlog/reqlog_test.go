@@ -1,8 +1,10 @@
 package reqlog
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -201,5 +203,78 @@ func TestArchivePruneHonorsSize(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != "requests-2026-09-22.jsonl" {
 		t.Fatalf("remaining = %+v, want newest file only", entries)
+	}
+}
+
+// 一条超长事件行不能把整个视图读废。
+//
+// 现场：开启 logging.request_archive_context 后，带 base64 图片的请求把 Event.Context
+// 撑到 1,098,299 字节；旧实现用 bufio.Scanner（上限 1<<20），超限时 readFile 直接把
+// bufio.ErrTooLong 上抛，面板「请求事件日志」整页 500，导出 JSON 也废。
+//
+// 现在：超长行只丢这一行，同文件里其它事件照常返回，并给出跳过条数。
+func TestReadFileSkipsOversizedLine(t *testing.T) {
+	old := eventLineMaxBytes
+	eventLineMaxBytes = 4 << 10 // 测试用的小上限，免得造 16 MB 文件
+	defer func() { eventLineMaxBytes = old }()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requests-2026-11-03.jsonl")
+	base := time.Date(2026, 11, 3, 10, 0, 0, 0, time.Local)
+
+	var b strings.Builder
+	appendEvent := func(e Event) {
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		b.Write(raw)
+		b.WriteByte('\n')
+	}
+	appendEvent(Event{Time: base, RequestID: "before", Status: 200, OK: true, Outcome: OutcomeSuccess})
+	// 模拟「开了上下文归档 + 请求带图」：Context 是 8 KB 的 base64 串，整行远超上限。
+	appendEvent(Event{
+		Time: base.Add(time.Second), RequestID: "huge", Status: 200, OK: true, Outcome: OutcomeSuccess,
+		Context: json.RawMessage(`"` + strings.Repeat("A", 8<<10) + `"`),
+	})
+	appendEvent(Event{Time: base.Add(2 * time.Second), RequestID: "after", Status: 200, OK: true, Outcome: OutcomeSuccess})
+
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	rows, skipped, err := readFile(path, Filter{})
+	if err != nil {
+		t.Fatalf("readFile 返回错误（整页会 500）：%v", err)
+	}
+	if skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", skipped)
+	}
+	if len(rows) != 2 || rows[0].RequestID != "before" || rows[1].RequestID != "after" {
+		t.Fatalf("rows = %+v, want before + after（超长行只丢自己）", rows)
+	}
+}
+
+// 没超上限的长行（这里 8 KB > 2 KB 上限之外的对照组）必须正常解析：
+// 上限只是防病态输入，不是把「大一点但正常」的事件也丢掉。
+func TestReadFileKeepsLargeButAllowedLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requests-2026-11-03.jsonl")
+	ctx := json.RawMessage(`"` + strings.Repeat("A", 512<<10) + `"`)
+	e := Event{
+		Time:      time.Date(2026, 11, 3, 11, 0, 0, 0, time.Local),
+		RequestID: "big", Status: 200, OK: true, Outcome: OutcomeSuccess, Context: ctx,
+	}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	rows, skipped, err := readFile(path, Filter{})
+	if err != nil || skipped != 0 || len(rows) != 1 || rows[0].RequestID != "big" {
+		t.Fatalf("rows=%d skipped=%d err=%v，512 KB 的行在 16 MB 上限下应照常读到", len(rows), skipped, err)
 	}
 }
