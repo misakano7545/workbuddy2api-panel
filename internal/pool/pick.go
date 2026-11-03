@@ -557,20 +557,27 @@ func (p *Pool) expiringUrgency(e *entry, now time.Time) float64 {
 
 // routingWeightOf 在普通账号权重上叠加紧迫度倍率。prefer_expiring=false 或账号无
 // 有效快过期批次时，结果与旧 weightOf 完全一致（不降权、不叠倍率）。
+//
+// 开启到期加权**永不低于关闭时的权重**——这是本函数的第一条不变量。梯度生效时
+// 余额项被压到 expiringCreditScale（credits 项 10 → 2），基础权重最多降到约 1/3.7；
+// 而窗口边缘的紧迫度只有 expiringUrgencyMin(1.5)，两者相乘 (1+2)×1.5=4.5 远低于
+// 原权重 (1+10)=11。结果就是「只要落在窗口最后 22% 里，开了比不开还差」——勾了
+// 「快过期积分优先」反而更少被选中。取 max 把它收口成「只加不减」的纯增益。
 func (p *Pool) routingWeightOf(e *entry, maxCredits int64, now time.Time) float64 {
+	normal := p.weightOf(e, maxCredits, now)
 	if !p.preferExpiring {
-		return p.weightOf(e, maxCredits, now)
+		return normal
 	}
 	u := p.expiringUrgency(e, now)
 	if u == 1 {
-		return p.weightOf(e, maxCredits, now)
+		return normal
 	}
 	// 未注入窗口（u 走固定倍率回退）= 兼容口径：只叠倍率、不降权，与旧实现逐字节一致。
-	scale := 1.0
-	if p.expiringWindow > 0 {
-		scale = expiringCreditScale // 梯度生效：紧迫度为主轴、余额为次轴
+	if p.expiringWindow <= 0 {
+		return normal * u
 	}
-	return p.weightOfScaled(e, maxCredits, now, scale) * u
+	// 梯度生效：紧迫度为主轴、余额为次轴（expiringCreditScale），但不低于基线。
+	return math.Max(normal, p.weightOfScaled(e, maxCredits, now, expiringCreditScale)*u)
 }
 
 // weightScale 权重定点放大：int64 累加后抽签，保持随机源注入（randInt64N）语义不变。

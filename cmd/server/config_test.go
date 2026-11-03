@@ -199,7 +199,7 @@ func TestNewPoolConfigDefaults(t *testing.T) {
 	if c.Pool.IdleWeightPerHour != 0.5 || c.Pool.IdleWeightMax != 5.0 {
 		t.Errorf("idle weights=%v/%v", c.Pool.IdleWeightPerHour, c.Pool.IdleWeightMax)
 	}
-	if !c.Pool.PreferExpiring || c.ExpiringSoonDur != 7*24*time.Hour {
+	if !c.Pool.PreferExpiring || c.ExpiringSoonDur != 30*24*time.Hour {
 		t.Errorf("expiring defaults: enabled=%v window=%v", c.Pool.PreferExpiring, c.ExpiringSoonDur)
 	}
 	if c.SoftRateMaxDur.Hours() != 2 {

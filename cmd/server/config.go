@@ -357,9 +357,10 @@ type Config struct {
 		// 不按到期时间排序、与批次金额无关（issue #101 对齐实现口径）。
 		// 关闭后完全不使用到期信息选号。
 		PreferExpiring bool `json:"prefer_expiring"`
-		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到/余额刷新时，到期时间在
-		// 此窗口内的批次令账号命中上述 ×3 加权；窗口开大 → 命中账号变多、
+		// ExpiringSoon 快过期积分窗口（如 "720h"=30天）：签到/余额刷新时，到期时间在
+		// 此窗口内的批次令账号命中上述加权；窗口开大 → 命中账号变多、
 		// 偏好被稀释。空/0 = 禁用该加权门槛。
+		// 窗口外的批次完全不参与：账号最早批次在窗口外时即使它最近到期也不加权。
 		ExpiringSoon string `json:"expiring_soon"`
 		// CostExploreInterval costTier 条件探索窗口（issue #136 方案 a′）：tier 0
 		// 垄断层存在且 tier 1 有成员时，距上次探索 ≥ 窗口则本次 pick 生效层切
@@ -552,7 +553,11 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.PreferExpiring = true
-	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
+	// 快过期窗口默认 30 天。7 天太窄：奖励积分的批次到期日普遍排在 2～4 周后，
+	// 窗口内常常一个号都不命中，加权形同未开（实测三号池最早批次 22/25/27 天后，
+	// credits_expiring 全 0，选号退化成普通加权）。窗口内是相对紧迫度，放宽不会
+	// 让紧迫度失真，只是把「今天到期 vs 四周后到期」也纳入同一条曲线。
+	c.Pool.ExpiringSoon = "720h"
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
 	// 窗口用量调度默认 1h（issue #112：热点号降权，把流量摊给闲置号）；"0" 关停。
