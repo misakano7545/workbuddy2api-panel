@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -263,7 +264,10 @@ func (m *Manager) Do(client *http.Client, req *http.Request, uid, realm string) 
 		} else if errors.Is(err, errProxyAuth) {
 			reason = "proxy authentication failed"
 		}
-		tr.CloseIdleConnections()
+		if !errors.Is(err, context.Canceled) {
+			// 调用方自己取消不说明代理有问题，不清节点上别的请求能复用的空闲连接。
+			tr.CloseIdleConnections()
+		}
 		return nil, &Error{ProxyID: n.ID, Reason: reason, cause: err}
 	}
 	if resp.StatusCode == http.StatusProxyAuthRequired {
@@ -278,15 +282,27 @@ type proxyBody struct {
 	io.ReadCloser
 	id        string
 	transport *http.Transport
+	closed    atomic.Bool
 }
 
+// Read 读响应体时出了网络错误，认为经这个节点的连接可能都坏了，清掉节点的空闲连接。
+// 调用方自己造成的错误不算：取消了请求，或 Close 之后又读（net/http 回「read on closed response
+// body」，是未导出的错误值，所以靠自己记下是否已关闭）。误清一次就白白丢掉后面请求能复用的连接。
 func (b *proxyBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if err != nil && err != io.EOF {
+		if b.closed.Load() || errors.Is(err, context.Canceled) {
+			return n, err
+		}
 		b.transport.CloseIdleConnections()
 		err = &Error{ProxyID: b.id, Reason: "proxy response interrupted", cause: err}
 	}
 	return n, err
+}
+
+func (b *proxyBody) Close() error {
+	b.closed.Store(true)
+	return b.ReadCloser.Close()
 }
 
 // Probe uses a separate total deadline and never carries account headers or cookies.
