@@ -3,6 +3,19 @@
 const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme';
 /* 账号备注的本机键（模块级声明放顶部，避开 TDZ）。 */
 const LS_REMARKS = 'wb2api.remarks.v1';
+/* 下拉框记忆（issue #160）的单一键：日志范围、模型排序这类纯 UI 偏好存一份 JSON。
+   写不进去（隐私模式 / 配额满）就当没设过——偏好丢了不影响功能，不能因此抛异常。 */
+const LS_PREF = 'wb2api.pref.v1';
+function prefGet(k) {
+  try { return (JSON.parse(localStorage.getItem(LS_PREF)) || {})[k] || ''; } catch (e) { return ''; }
+}
+function prefSet(k, v) {
+  try {
+    const m = JSON.parse(localStorage.getItem(LS_PREF)) || {};
+    if (v) m[k] = v; else delete m[k];
+    localStorage.setItem(LS_PREF, JSON.stringify(m));
+  } catch (e) { /* 偏好丢失可接受 */ }
+}
 let remarksCache = null;
 let proxyData = null, proxyPage = 1, proxyLoading = false, proxyEditID = null, proxySettingsDirty = false;
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
@@ -11,7 +24,7 @@ let overviewData = null, cfgLoaded = null, updateData = null, updateBusy = false
 let logPin = true, loginState = null, loginTimer = null, loginStartAt = 0;
 let refTimer = null;
 /* 视图级筛选状态（模块级声明放在文件顶部，避免顶层 go() 早于声明执行时踩 TDZ）。 */
-let mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'default' };
+let mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: prefGet('mdSort') || 'default' };
 /* 收纳行（「其余 N 个账号，展开」）的展开状态。必须存在 DOM 之外：账号池/任务中心视图
    每 5s 轮询重建 tbody，只把状态放在 aria-expanded / hidden 里会被下一轮渲染收回
    （表现为点「展开」后什么都不点又自动收起）。键 = tbody id。 */
@@ -482,6 +495,24 @@ setTimeout(() => {
 /* ── 账号池 ───────────────────────────────────────────────────────── */
 let accRealmFilter = 'all';
 let lastAccountsList = [];
+/* 分组筛选（issue #159）：'' = 全部分组。lastVisibleAccounts 是当前表格真正渲染的行，
+   「组内批量」只对它生效——作用域与用户眼前看到的行一致，不会误伤被筛掉的账号。 */
+let accGroupFilter = '';
+let lastVisibleAccounts = [];
+
+/* syncGroupFilter 按当前账号列表重建分组下拉（组是自由标签，没有独立的组表可查）。
+   选中值不在新列表里就退回「全部分组」——否则筛到一个已清空的组会看到永远空表。 */
+function syncGroupFilter() {
+  const sel = $('accGroupFilter');
+  if (!sel) return;
+  const groups = [...new Set(lastAccountsList.map(s => s.group).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'zh'));
+  if (accGroupFilter && !groups.includes(accGroupFilter)) accGroupFilter = '';
+  setHTML(sel, '<option value="">全部分组</option>' + groups.map(g =>
+    '<option value="' + esc(g) + '">' + esc(g) + ' (' +
+    lastAccountsList.filter(s => s.group === g).length + ')</option>').join(''));
+  sel.value = accGroupFilter;
+}
 
 function renderAccounts(list) {
   lastAccountsList = Array.isArray(list) ? list : [];
@@ -508,10 +539,20 @@ function renderAccounts(list) {
   } else if (accRealmFilter === 'global') {
     filtered = lastAccountsList.filter(s => s.realm === 'global');
   }
+  syncGroupFilter();
+  if (accGroupFilter) {
+    filtered = filtered.filter(s => (s.group || '') === accGroupFilter);
+  }
+  lastVisibleAccounts = filtered;
+  // 组内批量只在「筛到某一组」时才露出来：全部分组下这几个按钮等于第二个「全部签到」，
+  // 白占位还容易点错作用域。
+  if ($('accGroupActions')) $('accGroupActions').hidden = !accGroupFilter;
 
   if (!filtered.length) {
     if (!total) {
       setHTML(tb, '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
+    } else if (accGroupFilter) {
+      setHTML(tb, '<tr><td colspan="9"><div class="empty"><div class="big">分组「' + esc(accGroupFilter) + '」下没有账号</div>在「备注」里给账号填上分组后就会出现在这里</div></td></tr>');
     } else if (accRealmFilter === 'cn') {
       setHTML(tb, '<tr><td colspan="9"><div class="empty"><div class="big">暂无国内版账号</div>当前账号池内均为国际版账号（共 ' + globalCnt + ' 个）</div></td></tr>');
     } else if (accRealmFilter === 'global') {
@@ -912,6 +953,44 @@ if ($('accRealmTabs')) {
     renderAccounts(lastAccountsList);
   });
 }
+if ($('accGroupFilter')) {
+  $('accGroupFilter').onchange = () => {
+    accGroupFilter = $('accGroupFilter').value;
+    renderAccounts(lastAccountsList);
+  };
+}
+/* 组内批量（issue #159）：作用域 = 当前表格里可见的行（lastVisibleAccounts），
+   逐号打已有的单号接口——不新增批量端点，也不改调度器。签到跳过企业版/静态 Key
+   与已禁用号：它们的签到端点注定 4xx，统计里不该算失败。 */
+const GROUP_ACT = {
+  checkin: { verb: '签到', ok: s => !s.enterprise && !s.api_key && !s.disabled },
+  pause: { verb: '暂停选号', ok: s => !s.paused && !s.disabled },
+  resume: { verb: '恢复选号', ok: s => s.paused },
+};
+if ($('accGroupActions')) {
+  $('accGroupActions').addEventListener('click', async ev => {
+    const b = ev.target.closest('button[data-gact]');
+    if (!b) return;
+    const act = GROUP_ACT[b.dataset.gact];
+    if (!act) return;
+    const targets = lastVisibleAccounts.filter(act.ok);
+    if (!targets.length) { toast('当前分组里没有需要「' + act.verb + '」的账号', 'warn'); return; }
+    // 恢复选号把号推回流量池、暂停选号把它撤出来，都影响在线请求，先确认再动手。
+    if (b.dataset.gact !== 'checkin' &&
+        !confirm('对分组「' + accGroupFilter + '」的 ' + targets.length + ' 个账号执行「' + act.verb + '」？')) return;
+    b.disabled = true;
+    let ok = 0;
+    const bad = [];
+    for (const s of targets) {
+      try { await api('accounts/' + encodeURIComponent(s.uid) + '/' + b.dataset.gact, { method: 'POST' }); ok++; }
+      catch (e) { bad.push((s.nickname || String(s.uid).slice(0, 8)) + '：' + e.message); }
+    }
+    b.disabled = false;
+    toast('组内' + act.verb + '：成功 ' + ok + ' 个' +
+      (bad.length ? '，失败 ' + bad.length + ' 个（' + bad[0] + '）' : ''), bad.length ? 'warn' : 'ok');
+    loadOverview(true);
+  });
+}
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
 /* 实测上限标注：scripts/probe_max_tokens.py --panel-out 写入探测结果，
@@ -1304,6 +1383,7 @@ function resetModelFilter() {
   mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'default' };
   $('mdQ').value = ''; $('mdRealm').value = ''; $('mdCap').value = '';
   $('mdEffort').value = ''; $('mdPromo').value = ''; $('mdSort').value = 'default';
+  prefSet('mdSort', '');
   renderModels();
 }
 
@@ -1316,7 +1396,13 @@ $('mdQ').oninput = () => {
 for (const [id, key] of [['mdRealm', 'realm'], ['mdCap', 'cap'], ['mdEffort', 'effort'], ['mdPromo', 'promo'], ['mdSort', 'sort']]) {
   const el = $(id);
   if (!el) continue;
-  el.onchange = () => { mdFilter[key] = el.value; renderModels(); };
+  // 排序方式记住上次选择（issue #160）：其余筛选项是一次性查询，排序是长期偏好。
+  if (key === 'sort' && mdFilter.sort) el.value = mdFilter.sort;
+  el.onchange = () => {
+    mdFilter[key] = el.value;
+    if (key === 'sort') prefSet('mdSort', el.value === 'default' ? '' : el.value);
+    renderModels();
+  };
 }
 $('mdReset').onclick = resetModelFilter;
 $('btnModels').onclick = () => loadModels(true);
@@ -4190,14 +4276,20 @@ function storeRemarks(map) {
 /* 编辑器的行来自 overview 缓存（账号池加载过就有），另外补上「已有备注但当前列表里
    没有」的键，避免账号被移除后备注看起来凭空消失。 */
 function remarkFormRows() {
+  // key = uid 前 8 位（备注映射的键）；uid 保留全值，分组要打真接口按完整 uid 走；
+  // inPool=false 的行是「账号已不在池里、但本机还留着备注」的孤儿，只能改备注。
   const rows = ((overviewData && overviewData.accounts) || [])
-    .map(s => ({ uid: remarkKey(s.uid), who: s.nickname || remarkKey(s.uid) }))
-    .filter(r => r.uid);
+    .map(s => ({ key: remarkKey(s.uid), uid: s.uid, who: s.nickname || remarkKey(s.uid), group: s.group || '', inPool: true }))
+    .filter(r => r.key);
   for (const k of Object.keys(remarksAll())) {
-    if (!rows.some(r => r.uid === k)) rows.push({ uid: k, who: k });
+    if (!rows.some(r => r.key === k)) rows.push({ key: k, uid: '', who: k, group: '', inPool: false });
   }
   return rows;
 }
+
+/* 分组编辑的原始值（保存时只提交真正改动过的行，避免「保存备注」顺手把几十个账号
+   的分组各打一次接口）。 */
+let remarkGroupOrig = {};
 /* onlyUID 非空时只渲染该账号一行（账号池行内「备注」按钮走这条），避免为改一个号
    在几十行里翻找。 */
 function renderRemarkBody(onlyUID) {
@@ -4206,11 +4298,17 @@ function renderRemarkBody(onlyUID) {
   let rows = remarkFormRows();
   if (onlyUID) {
     const k = remarkKey(onlyUID);
-    rows = rows.filter(r => r.uid === k);
+    rows = rows.filter(r => r.key === k);
   }
+  remarkGroupOrig = {};
+  rows.forEach(r => { if (r.inPool) remarkGroupOrig[r.uid] = r.group; });
   box.innerHTML = rows.length
     ? rows.map(r => '<div class="rm-row"><span class="rm-who" title="' + esc(r.who) + '">' + esc(r.who) + '</span>' +
-        '<input type="text" data-uid="' + esc(r.uid) + '" value="' + esc(remarksAll()[r.uid] || '') + '" placeholder="备注（留空即清除）" maxlength="24"></div>').join('')
+        '<input type="text" data-uid="' + esc(r.key) + '" value="' + esc(remarksAll()[r.key] || '') + '" placeholder="备注（留空即清除）" maxlength="24">' +
+        (r.inPool
+          ? '<input type="text" data-guid="' + esc(r.uid) + '" value="' + esc(r.group) + '" placeholder="分组（留空即未分组）" maxlength="24">'
+          : '<input type="text" value="（账号已不在池里）" disabled>') +
+        '</div>').join('')
     : '<div class="empty">暂无账号：先在「账号池」加载一次账号列表。</div>';
 }
 function openRemarks(onlyUID) {
@@ -4218,7 +4316,7 @@ function openRemarks(onlyUID) {
   if ($('remarkVeil')) $('remarkVeil').classList.add('on');
 }
 function closeRemarks() { if ($('remarkVeil')) $('remarkVeil').classList.remove('on'); }
-function saveRemarkForm() {
+async function saveRemarkForm() {
   // 在现有映射上合并：单账号编辑器里只有一行，整体替换会把其它号的备注全清掉。
   const map = Object.assign({}, remarksAll());
   document.querySelectorAll('#remarkBody input[data-uid]').forEach(inp => {
@@ -4227,11 +4325,29 @@ function saveRemarkForm() {
     else delete map[k];
   });
   const saved = storeRemarks(map);
+  // 分组是服务端字段：只提交真正改动过的行，其余账号不发请求。
+  const changed = [];
+  document.querySelectorAll('#remarkBody input[data-guid]').forEach(inp => {
+    const uid = inp.getAttribute('data-guid'), v = inp.value.trim();
+    if ((remarkGroupOrig[uid] || '') !== v) changed.push([uid, v]);
+  });
   closeRemarks();
-  // 备注只影响本机展示：重渲染当前视图即可，无需后端参与。
+  let ok = 0;
+  const bad = [];
+  for (const [uid, group] of changed) {
+    try { await api('accounts/' + encodeURIComponent(uid) + '/group', { method: 'POST', body: JSON.stringify({ group }) }); ok++; }
+    catch (e) { bad.push(uid.slice(0, 8) + '：' + e.message); }
+  }
   if (view === 'accounts') loadOverview(true);
   else if (view === 'usage' && usageData) renderUsage(usageData);
-  toast(saved ? '备注已保存（仅本机浏览器）' : '备注未能写入浏览器存储（隐私模式或空间已满），刷新后会丢失', saved ? '' : 'err');
+  if (changed.length) {
+    const head = bad.length
+      ? '分组已更新 ' + ok + ' 个，失败 ' + bad.length + ' 个（' + bad[0] + '）'
+      : '分组已更新 ' + ok + ' 个';
+    toast(head + (saved ? '' : '；备注未能写入浏览器存储（隐私模式或空间已满），刷新后会丢失'), bad.length || !saved ? 'err' : 'ok');
+  } else {
+    toast(saved ? '备注已保存（仅本机浏览器）' : '备注未能写入浏览器存储（隐私模式或空间已满），刷新后会丢失', saved ? '' : 'err');
+  }
 }
 if ($('btnRemarks')) $('btnRemarks').onclick = () => openRemarks('');
 if ($('btnRemarkClose')) $('btnRemarkClose').onclick = closeRemarks;
@@ -5221,10 +5337,39 @@ function deriveEventExecutor(ua) {
   return 'WorkBuddyExecutor';
 }
 
+// 筛选下拉记住上次选择（issue #160）：日志范围和状态是长期偏好，模型/来源是一次性
+// 查询——后者每次都会按当前归档重建选项，记住反而容易指向已不存在的事件。
+if ($('eventFilterStatus')) {
+  const saved = prefGet('eventStatus');
+  if (saved) $('eventFilterStatus').value = saved;
+}
+if ($('eventFilterLimit')) {
+  const saved = prefGet('eventLimit');
+  if (saved) $('eventFilterLimit').value = saved;
+}
 if ($('eventFilterModel')) $('eventFilterModel').onchange = renderEventTable;
 if ($('eventFilterAccount')) $('eventFilterAccount').onchange = renderEventTable;
-if ($('eventFilterStatus')) $('eventFilterStatus').onchange = renderEventTable;
-if ($('eventFilterLimit')) $('eventFilterLimit').onchange = loadEvents;
+if ($('eventFilterStatus')) $('eventFilterStatus').onchange = () => {
+  prefSet('eventStatus', $('eventFilterStatus').value);
+  renderEventTable();
+};
+if ($('eventFilterLimit')) $('eventFilterLimit').onchange = () => {
+  prefSet('eventLimit', $('eventFilterLimit').value);
+  loadEvents();
+};
+// 清空归档（issue #160）：删的是磁盘上的事件文件，不可恢复，二次确认后再打。
+if ($('btnEventClearLogs')) $('btnEventClearLogs').onclick = async () => {
+  if (!confirm('清空归档会删掉归档目录里的全部请求事件文件（不可恢复，导出过的 JSON 不受影响）。确认清空？')) return;
+  const b = $('btnEventClearLogs');
+  b.disabled = true;
+  try {
+    const r = await api('request_logs/clear', { method: 'POST' });
+    toast('已清空归档：删除 ' + (r.files || 0) + ' 个文件（' + fmtBytes(r.bytes || 0) + '）', 'ok');
+    await loadEvents();
+  } catch (e) {
+    toast('清空失败：' + e.message, 'err');
+  } finally { b.disabled = false; }
+};
 if ($('btnEventClearFilters')) $('btnEventClearFilters').onclick = () => {
   if ($('eventFilterModel')) $('eventFilterModel').value = '';
   if ($('eventFilterAccount')) $('eventFilterAccount').value = '';

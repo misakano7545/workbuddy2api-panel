@@ -1467,6 +1467,8 @@ const ctx = {
   renderPackages: (d, limit) => rendered.push([d.stamp, limit]),
   pkDetailLimit: () => 7,
   esc: (s) => String(s),
+  // 下拉框记忆（issue #160）的 localStorage 包装在抽取范围之外，本测试不关心。
+  prefGet: () => '', prefSet: () => {},
 };
 vm.createContext(ctx);
 vm.runInContext("'use strict';\n" + src.slice(start, src.indexOf('const PROXY_STATES', start)) + '\nthis.loadPackages = loadPackages;', ctx);
@@ -1677,8 +1679,12 @@ func TestPanelRemarkWiring(t *testing.T) {
 		// 或保存后别的号备注被清空，而 Go 编译与 JS 语法检查都发现不了。
 		`data-a="remark"`,
 		"if (a === 'remark') { openRemarks(u); return; }",
-		"rows = rows.filter(r => r.uid === k);",
+		"rows = rows.filter(r => r.key === k);",
 		"const map = Object.assign({}, remarksAll());",
+		// 分组（issue #159）：编辑器里的分组输入 + 只提交改动行的 POST 接线。
+		// 少任一处，分组填了保存不上而界面显示成功（备注是本机的，不会跟着报错）。
+		`data-guid="`,
+		`'/group', { method: 'POST', body: JSON.stringify({ group }) }`,
 	} {
 		if !bytes.Contains(js, []byte(want)) {
 			t.Fatalf("app.js 缺少 %s", want)

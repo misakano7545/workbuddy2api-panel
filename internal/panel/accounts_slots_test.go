@@ -30,6 +30,7 @@ if (s < 0 || e < 0) throw new Error('renderAccounts block not found');
 const stubs = {
   document: { activeElement: null },
   lastAccountsList: [], accRealmFilter: 'all',
+  accGroupFilter: '', lastVisibleAccounts: [], syncGroupFilter: () => {},
   esc: x => String(x == null ? '' : x),
   remarkName: (uid, name) => name,
   rateLimitRowsHtml: () => '',

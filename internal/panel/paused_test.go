@@ -123,6 +123,8 @@ const ctx = {
   remarkName: (uid, html) => html, // 备注是展示层增强，本测试只关心 paused 徽标/按钮
   // 账号池域分类是模块级状态（定义在 renderAccounts 之前的抽取范围外），按真实初值注入。
   accRealmFilter: 'all', lastAccountsList: [],
+  // 分组筛选是 renderAccounts 里新增的模块级状态（同上，抽取范围外）：按真实初值注入。
+  accGroupFilter: '', lastVisibleAccounts: [], syncGroupFilter: () => {},
   rateLimitRowsHtml: () => '', formatTokenCount: () => '0', formatLatency: () => '-', formatRate: () => '-',
   // 禁用原因分类与时长：定义在 renderAccounts 之前（抽取范围外），此处按真实实现注入，
   // 否则 renderAccounts 一进禁用分支就 ReferenceError。

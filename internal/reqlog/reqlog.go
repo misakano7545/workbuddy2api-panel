@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -255,6 +256,23 @@ func (r *Recorder) ReadArchive(limit int, filter Filter) ([]Event, error) {
 	return r.archive.read(limit, filter)
 }
 
+// PurgeResult 清空归档的结果：解掉的字节数 + 删掉的文件数。
+// 字节数给面板显示「清了多少」，文件数给测试断言（解掉 0 字节 ≠ 没删文件）。
+type PurgeResult struct {
+	Files int   `json:"files"`
+	Bytes int64 `json:"bytes"`
+}
+
+// Purge 清空归档目录里的请求事件文件（面板「清空归档」）。返回删除量。
+// 只删 requests-*.jsonl（与定期 prune 同口径），目录里其它文件不碰。
+// 归档关闭时返回零值：没有可清的东西，不算失败。
+func (r *Recorder) Purge() (PurgeResult, error) {
+	if r == nil || r.archive == nil {
+		return PurgeResult{}, nil
+	}
+	return r.archive.purge()
+}
+
 // Close 刷盘并停止后台归档。
 func (r *Recorder) Close() {
 	if r == nil || r.archive == nil {
@@ -270,6 +288,7 @@ func round1(v float64) float64 {
 type archiveWriter struct {
 	cfg       Config
 	ch        chan Event
+	purgeCh   chan chan PurgeResult // 手动清空归档：删文件必须由写循环执行（它是 file/buf 唯一持有者），否则会把在写的文件删成「已删除但仍在写」
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
@@ -301,10 +320,11 @@ func newArchiveWriter(cfg Config) *archiveWriter {
 		cfg.QueueSize = defaultQueue
 	}
 	w := &archiveWriter{
-		cfg:  cfg,
-		ch:   make(chan Event, cfg.QueueSize),
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		cfg:     cfg,
+		ch:      make(chan Event, cfg.QueueSize),
+		purgeCh: make(chan chan PurgeResult, 1),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
 		w.setErr(err)
@@ -339,6 +359,8 @@ func (w *archiveWriter) run() {
 		select {
 		case e := <-w.ch:
 			w.writeEvent(e)
+		case out := <-w.purgeCh:
+			out <- w.purgeNow()
 		case <-ticker.C:
 			w.flush()
 			w.prune()
@@ -491,6 +513,63 @@ func (w *archiveWriter) closeFile() {
 	w.path = ""
 	w.day = ""
 	w.size = 0
+}
+
+// purge 把清空请求交给写循环并等它做完。归档已停止（done 关闭）时直接返回错误，
+// 否则往没人收的通道里发会永久阻塞调用方（HTTP handler 卡死）。
+// drain 把写入队列里已入队的事件全部写掉（非阻塞，队列空即返回）。
+func (w *archiveWriter) drain() {
+	for {
+		select {
+		case e := <-w.ch:
+			w.writeEvent(e)
+		default:
+			return
+		}
+	}
+}
+
+func (w *archiveWriter) purge() (PurgeResult, error) {
+	if !w.enabled() {
+		return PurgeResult{}, nil
+	}
+	out := make(chan PurgeResult, 1)
+	select {
+	case w.purgeCh <- out:
+	case <-w.done:
+		return PurgeResult{}, errors.New("请求归档已停止，无法清理")
+	}
+	return <-out, nil
+}
+
+// purgeNow 在写循环内清空归档：先落盘关文件（否则删掉的 inode 还在被 buf 写），
+// 再按 prune 同口径删 requests-*.jsonl。closeFile 已把 day 清空，下一条事件会重开新文件。
+// 只能由 run() 调用——file/buf 归写循环所有，其他 goroutine 碰会与写入竞争。
+func (w *archiveWriter) purgeNow() PurgeResult {
+	// 先把队列里待写的事件写完再删：Record 是异步入队的，直接删会让「刚记录的 N 条」
+	// 在删除之后才落盘 —— 文件立刻又出现，清不干净。
+	w.drain()
+	w.flush()
+	w.closeFile()
+	entries, err := os.ReadDir(w.cfg.Dir)
+	if err != nil {
+		return PurgeResult{}
+	}
+	var out PurgeResult
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "requests-") || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(w.cfg.Dir, entry.Name())
+		info, statErr := entry.Info()
+		if err := os.Remove(path); err == nil {
+			out.Files++
+			if statErr == nil {
+				out.Bytes += info.Size()
+			}
+		}
+	}
+	return out
 }
 
 func (w *archiveWriter) prune() {

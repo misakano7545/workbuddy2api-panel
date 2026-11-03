@@ -133,6 +133,7 @@ type Status struct {
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），
 	// 账号本身健康，只是暂不接流量。（吸收上游 fd835df）
 	Paused          bool      `json:"paused,omitempty"`
+	Group           string    `json:"group,omitempty"` // 运维分组标签（空 = 未分组），见 entry.group
 	SuccessCount    int64     `json:"success_count,omitempty"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
@@ -264,6 +265,9 @@ type entry struct {
 	// 但保号任务遍历只按 Disabled 过滤，故 paused 号天然继续参与签到 / 活跃上报 /
 	// 保活 / 余额刷新。持久化（state.json），跨重启不丢。
 	paused bool
+	// group 运维自定义分组标签（面板手填，纯管理维度：不参与选号 / 计费 / 鉴权，
+	// 只用于面板按组筛选与组内批量操作）。空 = 未分组。持久化（state.json）。
+	group  string
 	reason string
 	// disabledAt 禁用时刻（零值 = 未禁用）。与 reason 配对：运维需要知道
 	// 「什么时候被禁的」——同样一句 401，是刚刚发生还是挂了一周，处置完全不同。
@@ -550,6 +554,7 @@ type stateAccount struct {
 	CreditsTotal     int64     `json:"credits_total,omitempty"`
 	Disabled         bool      `json:"disabled"`
 	Paused           bool      `json:"paused,omitempty"`
+	Group            string    `json:"group,omitempty"`
 	Reason           string    `json:"reason,omitempty"`
 	DisabledAt       time.Time `json:"disabled_at,omitempty"` // 禁用时刻（持久化：重启后仍能看出禁了多久）
 	Until            time.Time `json:"until,omitempty"`

@@ -157,6 +157,32 @@ func (p *Pool) Resume(uid string) bool {
 	return true
 }
 
+// groupMaxRunes 分组标签长度上限。面板输入框同样限 24（与账号备注同口径），
+// 这里是服务端兜底：脚本直接灌超长值会在每次落盘时整份 state.json 变大。
+const groupMaxRunes = 24
+
+// SetGroup 设置账号分组标签（空串 = 取消分组，幂等）。纯管理维度：不参与选号 /
+// 计费 / 鉴权，也不动任何冷却与计数——只影响面板按组筛选与组内批量操作。
+// 返回 false 表示账号不存在（供调用方区分「改成功了」与「uid 打错」）。
+func (p *Pool) SetGroup(uid, group string) bool {
+	group = strings.TrimSpace(group)
+	if r := []rune(group); len(r) > groupMaxRunes {
+		group = string(r[:groupMaxRunes])
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	if e.group == group {
+		return true
+	}
+	e.group = group
+	p.dirty.Store(true)
+	return true
+}
+
 // reviveCoolingLocked 只解冻余额耗尽冷却（CoolHard 的 until/coolKind/reason）并更新
 // credits，不动熔断器（fails/retryCount/breakerUntil）、软限流退避（CoolSoft/softStreak）
 // 与模型级台账（modelCooldowns）——限流冷却的恢复证据是重置墙钟到期，不是余额恢复。
@@ -845,6 +871,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Disabled:             e.disabled,
 		DisabledAt:           disabledAtRFC3339(e),
 		Paused:               e.paused,
+		Group:                e.group,
 		SuccessCount:         e.successCount,
 		ErrTotal:             e.errTotal,
 		CheckinDone:          e.lastCheckinDay == cst.Day(now),
