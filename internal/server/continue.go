@@ -139,7 +139,14 @@ func (r *continueReader) step() {
 	case strings.HasPrefix(trimmed, "data: "):
 		r.frame(strings.TrimPrefix(trimmed, "data: "))
 	case trimmed != "":
+		// 注释/心跳等非 data 行原样透传。必须**补一个空行**恢复帧边界：
+		// 上游的 ": heartbeat\n" 后面跟着的是下一帧的 "data: ..."（本层吞掉了
+		// 上游的分隔空行），不补的话 Responses/Messages 适配器按 "\n\n" 切帧
+		// 会拿到 ": heartbeat\ndata: {...}" 粘连帧——没有 "data: " 前缀整帧
+		// 被丢，恰好吞掉紧随其后的那个 content/tool_calls 增量（实测 GLM 的
+		// 工具调用首帧带 id+name，被吞后整个调用消失、output 变 null）。
 		r.out = append(r.out, line...)
+		r.out = append(r.out, '\n')
 	}
 	if err != nil {
 		r.endSegment(false) // 含 io.EOF 与读错误：交给 endSegment 决定续/降级/结束
