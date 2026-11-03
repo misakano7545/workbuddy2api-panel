@@ -86,9 +86,13 @@ func TestExpiringUrgencyFlipsHighCreditAccount(t *testing.T) {
 	if lo <= hi {
 		t.Fatalf("快到期的低余额号应压过高余额号: lo=%v hi=%v", lo, hi)
 	}
-	// 不是「勉强高一点」：差距要够大才算「压过」（余额差 10 倍、到期差 6 天，实测 ≈1.8×）。
-	if lo <= hi*1.5 {
-		t.Fatalf("压过幅度过小（应 ≥1.5×）: lo=%v hi=%v", lo, hi)
+	// 不是「勉强高一点」：差距要够大才算「压过」（余额差 10 倍、到期差 6 天，实测 ≈1.4×）。
+	//
+	// 原本要求 ≥1.5×，那个数值隐含了「hi 也被压到自身基线以下」（8.6 < 11）这一副作用
+	// ——正是 routingWeightOf 里 max(normal, …) 修掉的「窗口边缘反降权」。加了这道下限后
+	// hi 恒为自身基线 11，lo/hi ≈ 1.4 是当前紧迫度常量下的最大值。
+	if lo <= hi*1.3 {
+		t.Fatalf("压过幅度过小（应 ≥1.3×）: lo=%v hi=%v", lo, hi)
 	}
 }
 
@@ -132,5 +136,34 @@ func TestExpiringUrgencyGradientInRealmSlots(t *testing.T) {
 	}
 	if count["far"] != 2 {
 		t.Fatalf("窗口边缘应出现 2 次，得到 %d", count["far"])
+	}
+}
+
+// 开启到期加权永不低于关闭时的权重：这是「只加不减」的硬不变量。
+//
+// 修前 routingWeightOf = weightOfScaled(0.2) × urgency，窗口边缘 urgency=1.5，
+// 基础权重被压到 1/3.7 后总权重只有不开时的 41% —— 勾了「快过期积分优先」，
+// 落在窗口最后 22% 的号反而更少被选中。取 max(normal, …) 收口。
+func TestRoutingWeightNeverBelowBaseline(t *testing.T) {
+	const w = 168 * time.Hour
+	now := time.Now()
+	p := New("")
+	p.Add(&auth.Auth{UID: "rich"})
+	p.SetPreferExpiring(true, w)
+	// 余额取池内最大（credits 项吃满 10）、无闲置补偿：被压得最狠的形态。
+	p.SetCreditsDetailed("rich", 500, 500, 500, now.Add(w-time.Hour), 500)
+
+	p.mu.Lock()
+	p.byUID["rich"].lastUsed = now
+	base := p.weightOf(p.byUID["rich"], 500, now)
+	got := p.routingWeightOf(p.byUID["rich"], 500, now)
+	u := p.expiringUrgency(p.byUID["rich"], now)
+	p.mu.Unlock()
+
+	if got < base {
+		t.Fatalf("窗口内账号反被降权: prefer=%v 基线=%v (urgency=%v, 窗口边缘)", got, base, u)
+	}
+	if u >= expiringUrgencyMax {
+		t.Fatalf("窗口边缘的 urgency 应低于上限 %v，得到 %v", expiringUrgencyMax, u)
 	}
 }

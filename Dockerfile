@@ -1,5 +1,11 @@
-# syntax=docker/dockerfile:1
 FROM golang:1.26.10-alpine AS build
+# Go module 代理：默认官方源（境外/CI 不多绕一跳）；境内或镜像环境用
+# --build-arg 覆盖，容器内直连 proxy.golang.org 在境内会长时间卡住：
+#   docker compose build --build-arg GOPROXY=https://goproxy.cn,direct
+# 也可写进 .env（compose 会把 .env 变量当 build-arg 传入）。
+# direct 兜底：代理未收录的模块仍能直接回源，不会因缺包而构建失败。
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
