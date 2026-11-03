@@ -29,6 +29,7 @@ var (
 	errTaskJobsStopped    = errors.New("后台任务服务正在关闭")
 	errTaskJobAccount     = errors.New("account not found")
 	errTaskJobGlobal      = errors.New(globalTaskWriteMessage)
+	errTaskJobNoGrowth    = errors.New(noPersonalTaskMessage)
 	errTaskJobBusy        = errors.New("该账号有任务动作正在执行中，请等本轮结束后再试")
 	errTaskJobDisabled    = errors.New("自动成长任务未启用")
 	errTaskJobLimit       = errors.New("后台任务记录已满，且当前没有可清理的已完成记录")
@@ -205,6 +206,12 @@ func (p *Panel) StartAccountTaskJob(uid, trigger string) (TaskJob, bool, error) 
 	if a.IsGlobal() {
 		return TaskJob{}, false, errTaskJobGlobal
 	}
+	// 企业版 / 静态 API Key 无个人成长体系：成长任务端点上游 403，行为事件也不
+	// 计分。自动触发（新账号 / 每日）与手动 auto_all 都不该排作业，直接 422 说明
+	// 原因；单任务入口同样在 accountTaskAuto 里做了同一道门控。
+	if !a.SupportsPersonalGrowth() {
+		return TaskJob{}, false, errTaskJobNoGrowth
+	}
 	m := p.getTaskJobManager()
 	if m == nil {
 		return TaskJob{}, false, errTaskJobsNotStarted
@@ -280,6 +287,7 @@ func (p *Panel) StartAccountTaskJob(uid, trigger string) (TaskJob, bool, error) 
 }
 
 // StartNewAccountTasks 在配置开关开启时自动排入新国区账号的任务。
+// 企业版 / 静态 API Key 账号没有个人成长体系，登录或导入后不自动执行任务。
 func (p *Panel) StartNewAccountTasks(uid string) {
 	if p == nil || p.cfg.AutoTasksEnabled == nil || !p.cfg.AutoTasksEnabled() {
 		return
@@ -288,7 +296,7 @@ func (p *Panel) StartNewAccountTasks(uid string) {
 		return
 	}
 	a := p.cfg.Pool.AuthByUID(uid)
-	if a == nil || a.IsGlobal() {
+	if a == nil || a.IsGlobal() || !a.SupportsPersonalGrowth() {
 		return
 	}
 	if _, started, err := p.StartAccountTaskJob(uid, "new_account"); err != nil {
@@ -328,7 +336,7 @@ func (p *Panel) ResumeTaskJobs() {
 			continue
 		}
 		a := p.cfg.Pool.AuthByUID(uid)
-		if a == nil || a.IsGlobal() || accountTaskUIDDisabled(p.cfg.Pool, uid) {
+		if a == nil || a.IsGlobal() || !a.SupportsPersonalGrowth() || accountTaskUIDDisabled(p.cfg.Pool, uid) {
 			continue
 		}
 		if !p.tryLockAccount(uid) {
@@ -405,6 +413,8 @@ func writeTaskJobError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, errTaskJobGlobal):
 		status = http.StatusNotImplemented
+	case errors.Is(err, errTaskJobNoGrowth):
+		status = http.StatusUnprocessableEntity
 	case errors.Is(err, errTaskJobBusy):
 		status = http.StatusConflict
 	case errors.Is(err, errTaskJobDisabled):
