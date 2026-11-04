@@ -75,7 +75,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
-| 🎬 **媒体生成 + MCP** | 生图 / 改图 / 出视频（异步任务，可阻塞等结果）与 `POST /mcp`（MCP 工具：生成图片、改图、生成视频、查任务、列媒体模型）；记账、换号、错误策略与对话走同一条路径 |
+| 🎬 **媒体生成 + MCP** | 生图 / 改图 / 出视频（异步任务，可阻塞等结果）与 `POST /mcp`（MCP 工具：生成图片、改图、生成视频、查任务、列媒体模型）；记账、换号、错误策略与对话走同一条路径。另有**可选**的「裁掉右下角水印」后处理（默认关闭） |
 | 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题），账号运维 / 模型档位查询 / 在线改配置（热生效）/ 运行日志 / 积分任务，见 [Web 管理面板](#-web-管理面板) |
 
 ## 🎬 媒体生成：生图 / 改图 / 出视频 / MCP
@@ -91,6 +91,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | POST | `/v1/videos/generations` | 提交视频任务。缺省 `wait=true`：阻塞到出片后回 200；`wait=false`：秒回 `task_id` |
 | GET | `/v1/videos/{task_id}` | 查任务（`queued` / `in_progress` / `completed` / `failed`） |
 | POST | `/v1/videos/tasks` | 同上，body `{"task_id":"..."}`（给不方便用路径参数的客户端） |
+| POST | `/v1/images/strip-watermark` | 裁掉底部纯白留白（顺带去水印），默认关闭；见「去水印」 |
 | POST | `/mcp` | MCP（JSON-RPC 2.0，Streamable HTTP 形态），见下 |
 
 模型名照旧带域前缀：`cn:hunyuan-image-alpha`、`cn:hunyuan-image-alpha-edit`、`cn:minimax-video-h3`、`cn:kling-video-v3`。`/v1/models` 会把媒体模型单列并带 `image_generation` / `video_generation` 标记（`modalities.output` 分别是 `["image"]` / `["video"]`）；没配 `model` 时生图用 `cn:hunyuan-image-alpha`、生视频用 `cn:minimax-video-h3`。
@@ -183,6 +184,50 @@ curl -s http://127.0.0.1:7863/mcp \
 ```
 
 约定：**工具执行失败**（上游 4xx/5xx、任务 failed）回 `result.isError=true` + 上游原话进 `content[0].text`，让模型自己读到「时长只支持 4-15 秒」这类可行动信息；**参数不合法**（缺 `prompt` / 缺 `task_id` / 未知工具）才走 JSON-RPC `-32602`。工具调用内部直接复用网关自己的 HTTP handler（`httptest` 形态），所以换号、错误策略、记账、请求日志与 REST 完全同一条路径——不会出现「REST 记了账、MCP 漏了账」这种分叉。
+
+### 去水印（可选，默认关闭）
+
+成品右下角有「AI生成 / WORKBUDD>.」水印。它是**白色半透明**、锚在右下角（距右边 / 下边各约 10px）：1024 / 1536 边长档量出来固定 **111×51px**，1344×1792 档约 126×80px，**不随画布缩放**。
+
+两条路，按需选：
+
+1. **白底上它本来就不显眼**——纯白区像素均值 255.0 / 标准差 0.1，成品最终排在白底上时肉眼看不出来，可以不处理。
+2. **要彻底去干净就裁**：让画面底部真有一条纯白留白，再把这条留白整条裁掉，水印必然一起消失（水印最高约 80px，留白 ≥ 90px 才安全）。
+
+模型不总肯留白（实测：杯子 38.5%、猫 31.2%、深色木桌那张只有 1.0%），所以稳的打法是两步：
+
+```bash
+# 1) 生成时直接要留白（不给白边就补一刀）
+curl -s http://127.0.0.1:7863/v1/images/generations   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"   -d '{"model":"cn:hunyuan-image-alpha","size":"1024x1536",
+       "prompt":"……；画面最下方三分之一是完全纯白留白，不要有任何物体、阴影、反光、文字"}'
+
+# 留白不够？用改图补一条白边（约 5.71 credit）
+curl -s http://127.0.0.1:7863/v1/images/edits   -H "Authorization: Bearer $KEY"   -F image=@photo.png   -F 'prompt=把图片最下方约三分之一区域涂成纯白色（#FFFFFF）空白留白，不要改变上方画面'
+
+# 2) 裁掉留白（本地解码裁剪，不扣积分）
+curl -s http://127.0.0.1:7863/v1/images/strip-watermark   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"   -d '{"image":"https://….myqcloud.com/….png","min_blank_px":90}'
+```
+
+回执（`data_url` 是裁好的图，`return:"meta"` 时只回数字不返回图）：
+
+```json
+{
+  "object": "image.strip",
+  "width": 1024, "height": 1536, "out_width": 1024, "out_height": 944,
+  "boundary": 944, "blank_px": 592, "blank_ratio": 0.385, "blank_lum": 254.4,
+  "min_blank": 90, "white_lum": 248, "safe": true, "format": "png",
+  "data_url": "data:image/png;base64,…",
+  "usage": {"credit": 0, "hint": "本地后处理，不消耗上游积分"}
+}
+```
+
+参数：`image`（必填：上游产物域 URL / `data:` URL / 裸 base64）、`min_blank_px`（默认 90）、`keep_blank`（裁完在内容下方留几像素白边，默认 0）、`format`（`png` / `jpeg`，省略跟随输入）、`quality`（JPEG 默认 92）、`return`（`data_url` 默认；`meta` 只回数字，适合先校验留白够不够）。
+
+留白不够时回 **422 `no_blank_strip`**，`gateway_hint` 里带实测数字和下一步（先 `edit_image` 涂白）。MCP 侧同名工具 `strip_watermark`，回 MCP `image` content（base64）+ 文本元数据。
+
+开关 `features.watermark_strip_enabled`（默认 `false`，面板保存后热生效）：关着时端点回 **403 `watermark_strip_disabled`**，MCP 的 `strip_watermark` 也不出现在 `tools/list` 里，其它生成接口完全不受影响。默认关是因为它要把成品图回读、解码、再 base64 回传（1024×1536 PNG 约 2.5MB → base64 3.4MB），只在真要彻底去水印时划算。
+
+边界：只裁「整条纯白留白」，不做 inpainting；`min_blank_px` 调小会切到画面内容；裁切会改画幅，介意就 `keep_blank` 少裁一点。图片地址只允许上游产物域（`.myqcloud.com`），防止被当成 SSRF 跳板。
 
 ## 代理池与账号绑定
 
@@ -316,6 +361,7 @@ HTTP/HTTPS 使用标准代理传输；`socks5` 在本机解析目标域名，`so
 | **账号备份 / 迁移（未实现，待做设计）** | 面板「添加账号 → 备份 / 迁移」：导出为自包含快照（凭据原文 + 备注 + realm + 企业 id + device token），支持**逐个勾选**子集；可选口令加密，**加密在浏览器侧完成**（PBKDF2-SHA256 200k + AES-GCM），口令与明文都不经过网关落盘与日志。导入两种模式取**白名单**（未知值一律 400，不静默回落）：`merge` **只增加**——池中已有的 uid 一个字节都不写（从别人的老备份导入不会用陈旧 token 打断本机活跃号）；`replace` 覆盖/新增，但**快照外的账号一律保留**（刻意不提供「整体替换」，删凭证不可逆）。判重三层：池内 uid → 文件内重复 uid → 规范化（trim + 小写）后重复。备份**不含**本机配置、模型黑名单、保留积分阈值、排程与告警设置，导出文件里用 `note` 写清这条。**当前 main 上没有这个实现**（全树无 PBKDF2 / AES-GCM / `crypto.subtle`，账号导入只有 cockpit 格式一条路），别按这行去面板里找按钮；眼下迁移账号用 `auths/` + `data/` 目录搬迁（见「账号管理」与「凭据管理（auths）」两节） |
 | **生图 / 改图端点** | `POST /v1/images/generations`、`POST /v1/images/edits`：目录里的 image 模型单列进 `/v1/models`（`image_generation=true`），上游 `/v2/images/generations`、`/v2/images/edits` 透传；`image` 支持公网 URL / `data:` URL / multipart；回执原样透传（含 `usage.credit`），不转存字节 |
 | **出视频端点** | `POST /v1/videos/generations`（上游 `/v2/videos/generations` 提交 → `/v2/videos/tasks` 轮询 → 透出签名直链）+ `GET /v1/videos/{task_id}` + `POST /v1/videos/tasks`。缺省 `wait=true` 阻塞到出片（实测 minimax 4s ≈124s、kling 4s ≈473s），`wait=false` 秒回 `task_id`；任务→账号台账进程内保存，带「已记账」标记与用量快照——重复查询既不重复记账、也不丢 `usage`（上游只回一次） |
+| **水印裁切（可选）** | `POST /v1/images/strip-watermark` + MCP 工具 `strip_watermark`：把成品图底部的整条纯白留白裁掉，右下角「AI生成」水印随之消失（实测水印 111×51px、贴边 10px；白底上像素级不可见）。默认关闭（`features.watermark_strip_enabled`），纯 stdlib 实现（`internal/media`，逐行标准差找内容/留白分界），只做裁剪不做 inpainting，留白不足回 422 并给实测数字；图片地址限上游产物域，避免 SSRF |
 | **MCP 端点** | `POST /mcp`：JSON-RPC 2.0 纯 POST 形态（无 SSE、无 session），`initialize` / `ping` / `tools/list` / `tools/call` 齐全，工具 `list_generation_models`、`generate_image`、`edit_image`、`generate_video`、`get_video_task`。工具调用复用网关自己的 HTTP handler，换号/错误策略/记账/请求日志与 REST 同一路径 |
 | **嵌入端点（实验）** | `POST /v1/embeddings`：OpenAI 兼容嵌入，默认关闭（`features.embeddings_enabled`）。上游 `POST /v2/embeddings` 与对话是两套注册表，实测只有 `bge-m3`（1024 维）；`11351` 映射成 404 `model_not_found`，回程补 `object`/`index`，条数不符 502。关闭时回 403 `embeddings_disabled` |
 | **补签卡每轮上限** | `schedule.makeup_cards_per_round`（默认 `0` = 不限，保持既有行为）。补签会改账号历史，保守部署设 `1` 即每轮只补一张，剩余漏签下一轮继续；面板保存后热生效 |

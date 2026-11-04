@@ -45,6 +45,9 @@ const mcpInstructions = `WorkBuddy 媒体网关（生图 / 改图 / 生视频）
   wait=false 则立刻返回 task_id，再用 get_video_task 查。
 - 成品都是签名直链（图片约 24 小时、视频约 12 小时有效），需要长期保存请自行下载。
 - 模型名带域前缀：cn: 国内池、global: 国际池。不确定有什么模型就先调 list_generation_models。
+- 去水印（可选功能，默认关闭）：strip_watermark 把成品图底部的纯白留白整条裁掉，
+  右下角「AI生成 / WORKBUDD>.」水印随之消失。本地处理、不扣积分；留白不足会回 isError
+  并给出实测像素数，此时先用 edit_image 把下方约 1/3 涂白再调一次。
 - 每次生成都真实扣上游积分（生图约 5.7/张、视频 4 秒约 57），别拿它当免费接口刷。`
 
 // —— JSON-RPC 2.0 线格式 ——
@@ -192,6 +195,8 @@ func (h *Handler) mcpCallTool(params json.RawMessage) (any, *mcpRPCError) {
 		return h.mcpProxyCall(args, "/v1/videos/generations", h.videos)
 	case "get_video_task":
 		return h.mcpVideoTask(args)
+	case "strip_watermark":
+		return h.mcpStripWatermark(args)
 	}
 	return nil, &mcpRPCError{Code: -32602, Message: "Invalid params: 未知工具 " + p.Name}
 }
@@ -338,7 +343,7 @@ func prettyJSON(v any) string {
 // mcpTools 工具面。描述写清楚「值多少钱、有什么坑」，模型据此自己就能选对参数——
 // 少一次试错就少花一次积分。
 func (h *Handler) mcpTools() []map[string]any {
-	return []map[string]any{
+	tools := []map[string]any{
 		{
 			"name":  "list_generation_models",
 			"title": "列出可用的生图/生视频模型",
@@ -465,4 +470,45 @@ func (h *Handler) mcpTools() []map[string]any {
 			},
 		},
 	}
+	// 水印裁切是开关功能（features.watermark_strip_enabled，默认关闭）：
+	// 关着时不出现在工具面里，免得模型以为能用、白试一次。
+	if h.loadLive().WatermarkStripEnabled {
+		tools = append(tools, map[string]any{
+			"name":  "strip_watermark",
+			"title": "裁掉右下角水印（可选功能）",
+			"description": "把成品图底部的纯白留白整条裁掉，右下角「AI生成 / WORKBUDD>.」水印随之消失" +
+				"（本地解码裁剪，不打上游、不扣积分）。前提是画面底部真有一条纯白留白：" +
+				"生成时就在 prompt 里写「画面最下方三分之一是完全纯白留白，不要有任何物体、阴影、反光、文字」。" +
+				"留白不够时回 isError 并给出实测像素数——此时先用 edit_image 把下方约 1/3 涂白，再调一次本工具。" +
+				"image 传 generate_image 回执里的 URL（只接受上游产物域）或 data URL。",
+			"inputSchema": map[string]any{
+				"type":     "object",
+				"required": []string{"image"},
+				"properties": map[string]any{
+					"image": map[string]any{
+						"type":        "string",
+						"description": "图片 URL（上游产物域，如 COS 直链）或 data URL / 裸 base64",
+					},
+					"min_blank_px": map[string]any{
+						"type":        "integer",
+						"description": "判定「留白够裁」的最小高度，默认 90（水印最高约 80px + 下边距 10px）",
+					},
+					"keep_blank": map[string]any{
+						"type":        "integer",
+						"description": "裁完在内容下方保留的留白像素，默认 0（贴着内容边裁）；想留白边做版式给 20~60",
+					},
+					"format": map[string]any{
+						"type":        "string",
+						"enum":        []string{"png", "jpeg"},
+						"description": "输出格式；省略跟随输入。PNG 无损但体积大，JPEG 可配 quality",
+					},
+					"quality": map[string]any{
+						"type":        "integer",
+						"description": "JPEG 质量 1-100，默认 92（format=jpeg 时有效）",
+					},
+				},
+			},
+		})
+	}
+	return tools
 }

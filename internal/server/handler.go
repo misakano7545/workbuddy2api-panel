@@ -114,6 +114,10 @@ type Config struct {
 	// EmbeddingsEnabled 实验特性 /v1/embeddings 开关的静态回退（features.embeddings_enabled）。
 	// Live 非 nil 时以热快照为准；裸用/单测路径用本字段。
 	EmbeddingsEnabled bool
+
+	// WatermarkStripEnabled 实验特性「水印裁切」开关的静态回退
+	// （features.watermark_strip_enabled，默认关闭）。同上：Live 非 nil 时以热快照为准。
+	WatermarkStripEnabled bool
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -124,15 +128,16 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 	// 白名单静态回退（issue #68）：裸用/单测路径不依赖 Live，与 Hidden 对称。
 	allowed, enabled := livecfg.NormalizeAllowedModels(h.cfg.ModelsAllowed)
 	return livecfg.Snapshot{
-		APIKey:            h.cfg.APIKey,
-		SoftCooldown:      h.cfg.SoftCooldown,
-		EmbeddingsEnabled: h.cfg.EmbeddingsEnabled,
-		RecordClientInfo:  h.cfg.RecordClientInfo,
-		RecordContext:     h.cfg.RecordContext,
-		HiddenModels:      livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
-		AllowedModels:     allowed,
-		AllowlistEnabled:  enabled,
-		ModelAliases:      livecfg.NormalizeModelAliases(h.cfg.ModelsAliases),
+		APIKey:                h.cfg.APIKey,
+		SoftCooldown:          h.cfg.SoftCooldown,
+		EmbeddingsEnabled:     h.cfg.EmbeddingsEnabled,
+		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
+		RecordClientInfo:      h.cfg.RecordClientInfo,
+		RecordContext:         h.cfg.RecordContext,
+		HiddenModels:          livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
+		AllowedModels:         allowed,
+		AllowlistEnabled:      enabled,
+		ModelAliases:          livecfg.NormalizeModelAliases(h.cfg.ModelsAliases),
 	}
 }
 
@@ -270,6 +275,8 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /mcp", h.mcpMethodNotAllowed)
 	// 实验特性：OpenAI 兼容嵌入（features.embeddings_enabled，默认关闭；关着时回 403）。
 	h.mux.HandleFunc("POST /v1/embeddings", h.withAuth(h.embeddings))
+	// 实验特性：水印裁切（features.watermark_strip_enabled，默认关闭；关着时回 403）。
+	h.mux.HandleFunc("POST /v1/images/strip-watermark", h.withAuth(h.watermarkStrip))
 	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))
 	h.mux.HandleFunc("POST /messages", h.withAnthropicAuth(h.messages))
 	// Claude Code 上下文将满时会调官方计数端点，上游没有对应接口，这里本地估算

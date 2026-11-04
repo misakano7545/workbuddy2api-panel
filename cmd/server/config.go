@@ -267,6 +267,16 @@ type Config struct {
 		// 关闭时端点仍在，但回 403 embeddings_disabled（而不是 404：让调用方看得出
 		// 「功能存在、只是没开」，不用去猜路径拼错）。
 		EmbeddingsEnabled bool `json:"embeddings_enabled"`
+
+		// WatermarkStripEnabled 实验特性：水印裁切端点 POST /v1/images/strip-watermark
+		// 与 MCP 工具 strip_watermark 的总开关，默认 false。
+		//
+		// 为什么默认关：这条链路要把成品图回读、解码、裁、再以 base64 回传（一张
+		// 1024x1536 的 PNG 约 2.5MB → base64 3.4MB），只在「成品要彻底去水印」时划算；
+		// 而且它依赖提示词真的留出底部白边（实测模型只肯给 25~38%，深色桌面那张给了
+		// 1%），所以不适合当默认行为。关闭时端点回 403 watermark_strip_disabled，
+		// MCP 工具不出现在 tools/list 里。面板保存后经 livecfg 热生效。
+		WatermarkStripEnabled bool `json:"watermark_strip_enabled"`
 	} `json:"features"`
 
 	Models struct {
