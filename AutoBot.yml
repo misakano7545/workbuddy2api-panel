@@ -81,6 +81,8 @@ upstream:
     - baiyea/workbuddy2api-ui
     - L0NE-6/WorkBuddy-Daily
     - hawklithm/workbuddy2api
+    # 读本机桌面端登录态 + 设备风控头 X-Device-Token 的注入形态；敏感词二分查找工具可复用
+    - DistPub/workbuddy2api
     # —— 多平台合集：Trae / Qoder / MiniMax / 豆包 的 IDE 账号池与签到池，看跨平台账号模型的抽象
     - xu20060420fan-cell/workbuddy2api-panel
     # 三协议 + 反检测头族 + 出站代理 + Prometheus 指标；mobile.css 与 /v1/search/messages 也回移自这里

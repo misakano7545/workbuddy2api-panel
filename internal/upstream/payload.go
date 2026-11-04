@@ -170,6 +170,9 @@ func prepareBodyOpt(src []byte, sanitize, brandGlobal bool, efforts map[string][
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs, brandGlobal)
 		}
+		// tools 是客户端自带的能力声明，描述由客户端作者撰写，同样会带身份句
+		// （上游 issue：只洗 messages 时整段工具描述原样出站）。issue #395 同类。
+		sanitizeTools(obj["tools"], brandGlobal)
 	}
 	// prompt_cache_key：与 body 改写共用同一次 map，避免再 Unmarshal/Marshal 一遍。
 	if injectCache {

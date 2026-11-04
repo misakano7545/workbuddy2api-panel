@@ -817,6 +817,10 @@ if ($('navUpdate')) $('navUpdate').onclick = () => {
   $('updateNote').scrollIntoView({ block: 'center', behavior: 'smooth' });
 };
 
+// overviewSig 上一次渲染用的账号+锁池快照（JSON 文本）。轮询每 5 秒一次，内容没变时
+// 跳过表格重渲染：重建 innerHTML 会丢掉行内焦点与悬停，29 个号就是每 5 秒抖一次。
+let overviewSig = '';
+
 async function loadOverview(quiet) {
   try {
     const d = await api('overview');
@@ -858,8 +862,13 @@ async function loadOverview(quiet) {
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
-    renderAccounts(d.accounts || []);
-    renderModelLocks(d.model_locks);
+    // 只在载荷真变了才重建两张表（见 overviewSig 注释）。
+    const sig = JSON.stringify([d.accounts || [], d.model_locks || []]);
+    if (sig !== overviewSig) {
+      overviewSig = sig;
+      renderAccounts(d.accounts || []);
+      renderModelLocks(d.model_locks);
+    }
     // 到期提醒随首页统计一起刷新：只用响应里已有的最早到期快照，零上游请求。
     renderExpirySnapshot(d);
   } catch (e) {

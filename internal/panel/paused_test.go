@@ -261,9 +261,12 @@ func TestAppJSOverviewWiresModelLocks(t *testing.T) {
 const vm = require('vm');
 const assert = require('assert');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const start = src.indexOf('async function loadOverview(');
+// 切片起点带上 overviewSig 的声明：它是 loadOverview 轮询指纹跳过的模块级状态，
+// 从函数签名切会把它漏在窗口外（ReferenceError: overviewSig is not defined）。
+const start = src.indexOf("let overviewSig = ''");
 const end = src.indexOf("$('accBody').addEventListener");
-assert.ok(start >= 0 && end > start, 'loadOverview not found');
+assert.ok(start >= 0 && end > start, 'overviewSig declaration not found');
+assert.ok(src.slice(start, end).includes('async function loadOverview('), 'slice missed loadOverview');
 const inert = new Proxy(function () {}, {
   get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
   set() { return true; }, apply() { return inert; },

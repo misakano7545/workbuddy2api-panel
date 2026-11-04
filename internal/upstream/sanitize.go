@@ -311,7 +311,33 @@ func sanitizeToolCalls(v any, brand bool) bool {
 	return changed
 }
 
-// sanitizeMessages 净化 messages 中的 content 与 tool_calls；任一命中返回 true。
+// sanitizeTools 净化 tools[].function.description。
+//
+// 工具描述由客户端作者撰写（Claude Code / Codex 这类会把身份句写进 description），
+// 只洗 messages 时它整段原样出站（上游 issue #395 同类）。shortcut: 只洗 OpenAI 形状的
+// function.description，Anthropic 形状的顶层 description 与 parameters 里的 schema 描述不洗。
+func sanitizeTools(v any, brandGlobal bool) {
+	tools, ok := v.([]any)
+	if !ok {
+		return
+	}
+	for _, t := range tools {
+		tm, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := tm["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if d, ok := fn["description"].(string); ok {
+			if s := sanitizeTextWith(d, brandGlobal); s != d {
+				fn["description"] = s
+			}
+		}
+	}
+}
+
 // sanitizeMessages 净化 messages 中的 content、reasoning 与 tool_calls；任一命中返回 true。
 //
 // brandGlobal 来自 features.sanitize_brand_scope：true（默认 "all"）时身份类规则对所有
