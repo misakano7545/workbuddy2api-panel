@@ -1133,7 +1133,9 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		p.cfg.Pool.NoteCheckinDone(uid)
 		checkinDone = true
 	}
-	resp := map[string]any{"ok": checkinDone, "realm": "cn", "checkin_done": checkinDone}
+	// realm 取账号真值，不写字面量：上面 global 分支一旦被改（提前返回挪走、门控放宽），
+	// 这里硬写的 "cn" 会让国际号拿到错误回显。
+	resp := map[string]any{"ok": checkinDone, "realm": a.Realm(), "checkin_done": checkinDone}
 	if a.IsEnterprise() {
 		resp["enterprise"] = true
 	}
