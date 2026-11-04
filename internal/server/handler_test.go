@@ -1429,22 +1429,25 @@ func TestModelsEndpoint(t *testing.T) {
 	if !found {
 		t.Error("cn:glm-5.2 missing")
 	}
-	// 出图模型单列且带标记；视频模型既不进对话名单、也不单列（端点已撤回）
-	imgOK, seedanceSeen := false, false
+	// 出图/出视频模型都单列且带各自的标记；两者都不进对话名单（由 nonChatModel 剔掉）。
+	imgOK, seedanceOK := false, false
 	for _, m := range data {
 		e := m.(map[string]any)
 		if e["id"] == "cn:hunyuan-image-alpha" {
 			imgOK = e["image_generation"] == true
 		}
 		if strings.Contains(fmt.Sprint(e["id"]), "seedance") {
-			seedanceSeen = true
+			mods, _ := e["modalities"].(map[string]any)
+			out, _ := mods["output"].([]any)
+			seedanceOK = e["video_generation"] == true && len(out) == 1 && out[0] == "video" &&
+				e["image_generation"] == nil
 		}
 	}
 	if !imgOK {
 		t.Errorf("/v1/models 应单列 cn:hunyuan-image-alpha 且带 image_generation=true：%v", data)
 	}
-	if seedanceSeen {
-		t.Errorf("视频模型不该出现在模型列表（无网关端点）：%v", data)
+	if !seedanceOK {
+		t.Errorf("/v1/models 应单列视频模型且带 video_generation=true、modalities.output=[video]：%v", data)
 	}
 }
 

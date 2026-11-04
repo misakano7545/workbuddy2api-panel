@@ -508,6 +508,8 @@ func main() {
 		auditLog = al
 		log.Printf("admin audit: %s", al.Path())
 	}
+	// MCP serverInfo.version 与面板 /status 用同一个版本串（本地构建是 dev）。
+	server.BuildVersion = appVersion
 	gw = server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,

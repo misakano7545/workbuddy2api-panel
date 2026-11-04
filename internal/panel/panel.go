@@ -712,9 +712,11 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 出图模型：目录按 tag 把它们从**对话**列表剔掉了（/v1/models 同样单列），面板
+	// 出图/出视频模型：目录按 tag 把它们从**对话**列表剔掉了（/v1/models 同样单列），面板
 	// 「模型与档位」也必须看得到——否则用户不知道有哪些能调。字段与对话模型同口径，
-	// 另加 image_generation 标记（前端据此标「出图」）。视频不列：没有网关端点。
+	// 另加 image_generation / video_generation 标记（前端据此标「出图」「出视频」）。
+	// 视频端点 2026-11 起已实现（POST /v1/videos/generations + GET /v1/videos/{id}），
+	// 所以视频模型与出图模型同一个口径列出；出图专有的分档实扣（charge_variants）只对 image 生效。
 	//
 	// 倍率口径（2026-10-22 复测，两个个人号直连上游）：
 	//   - 目录**不再给出图模型报 credits**：CN hunyuan-image-alpha 的条目只有
@@ -741,17 +743,21 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, mi := range p.cfg.Upstream.GenerationModels(realm) {
-			if mi.GenerationKind != "image" {
+			if mi.GenerationKind != "image" && mi.GenerationKind != "video" {
 				continue
 			}
 			e := panelModelEntry(realm, mi, nil, "", p.cfg.Upstream.HTTP)
-			e["image_generation"] = true
+			if mi.GenerationKind == "video" {
+				e["video_generation"] = true
+			} else {
+				e["image_generation"] = true
+			}
 			// 有牌价也照样带实测（此前只在 credits 为空时才带，导致 CN 的 5.71 被
 			// x5.00 盖住、用户看到的价格比实付低）。
 			if v, ok := measured[realm+":"+mi.ID]; ok {
 				e["measured_credit"] = v
 			}
-			if variants := p.cfg.Upstream.ImageCharges(realm, mi.ID); len(variants) > 0 {
+			if variants := p.cfg.Upstream.ImageCharges(realm, mi.ID); mi.GenerationKind == "image" && len(variants) > 0 {
 				e["charge_variants"] = variants
 				last := variants[0]
 				for _, v := range variants {
