@@ -133,7 +133,10 @@ func (s *videoTaskStore) get(id string) (videoTaskOwner, bool) {
 }
 
 // adopt 把「台账里没有、但某个账号确实能查到」的任务补进来（进程重启后的自愈路径）。
-func (s *videoTaskStore) adopt(id, uid, realm, model string) {
+//
+// charged 传「收养时任务是否已到终态」：已完成的任务多半在重启前被查过、记过账，再记一次就是
+// 重复计入；还在跑的任务不可能在任何地方记过账，留到出片时照常记一次。
+func (s *videoTaskStore) adopt(id, uid, realm, model string, charged bool) {
 	if s == nil || id == "" || uid == "" {
 		return
 	}
@@ -142,7 +145,7 @@ func (s *videoTaskStore) adopt(id, uid, realm, model string) {
 	if _, ok := s.m[id]; ok {
 		return
 	}
-	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now()}
+	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Charged: charged}
 }
 
 // claimCharge 尝试把任务标成「已记账」。返回 true 表示本次调用赢得了记账权
@@ -749,9 +752,16 @@ func (h *Handler) videoAuths(owner videoTaskOwner, known bool, realm string) []*
 		}
 	}
 	if len(auths) == 0 {
-		for _, uid := range h.cfg.Pool.AvailableUIDsForRealm(realm) {
-			if a := h.cfg.Pool.AuthByUID(uid); a != nil {
-				auths = append(auths, a)
+		realms := []string{realm}
+		if !known {
+			// 台账没有就不知道任务属于哪个域（重启后 realm 也一起丢了）：两个域都试，没有号的域自然为空。
+			realms = []string{"cn", "global"}
+		}
+		for _, rl := range realms {
+			for _, uid := range h.cfg.Pool.AvailableUIDsForRealm(rl) {
+				if a := h.cfg.Pool.AuthByUID(uid); a != nil {
+					auths = append(auths, a)
+				}
 			}
 		}
 	}
@@ -778,7 +788,7 @@ func (h *Handler) queryVideoTask(taskID string, auths []*auth.Auth, owner videoT
 			state.ID = taskID
 		}
 		if !known {
-			h.videoLedger.adopt(taskID, a.UID, realm, owner.Model)
+			h.videoLedger.adopt(taskID, a.UID, a.Realm(), owner.Model, state.Done())
 			known = true
 		}
 		return state, a.UID, a.Nickname, nil
@@ -840,6 +850,10 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 		return h.queryVideoTask(taskID, auths, owner, known, realm)
 	})
 	if err == nil {
+		if !known { // 刚收养：域按命中的账号来，记账和回执都用它
+			owner, _ = h.videoLedger.get(taskID)
+			realm = owner.Realm
+		}
 		st.uid, st.nick, st.model = uid, nick, owner.Model
 		st.status, st.outcome = http.StatusOK, "success"
 		h.videoLedger.noteState(taskID, state)
@@ -862,15 +876,13 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 			return
 		}
 		st.status, st.outcome = ue.Status, "http_error"
-		h.applyErrorPolicy(uid, ue.Kind, ue.Msg, "", ue)
 		writeOpenAIErrorHint(w, http.StatusTooManyRequests, "upstream_error", ue.Msg,
 			"上游对同一账号的密集查询限流：隔几秒再查；提交时用 wait=false 拿 task_id 更省心")
 		return
 	}
 
-	if errors.As(err, &ue) && ue.Status >= 500 {
-		h.applyErrorPolicy(uid, ue.Kind, ue.Msg, "", ue)
-	}
+	// 查询失败（含上面的 429）一律不调 applyErrorPolicy：查任务只是轮询，失败说明不了账号能不能
+	// 干活；按账号级冷却处理，会因为一个视频被查得勤就把这个号踢出对话的选号。
 	status, code := http.StatusNotFound, "task_not_found"
 	if errors.As(err, &ue) && ue.Status >= 400 {
 		status, code = ue.Status, "upstream_error"
