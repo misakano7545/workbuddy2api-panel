@@ -69,7 +69,11 @@ func TestPanelModelsIncludesImageModels(t *testing.T) {
 				t.Errorf("对话模型不应带 image_generation：%v", m)
 			}
 		case "cn:seedance-2.5":
-			video = true // 视频模型不该出现（端点已撤回）——出现即失败
+			// 视频端点 2026-11 起已实现：视频模型照常列出，但要打 video_generation 而不是 image_generation。
+			video = m["video_generation"] == true
+			if m["image_generation"] == true {
+				t.Errorf("视频模型不该带 image_generation：%v", m)
+			}
 		case "cn:hunyuan-image-alpha":
 			image = m["image_generation"] == true
 			if m["name"] != "Hunyuan Image Alpha" {
@@ -80,8 +84,8 @@ func TestPanelModelsIncludesImageModels(t *testing.T) {
 	if !chat || !image {
 		t.Fatalf("面板模型列表缺项：chat=%v image=%v（%d 条）", chat, image, len(resp.Models))
 	}
-	if video {
-		t.Fatal("视频模型不该出现在面板模型列表（没有网关端点，列出来只会引诱客户端去调）")
+	if !video {
+		t.Fatal("视频端点 2026-11 起已实现：视频模型应出现在面板模型列表并带 video_generation")
 	}
 }
 

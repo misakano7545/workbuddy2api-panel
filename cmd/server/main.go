@@ -378,13 +378,14 @@ func main() {
 	// 模型白名单（issue #68）：启动时归一化一次，快照只读持有。
 	allowedModels, allowlistEnabled := livecfg.NormalizeAllowedModels(cfg.Models.Allowed)
 	live := livecfg.New(livecfg.Snapshot{
-		APIKey:               cfg.APIKey,
-		SoftCooldown:         cfg.SoftRateDur,
-		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
-		EmbeddingsEnabled:    cfg.Features.EmbeddingsEnabled,
-		RecordClientInfo:     cfg.Logging.RequestClientInfo,
-		RecordContext:        cfg.Logging.RequestArchiveContext,
-		HiddenModels:         livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
+		APIKey:                cfg.APIKey,
+		SoftCooldown:          cfg.SoftRateDur,
+		SanitizeFingerprints:  cfg.Features.SanitizeBlacklistFingerprints,
+		EmbeddingsEnabled:     cfg.Features.EmbeddingsEnabled,
+		WatermarkStripEnabled: cfg.Features.WatermarkStripEnabled,
+		RecordClientInfo:      cfg.Logging.RequestClientInfo,
+		RecordContext:         cfg.Logging.RequestArchiveContext,
+		HiddenModels:          livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
 		// 模型白名单（issue #68）：归一化集合 + 启用标志；空配置 = 不启用。
 		AllowedModels:    allowedModels,
 		AllowlistEnabled: allowlistEnabled,
@@ -508,6 +509,8 @@ func main() {
 		auditLog = al
 		log.Printf("admin audit: %s", al.Path())
 	}
+	// MCP serverInfo.version 与面板 /status 用同一个版本串（本地构建是 dev）。
+	server.BuildVersion = appVersion
 	gw = server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
@@ -855,13 +858,14 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 白名单同步重建（issue #68）：面板保存 models.allowed 后即时生效。
 	newAllowedModels, newAllowlistEnabled := livecfg.NormalizeAllowedModels(newCfg.Models.Allowed)
 	live.Store(livecfg.Snapshot{
-		APIKey:               newCfg.APIKey,
-		SoftCooldown:         newCfg.SoftRateDur,
-		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
-		EmbeddingsEnabled:    newCfg.Features.EmbeddingsEnabled,
-		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
-		RecordContext:        newCfg.Logging.RequestArchiveContext,
-		HiddenModels:         livecfg.NormalizeHiddenModels(newCfg.Models.Hidden),
+		APIKey:                newCfg.APIKey,
+		SoftCooldown:          newCfg.SoftRateDur,
+		SanitizeFingerprints:  newCfg.Features.SanitizeBlacklistFingerprints,
+		EmbeddingsEnabled:     newCfg.Features.EmbeddingsEnabled,
+		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
+		RecordClientInfo:      newCfg.Logging.RequestClientInfo,
+		RecordContext:         newCfg.Logging.RequestArchiveContext,
+		HiddenModels:          livecfg.NormalizeHiddenModels(newCfg.Models.Hidden),
 		// 白名单热生效：与 HiddenModels 同一条快照重建通路（issue #68）。
 		AllowedModels:    newAllowedModels,
 		AllowlistEnabled: newAllowlistEnabled,
