@@ -322,7 +322,7 @@ func newArchiveWriter(cfg Config) *archiveWriter {
 	w := &archiveWriter{
 		cfg:     cfg,
 		ch:      make(chan Event, cfg.QueueSize),
-		purgeCh: make(chan chan PurgeResult, 1),
+		purgeCh: make(chan chan PurgeResult),
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
 	}
@@ -515,8 +515,6 @@ func (w *archiveWriter) closeFile() {
 	w.size = 0
 }
 
-// purge 把清空请求交给写循环并等它做完。归档已停止（done 关闭）时直接返回错误，
-// 否则往没人收的通道里发会永久阻塞调用方（HTTP handler 卡死）。
 // drain 把写入队列里已入队的事件全部写掉（非阻塞，队列空即返回）。
 func (w *archiveWriter) drain() {
 	for {
@@ -529,6 +527,11 @@ func (w *archiveWriter) drain() {
 	}
 }
 
+// purge 把清空请求交给写循环并等它做完。归档已停止（done 关闭）时直接返回错误，
+// 否则会永久阻塞调用方（HTTP handler 卡死）。
+//
+// purgeCh 必须无缓冲：发送成功就说明写循环已经收下请求，它一定会回结果。带缓冲时，
+// 写循环退出后（或正选中 stop 分支时）请求照样能发进通道却没人处理，<-out 永远等不到。
 func (w *archiveWriter) purge() (PurgeResult, error) {
 	if !w.enabled() {
 		return PurgeResult{}, nil
