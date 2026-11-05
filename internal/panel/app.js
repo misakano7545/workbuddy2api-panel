@@ -1998,7 +1998,10 @@ $('btnCfgReload').onclick = loadConfig;
 // 已有的 accRealmTabs 同构。
 let cfgRealmFilter = 'all';
 function applyCfgRealmFilter() {
+  // tab 按钮自己也带 data-realm（记录它代表哪个域），必须跳过：否则同一段逻辑在
+  // 选「国际版」时会把「全部」「国内版」两个按钮一起隐藏，tab 栏看起来就塌了。
   document.querySelectorAll('#cfgForm [data-realm]').forEach(el => {
+    if (el.closest('#cfgRealmTabs')) return;
     const r = el.getAttribute('data-realm');
     el.style.display = (cfgRealmFilter === 'all' || cfgRealmFilter === r) ? '' : 'none';
   });
