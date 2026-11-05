@@ -75,3 +75,26 @@ func TestPurgeDisabledArchiveIsNoop(t *testing.T) {
 		t.Fatalf("归档关闭时清空应为空操作: %+v %v", res, err)
 	}
 }
+
+// TestPurgeAfterCloseReturns 归档写循环停了以后清空必须立即返回错误，不能卡住调用方
+// （面板的 HTTP handler）。purgeCh 带缓冲时，写循环退出后「发进通道」和「done 已关」
+// 两个分支同时就绪，select 随机选；选中发送就会永远等一个没人回的结果。
+func TestPurgeAfterCloseReturns(t *testing.T) {
+	r := New(Config{Enabled: true, Dir: t.TempDir(), MaxBytes: 1 << 20, RetentionDays: 7})
+	r.Close()
+	for i := 0; i < 50; i++ {
+		errc := make(chan error, 1)
+		go func() {
+			_, err := r.Purge()
+			errc <- err
+		}()
+		select {
+		case err := <-errc:
+			if err == nil {
+				t.Fatal("归档已停止时清空应返回错误")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("第 %d 次清空卡住：写循环已退出，请求没人处理", i+1)
+		}
+	}
+}
