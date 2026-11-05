@@ -94,8 +94,12 @@ func (h *Handler) mcpPost(w http.ResponseWriter, r *http.Request) {
 		h.mcpRespond(w, req.ID, nil, &mcpRPCError{Code: -32600, Message: "Invalid Request: jsonrpc 必须是 \"2.0\""})
 		return
 	}
-	// 没有 id 的是通知（notification）：按规范不能回包，只回 202。
-	notification := len(req.ID) == 0 || string(req.ID) == "null"
+	// 没有 id 的是通知（notification）：按规范不能回包，只回 202——不管方法认不认识，
+	// 否则未知通知会收到一个 id:null 的 Method not found。
+	if len(req.ID) == 0 || string(req.ID) == "null" {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 
 	switch req.Method {
 	case "initialize":
@@ -122,7 +126,6 @@ func (h *Handler) mcpPost(w http.ResponseWriter, r *http.Request) {
 			Message: fmt.Sprintf("Method not found: %s", req.Method),
 		})
 	}
-	_ = notification
 }
 
 // mcpRespond 统一回包：result 与 err 二选一；id 原样回显（通知已在调用处提前返回）。
