@@ -231,9 +231,11 @@ type Handler struct {
 	taskMu      sync.Mutex
 	taskRunning map[string]bool
 	// videos 视频任务台账：上游任务只对提交它的账号可见，查询必须回到同一账号；
-	// 进程内（重启清空，查询时按账号逐个试自愈），见 videos.go 文件头。
+	// 进程内（重启清空，查询时有界探测自愈），见 videos.go 文件头。
 	videoLedger *videoTaskStore
-	budget      *dailyBudget
+	// videoProbe 台账里没有的任务的探测状态（负缓存 / 全局限速 / 暂停），见 videos_probe.go。
+	videoProbe videoProber
+	budget     *dailyBudget
 }
 
 // NewHandler 构建 handler。

@@ -332,7 +332,7 @@ func TestVideosMissingPrompt(t *testing.T) {
 	}
 }
 
-// TestVideosUnknownTask 查不存在的任务：每个可用账号试一次，最终 404 + 可操作 hint。
+// TestVideosUnknownTask 查不存在的任务：有界探测（账号数不超过上限时问遍），最终 404 + 可操作 hint。
 func TestVideosUnknownTask(t *testing.T) {
 	f := &videoFake{on: func(c videoCall) (int, string) {
 		return 404, `{"code":404,"msg":"task not found"}`
