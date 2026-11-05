@@ -26,7 +26,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log"
 	"strings"
@@ -356,24 +355,13 @@ func (r *continueReader) endSegment(sawDone bool) {
 	r.done = true
 }
 
-// clientGone 报告本段结束是否由「客户端先断开」引起：ctx 已取消，或读错误是
-// context.Canceled（上游连接被本地 cancel 掉时典型表现）。两者都说明上游只是
-// 被动跟随断连，不是它自己断流。
+// clientGone 报告本段结束是否由「客户端先断开」引起：只看客户端自己的请求 ctx。
 //
-// 注意 io.ErrUnexpectedEOF / 网络错误不走这里：那些是上游侧的真实中断。
+// 不能看读错误是不是 context.Canceled：上游空闲看门狗（upstream/idle.go）静默超时
+// 时 cancel 的是派生的上游请求 ctx，读错误同样是 context canceled，可客户端还在等——
+// 那是上游断流，该按截断降级、照常盲重试。客户端真断开时 r.ctx 必然已取消，单看它就够。
 func (r *continueReader) clientGone() bool {
-	if r.ctx != nil && r.ctx.Err() != nil {
-		return true
-	}
-	if r.readErr != nil && errors.Is(r.readErr, context.Canceled) {
-		return true
-	}
-	// 上游 body 被本地 cancel 时，读错误常被包成 url.Error / net.OpError，
-	// 底层仍是 context.Canceled。
-	if r.readErr != nil && strings.Contains(r.readErr.Error(), "context canceled") {
-		return true
-	}
-	return false
+	return r.ctx != nil && r.ctx.Err() != nil
 }
 
 // cutNoFinish 本段是否「没有任何正常收尾就结束」（上游断流）：既没给 finish_reason、

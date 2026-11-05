@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
 // 客户端先断开时不得报成「疑似上游断流」，也不得再发一次注定失败的续写。
@@ -25,16 +28,53 @@ func TestContinueClientGoneNotUpstreamCut(t *testing.T) {
 	}
 }
 
-// 读错误为 context.Canceled（上游 body 被本地 cancel）时同样归因为客户端断开。
-func TestContinueClientGoneViaReadErr(t *testing.T) {
-	r := &continueReader{ctx: context.Background(), acct: &auth.Auth{UID: "u"}, body: []byte(`{"max_tokens":100}`)}
-	r.readErr = context.Canceled
-	if !r.clientGone() {
-		t.Fatal("读错误 context.Canceled 应判定客户端断开")
+// cutThenErr 先吐完 data 再返回 err：模拟流被掐断。
+type cutThenErr struct {
+	r   io.Reader
+	err error
+}
+
+func (c *cutThenErr) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if err == io.EOF {
+		return n, c.err
 	}
-	// 上游真断流（无 ctx 取消、无 readErr）不得被误判
-	r2 := &continueReader{ctx: context.Background(), acct: &auth.Auth{UID: "u"}, body: []byte(`{"max_tokens":100}`)}
-	if r2.clientGone() {
-		t.Fatal("无取消信号时不该判定客户端断开（那是上游断流）")
+	return n, err
+}
+
+func (c *cutThenErr) Close() error { return nil }
+
+// 读错误同为 context canceled 时，只有客户端自己的请求 ctx 取消才算「客户端先断开」。
+// 上游静默超时被空闲看门狗（upstream/idle.go）掐断时，取消的是派生的上游请求 ctx，
+// 客户端还在等：仍按上游断流处理，照常盲重试一次。
+func TestContinueClientGoneOnlyByClientContext(t *testing.T) {
+	cut := `data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"半截正文"}}]}` + "\n\n"
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	acct := &auth.Auth{UID: "u1", AccessToken: "at-1", ExpiresAt: 9999999999}
+	for _, tc := range []struct {
+		name        string
+		clientGone  bool
+		wantRetries int
+	}{
+		{"idle watchdog cut, client still waiting", false, 1},
+		{"client disconnected", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, testSeg2Text })
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.clientGone {
+				cancel()
+			}
+			rc := &cutThenErr{r: strings.NewReader(cut), err: context.Canceled}
+			r := newContinueReader(ctx, up, acct, []byte(body), "1.2.3.4", upstream.ChatMeta{}, rc)
+			out, _ := io.ReadAll(r)
+			if len(*reqs) != tc.wantRetries {
+				t.Fatalf("续写请求 %d 次，want %d", len(*reqs), tc.wantRetries)
+			}
+			if tc.clientGone && strings.Contains(string(out), `"finish_reason":"length"`) {
+				t.Fatalf("客户端已断开不该补截断终态:\n%s", out)
+			}
+		})
 	}
 }
