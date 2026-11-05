@@ -367,11 +367,11 @@ func TestVideosTaskLedger(t *testing.T) {
 	if s.claimCharge("t1") {
 		t.Fatal("第二次 claimCharge 必须失败（防重复记账）")
 	}
-	s.adopt("t2", "g1", "global", "kling-video-v3")
+	s.adopt("t2", "g1", "global", "kling-video-v3", false)
 	if o, ok := s.get("t2"); !ok || o.UID != "g1" {
 		t.Fatalf("adopt 没写进台账：%+v ok=%v", o, ok)
 	}
-	s.adopt("t2", "c9", "cn", "x") // 已存在就不覆盖（收养只补缺）
+	s.adopt("t2", "c9", "cn", "x", false) // 已存在就不覆盖（收养只补缺）
 	if o, _ := s.get("t2"); o.UID != "g1" {
 		t.Fatalf("adopt 覆盖了已有条目：%+v", o)
 	}
