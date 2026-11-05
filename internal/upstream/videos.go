@@ -199,10 +199,16 @@ func ParseVideoSubmit(raw []byte) (taskID, status string) {
 //	cn:minimax-video-h3  4s → 200, credit 57.14, size 768P
 //	cn:kling-video-v3    4s → 200, credit 102.86（实际出 5s）
 //	cn:not-a-video-model → 400 code=14407「Video model [...] route config not found」
-var videoRouteRealm = map[string]string{
-	"minimax-video-h3": "cn",
-	"kling-video-v3":   "cn",
-}
+//
+// 2026-11-05 复测：minimax-video-h3 与 kling-video-v3 在 **cn / global 两池都有路由**
+// （global:kling 时长下限 3s、global:minimax 4s，cn 都是 4s；global 出片落在 ap-hongkong
+// COS，4s 768P = 27.4 credit）。所以当前没有「只在一个域可用」的视频模型；
+// 出现单域模型时在这里写 model -> 唯一有路由的域，列表就自动只在那一域出现。
+//
+// 必须是 nil 而不是 map[string]string{}：实测写成空字面量时，同包的 imageRouteRealm
+// 在整个进程里读成空表（/v1/models 把 global 的 hy-image-3.5 列进 cn，三条路由断言
+// 全红），换成 nil 后复现不出。读 nil map 返回零值，语义与空表相同（= 无单域模型）。
+var videoRouteRealm map[string]string
 
 // videoDeadModels 上游已下架、两域都没有路由的视频模型（同 imageDeadModels 口径：
 // 只写实测下架的；模型回来时删一行即可）。

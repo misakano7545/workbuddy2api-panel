@@ -97,9 +97,13 @@ func TestGenerationModelsVideoRouteFilter(t *testing.T) {
 		{ID: "minimax-video-h3", Tags: []string{"text-to-video"}},
 		{ID: "hy-image-3.5", Tags: []string{"text-to-image"}},
 	})
+	// 2026-11-05 复测推翻旧前提：minimax-video-h3 在 global 池也有路由
+	// （global 提交 4s 真出片，27.4 credit），所以 global 目录列出它是对的。
+	global := map[string]string{}
 	for _, m := range c.GenerationModels("global") {
-		if m.ID == "minimax-video-h3" {
-			t.Fatalf("minimax 只有 cn 路由，不该出现在 global 列表")
-		}
+		global[m.ID] = m.GenerationKind
+	}
+	if global["minimax-video-h3"] != "video" {
+		t.Fatalf("global 也有 minimax 路由，应列出：%v", global)
 	}
 }
