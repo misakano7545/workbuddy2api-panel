@@ -41,6 +41,12 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 			chat = augmented
 		}
 	}
+	// 声明了托管 image_generation → 网关出图，成品作为输出项补进回程（见 imagetool.go）。
+	if meta.imageTool {
+		if augmented, items := h.imageAugment(r.Context(), chat); augmented != nil {
+			chat, meta.preItems = augmented, items
+		}
+	}
 	var peek struct {
 		Stream bool `json:"stream"`
 	}
@@ -82,8 +88,10 @@ func responsesToChat(src []byte) ([]byte, *responsesMeta, []serverSearchTool, er
 	var srv []serverSearchTool
 	if tools, ok := obj["tools"].([]any); ok {
 		chatTools, custom, nsMap, alias := convertTools(tools)
-		// 托管 web_search 由网关执行，不进上游 tools（见 splitHostedSearch）。
-		chatTools, srv = splitHostedSearch(chatTools)
+		// 托管 web_search / image_generation 由网关执行，不进上游 tools（见 splitHostedTools）。
+		var image bool
+		chatTools, srv, image = splitHostedTools(chatTools)
+		meta.imageTool = image
 		if len(chatTools) > 0 {
 			out["tools"] = chatTools
 		}
@@ -113,29 +121,35 @@ func responsesToChat(src []byte) ([]byte, *responsesMeta, []serverSearchTool, er
 	return b, meta, srv, nil
 }
 
-// splitHostedSearch 分离 Responses 的托管联网工具，返回留在上游 tools 里的部分。
+// splitHostedTools 分离 Responses 的托管工具（web_search / image_generation），返回
+// 留在上游 tools 里的部分。
 //
 // Codex 开 tools.web_search 时声明的是托管工具 {"type":"web_search"}（或
 // web_search_preview 变体），没有 name/parameters。上游收下不报错（实测 200）但也
 // 不会执行——留着就是空转；本网关有执行器（searchtool.go），故摘出来自己跑，
 // 由 searchAugment 拼一份 function 声明送给模型。其余托管类型（code_interpreter 等）
 // 原样保留：上游对未知 type 不报错，改它没有证据支撑。
-func splitHostedSearch(tools []any) ([]any, []serverSearchTool) {
+func splitHostedTools(tools []any) ([]any, []serverSearchTool, bool) {
 	kept := make([]any, 0, len(tools))
 	var srv []serverSearchTool
+	var imageTool bool
 	for _, t := range tools {
 		m, ok := t.(map[string]any)
 		if !ok || asString(m["name"]) != "" {
 			kept = append(kept, t)
 			continue
 		}
-		if !strings.HasPrefix(asString(m["type"]), webSearchToolName) {
+		typ := asString(m["type"])
+		switch {
+		case strings.HasPrefix(typ, webSearchToolName):
+			srv = append(srv, serverSearchTool{Name: webSearchToolName, MaxUses: int(asNum(m["max_uses"]))})
+		case strings.HasPrefix(typ, imageToolName):
+			imageTool = true
+		default:
 			kept = append(kept, t)
-			continue
 		}
-		srv = append(srv, serverSearchTool{Name: webSearchToolName, MaxUses: int(asNum(m["max_uses"]))})
 	}
-	return kept, srv
+	return kept, srv, imageTool
 }
 
 // responsesMeta 请求阶段提取、回程需要的工具语义（PR #109 的两条 Codex 协议细节）：
@@ -147,6 +161,10 @@ func splitHostedSearch(tools []any) ([]any, []serverSearchTool) {
 type responsesMeta struct {
 	customTools map[string]bool
 	nsMap       map[string]string
+	// imageTool 客户端声明了托管 image_generation：回程要补 image_generation_call 输出项。
+	imageTool bool
+	// preItems 网关侧已执行完的托管工具产出（image_generation_call），按序排在 output 最前。
+	preItems []any
 	// alias 出站扁平名 -> 客户端原名（只对重名改名过的有值）。
 	// namespace 组内（或与顶层）重名时子工具被改成稳定后缀名（read_file_2），回程必须
 	// 还原成客户端声明的原名，否则客户端下一轮按自己声明的名字回传工具结果就匹配不上；
@@ -811,6 +829,11 @@ func chatCompletionToResponse(obj map[string]any, meta *responsesMeta) map[strin
 			output = append(output, item)
 		}
 	}
+	// 网关侧已执行完的托管工具产出（image_generation_call）排在最前：它们在对话开始
+	// 之前就完成了，客户端按序渲染。
+	if meta != nil && len(meta.preItems) > 0 {
+		output = append(append([]any{}, meta.preItems...), output...)
+	}
 	// 非流式同样不允许 output:null（nil 切片）：空响应是合法形态。
 	if output == nil {
 		output = []any{}
@@ -1049,6 +1072,9 @@ func (w *responsesWriter) handleChunk(obj map[string]any) error {
 				"output":     []any{},
 			},
 		}); err != nil {
+			return err
+		}
+		if err := w.emitPreItems(); err != nil {
 			return err
 		}
 	}
@@ -1462,6 +1488,30 @@ func (w *responsesWriter) closeMessage() error {
 	}
 	w.x.output = append(w.x.output, item)
 	w.x.messageOpen = false
+	return nil
+}
+
+// emitPreItems 补发网关侧已执行完的托管工具产出（image_generation_call）：图是在对话
+// 开始前就出好的，added 用 in_progress 占位、done 带成品，与 OpenAI 的事件形状一致。
+func (w *responsesWriter) emitPreItems() error {
+	if w.meta == nil {
+		return nil
+	}
+	for _, it := range w.meta.preItems {
+		item, _ := it.(map[string]any)
+		if item == nil {
+			continue
+		}
+		idx := w.nextIdx()
+		head := map[string]any{"id": item["id"], "type": item["type"], "status": "in_progress"}
+		if err := w.emit("response.output_item.added", map[string]any{"output_index": idx, "item": head}); err != nil {
+			return err
+		}
+		if err := w.emit("response.output_item.done", map[string]any{"output_index": idx, "item": item}); err != nil {
+			return err
+		}
+		w.x.output = append(w.x.output, item)
+	}
 	return nil
 }
 

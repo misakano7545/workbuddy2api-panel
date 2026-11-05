@@ -102,36 +102,9 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 			`prompt is required（例：{"model":"`+defaultImageModel+`","prompt":"一只猫"}）`)
 		return
 	}
-	model, _ := req["model"].(string)
-	named := strings.TrimSpace(model) != "" // 客户端是否显式点名了模型
-	if !named {
-		model = defaultImageModel
-	}
-	realm, bare := resolveModel(model)
-	// models.allowed 白名单（issue #68）：与 chat 入口同款拒绝，不打上游、不占选号。
-	// 未点名模型时先做白名单内兜底（设计决策 4）：默认模型不在白名单时改选
-	// 白名单内第一个可用出图模型；白名单内无出图模型则维持默认名落入拒绝
-	//（不做隐式放行）。文案与 chat 侧同口径，避免枚举探测。
-	if !h.allowedModel(realm, bare) {
-		if !named {
-			if fr, fb, ok := h.firstAllowedGenerationImage(); ok {
-				realm, bare = fr, fb
-			} else {
-				writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
-					"model is not in the gateway allowlist, try another model")
-				return
-			}
-		} else {
-			writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
-				"model is not in the gateway allowlist, try another model")
-			return
-		}
-	}
-	// models.hidden 同一份黑名单也管出图入口：列表里已经隐藏的模型不该还能直接调。
-	// （白名单兜底选出的模型也在此受检：白名单∩黑名单交集语义，隐藏的不例外。）
-	if h.hiddenModel(realm, bare) {
-		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
-			"model is hidden by gateway configuration, try another model")
+	realm, bare, merr := h.imageModel(asString(req["model"]))
+	if merr != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable", merr.Error())
 		return
 	}
 	req["model"] = bare
@@ -223,6 +196,89 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	st.outcome = ""
 	log.Printf("images model=%s realm=%s: 全部尝试失败（%d 个账号）：%v", bare, realm, len(tried), lastErr)
 	writeOpenAIError(w, status, code, lastErr.Error())
+}
+
+// imageModel 出图入口的模型口径：缺省 defaultImageModel，再按 models.allowed /
+// models.hidden 双名单裁定，返回 (realm, 裸模型名)。错误文案与 chat 侧同口径，
+// 避免枚举探测。
+//
+// models.allowed 白名单（issue #68）：与 chat 入口同款拒绝，不打上游、不占选号。
+// 未点名模型时先做白名单内兜底（设计决策 4）：默认模型不在白名单时改选白名单内
+// 第一个可用出图模型；白名单内无出图模型则维持默认名落入拒绝（不做隐式放行）。
+// models.hidden 同一份黑名单也管出图入口：列表里已经隐藏的模型不该还能直接调
+// （白名单兜底选出的模型也在此受检：白名单∩黑名单交集语义，隐藏的不例外）。
+func (h *Handler) imageModel(model string) (string, string, error) {
+	named := strings.TrimSpace(model) != "" // 客户端是否显式点名了模型
+	if !named {
+		model = defaultImageModel
+	}
+	realm, bare := resolveModel(model)
+	if !h.allowedModel(realm, bare) {
+		if named {
+			return "", "", errors.New("model is not in the gateway allowlist, try another model")
+		}
+		fr, fb, ok := h.firstAllowedGenerationImage()
+		if !ok {
+			return "", "", errors.New("model is not in the gateway allowlist, try another model")
+		}
+		realm, bare = fr, fb
+	}
+	if h.hiddenModel(realm, bare) {
+		return "", "", errors.New("model is hidden by gateway configuration, try another model")
+	}
+	return realm, bare, nil
+}
+
+// imageGenerate 网关侧出一次图：选号 → 出图 → 记账，返回上游原始回执（图片链接在
+// data[].url 里）。托管 image_generation 工具的执行器走这里（见 imagetool.go），
+// 与 HTTP 入口共享模型口径、选号重试与记账口径。
+func (h *Handler) imageGenerate(req map[string]any) ([]byte, error) {
+	realm, bare, err := h.imageModel(asString(req["model"]))
+	if err != nil {
+		return nil, err
+	}
+	req["model"] = bare
+	out, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	st := newChatStat(time.Now(), bare, false, h.budget)
+	defer st.done()
+	modelRate := ""
+	if h.cfg.Upstream != nil {
+		modelRate = h.cfg.Upstream.ModelRate(realm, bare)
+	}
+	tried := map[string]bool{}
+	var lastErr error
+	for attempt := 0; attempt < imageAttempts; attempt++ {
+		a := h.cfg.Pool.PickExcludingForRealm(tried, bare, realm)
+		if a == nil {
+			break
+		}
+		tried[a.UID] = true
+		st.uid, st.nick, st.attempts = a.UID, a.Nickname, attempt+1
+		data, ierr := h.cfg.Upstream.ImageGenerations(a, json.RawMessage(out))
+		if ierr != nil {
+			lastErr = ierr
+			var ue *upstream.Error
+			if errors.As(ierr, &ue) {
+				h.applyErrorPolicy(a.UID, ue.Kind, ue.Msg, bare, ue)
+				if requestLevelFailFastKind(ue.Kind) {
+					// 与账号无关的错误：换号必然同样失败
+					st.status = ue.Status
+					return nil, ierr
+				}
+			}
+			continue
+		}
+		recordImageUsage(h, st, realm, a.UID, bare, modelRate, data, req, st.start)
+		return data, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("没有可用的 %s 账号", realm)
+	}
+	st.status = http.StatusBadGateway
+	return nil, lastErr
 }
 
 // requestLevelFailFastKind 报告该类上游错误是否与账号无关（换号必然同样失败）。
