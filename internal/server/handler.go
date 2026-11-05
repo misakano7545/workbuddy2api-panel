@@ -269,8 +269,12 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) }))
 	// 视频生成：上游 /v2/videos/* 是异步任务，网关拆成「提交 / 查任务」两个入口
 	// （同步等待由 wait / timeout_seconds 控制），见 videos.go 文件头。
+	// POST /v1/videos 与 GET /v1/videos/{id}/content 是 OpenAI Videos 资源的标准路径，
+	// 与下面三条自解释路径共用同一份实现（OpenAI 那套已于 2026-09-24 关停，形状仍在 SDK 里）。
+	h.mux.HandleFunc("POST /v1/videos", h.withAuth(h.videos))
 	h.mux.HandleFunc("POST /v1/videos/generations", h.withAuth(h.videos))
 	h.mux.HandleFunc("POST /v1/videos/tasks", h.withAuth(h.videoTasks))
+	h.mux.HandleFunc("GET /v1/videos/{task_id}/content", h.withAuth(h.videoContent))
 	h.mux.HandleFunc("GET /v1/videos/{task_id}", h.withAuth(h.videoTask))
 	// MCP（Streamable HTTP 子集，JSON-RPC 2.0）：把本网关的媒体能力做成工具面，见 mcp.go。
 	h.mux.HandleFunc("POST /mcp", h.withAuth(h.mcpPost))

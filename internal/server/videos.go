@@ -22,6 +22,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,7 +50,15 @@ const (
 	videoTaskMax = 2048
 	// videoMaxBody 请求体上限（prompt + 可能的 data URL 首帧，1MB 够，避免被塞视频）。
 	videoMaxBody = 4 << 20
+	// videoContentMax 成品下载的字节上限（实测 4s/768P 约 2.9 MB，给足余量但别让单请求吃满内存）。
+	videoContentMax = 256 << 20
+	// mediaFetchMax 图像直链转 base64 时的读取上限（上游出图约 2-4 MB）。
+	mediaFetchMax = 32 << 20
 )
+
+// mediaFetchHTTP 取成品直链（COS 签名 URL）的客户端，视频转字节流与图像转 b64 共用。
+// 超时给足：一个 3 MB 的 mp4 走公网慢链路也要几十秒。
+var mediaFetchHTTP = &http.Client{Timeout: 5 * time.Minute}
 
 // videoPollInterval 轮询间隔。minimax 实测 124s、kling 实测 473s 出片，5s 一跳够用。
 // 用 var 而不是 const：测试把它压到 1ms，避免同步等待用例真睡 5 秒。
@@ -626,6 +635,29 @@ func videoUpstreamBody(req map[string]any, bare string) (map[string]any, error) 
 	if s, _ := req["last_image"].(string); s != "" {
 		out["last_image_url"] = s
 	}
+	// OpenAI Videos 的入参形态：参考图在 input_reference.image_url，时长是字符串 "4"，
+	// 尺寸是 "1280x720"。上游要的是顶层 image_url + 数字秒 + aspect_ratio。
+	if ref, ok := req["input_reference"].(map[string]any); ok {
+		if u, _ := ref["image_url"].(string); u != "" && out["image_url"] == nil {
+			out["image_url"] = u
+		}
+		delete(req, "input_reference")
+	}
+	if s, ok := req["seconds"].(string); ok {
+		if n, err := strconv.Atoi(s); err == nil {
+			req["seconds"] = n
+		}
+	}
+	if s, _ := req["size"].(string); s != "" {
+		// shortcut: 只从宽高比反推 aspect_ratio；OpenAI 的像素高度（1280x720）推不出
+		// 上游的 768P/480P 档位，缺省档交给上游，客户端显式给 resolution 时另走上面那条。
+		if _, given := extra["aspect_ratio"]; !given {
+			if ar := aspectFromSize(s); ar != "" {
+				extra["aspect_ratio"] = ar
+			}
+		}
+		delete(req, "size")
+	}
 	for k, v := range req {
 		switch k {
 		case "extra_parameters", "resolution", "aspect_ratio", "enable_audio",
@@ -641,6 +673,21 @@ func videoUpstreamBody(req map[string]any, bare string) (map[string]any, error) 
 		out["extra_parameters"] = extra
 	}
 	return out, nil
+}
+
+// aspectFromSize "1280x720"（宽 x 高）→ "16:9"。认不出的尺寸返回空串（不猜）。
+func aspectFromSize(s string) string {
+	var w, h int
+	if n, _ := fmt.Sscanf(s, "%dx%d", &w, &h); n != 2 || w <= 0 || h <= 0 {
+		return ""
+	}
+	switch {
+	case w == h:
+		return "1:1"
+	case w > h:
+		return "16:9"
+	}
+	return "9:16"
 }
 
 // videoWait 解析网关自己的等待开关：
@@ -736,6 +783,50 @@ func (h *Handler) videoTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.pollVideoTask(w, r, id)
+}
+
+// videoContent GET /v1/videos/{task_id}/content —— OpenAI Videos 的成品下载口。
+//
+// 上游给的是签名直链（COS，约 12h 有效），本网关不落盘：这里把字节流原样转给客户端，
+// 省掉自己再存一份 3 MB 的 mp4。任务没出片回 409，台账里没有回 404。
+func (h *Handler) videoContent(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSuffix(strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/videos/"), "/"), "/content")
+	state, _, ok := h.videoLedger.cachedState(id)
+	if !ok || len(state.URLs) == 0 {
+		if _, known := h.videoLedger.get(id); !known {
+			writeVideoNotFound(w, id, videoNotFoundHint)
+			return
+		}
+		writeOpenAIErrorHint(w, http.StatusConflict, "video_not_ready", "任务还没有出片",
+			"GET /v1/videos/"+id+" 查到 completed 再来取字节")
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, state.URLs[0], nil)
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	resp, err := mediaFetchHTTP.Do(req)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "取成品失败："+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error",
+			fmt.Sprintf("成品直链回 %d（签名一般 12 小时有效，过期请用 GET /v1/videos/%s 复查）", resp.StatusCode, id))
+		return
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "video/mp4"
+	}
+	w.Header().Set("Content-Type", ct)
+	if resp.ContentLength > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, videoContentMax))
 }
 
 // videoNotFoundHint 查不到任务时的提示（台账未命中 / 所属账号已不在号池 / 账号说不是它的任务）。
@@ -907,12 +998,16 @@ func videoTaskStateFromSubmit(status string) upstream.VideoTaskState {
 	return upstream.VideoTaskState{Status: status}
 }
 
-// videoTaskPayload 统一回执形态（提交 / 查询共用）：
+// videoTaskPayload 统一回执形态（提交 / 查询共用），字段对齐 OpenAI Videos 的
+// Video 资源（POST /videos 返回的那个对象）：id / object / status / progress /
+// created_at / completed_at / size / seconds / error，剩下的 data / videos / usage /
+// task_id / hint 是本网关加的自解释字段，OpenAI 客户端会忽略它们。
 //
-//	{id, object:"video", task_id, status, model, created_at, completed_at,
+//	{id, object:"video", task_id, status, progress, model, created_at, completed_at,
 //	 data:[{url}], videos:[{url}], size, seconds, usage:{credit,output_video_tokens,output_video_duration}, hint}
 //
-// data 与 videos 同内容（前者对齐 OpenAI image 风格，后者自解释）；未完成时 data/videos 省略。
+// status 一律归一成 OpenAI 的四态；seconds 是**字符串**（OpenAI 就这么定义的，
+// 给数字会让严格反序列化的 SDK 直接报错）；error 是对象不是字符串，同理。
 func videoTaskPayload(taskID string, state upstream.VideoTaskState, model string, ledger *videoTaskStore) map[string]any {
 	// 上游只回一次 usage：兜底用台账里记下的数，别让重复查询少一笔账。
 	if res, ok := ledger.result(taskID); ok {
@@ -930,8 +1025,13 @@ func videoTaskPayload(taskID string, state upstream.VideoTaskState, model string
 		"id":         taskID,
 		"object":     "video",
 		"task_id":    taskID,
-		"status":     state.Status,
+		"status":     openAIVideoStatus(state.Status),
+		"progress":   videoProgress(state),
 		"created_at": state.CreatedAt,
+		// OpenAI 的 Video 资源必带这几个键；本网关不知道的给 null，别让严格客户端缺字段。
+		"expires_at":            nil,
+		"remixed_from_video_id": nil,
+		"error":                 nil,
 	}
 	if model != "" {
 		out["model"] = model
@@ -943,7 +1043,7 @@ func videoTaskPayload(taskID string, state upstream.VideoTaskState, model string
 		out["size"] = state.Size
 	}
 	if state.Duration > 0 {
-		out["seconds"] = state.Duration
+		out["seconds"] = strconv.FormatInt(state.Duration, 10) // OpenAI 定义成字符串，见函数头
 	}
 	if len(state.URLs) > 0 {
 		items := make([]map[string]any, 0, len(state.URLs))
@@ -963,13 +1063,37 @@ func videoTaskPayload(taskID string, state upstream.VideoTaskState, model string
 	}
 	switch {
 	case state.Succeeded():
-		out["hint"] = "视频地址是签名直链（约 12 小时有效）；需要长期保存请自行落盘。"
+		out["hint"] = "视频地址是签名直链（约 12 小时有效）；需要长期保存请自行落盘，或 GET /v1/videos/" + taskID + "/content 取字节。"
 	case state.Done():
-		out["error"] = state.ErrorText
+		out["error"] = map[string]any{"code": "video_failed", "message": state.ErrorText}
 	default:
 		out["hint"] = "任务未完成：GET /v1/videos/" + taskID + " 继续查（或 POST /v1/videos/tasks {\"task_id\":\"" + taskID + "\"}）"
 	}
 	return out
+}
+
+// openAIVideoStatus 把上游状态归一到 OpenAI Videos 的四态（queued / in_progress /
+// completed / failed）；客户端是按这四态分支的，上游的 succeeded / running 它们不认。
+func openAIVideoStatus(s string) string {
+	switch s {
+	case "", "queued", "pending", "created":
+		return "queued"
+	case "completed", "succeeded", "success":
+		return "completed"
+	case "failed", "error":
+		return "failed"
+	}
+	return "in_progress"
+}
+
+// videoProgress 粗略进度：上游只给状态不给百分比，出片了就是 100，其余 0。
+//
+// shortcut: 没有真实百分比，只在 completed 时给 100；上游哪天回 progress 字段再改这里。
+func videoProgress(state upstream.VideoTaskState) int {
+	if state.Succeeded() {
+		return 100
+	}
+	return 0
 }
 
 // clipText 截断超长文本（错误信息里带上游原文时用，避免把整段回执刷进日志）。

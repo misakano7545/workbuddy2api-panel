@@ -90,6 +90,12 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 			tr.context = archiveContext(raw)
 		}
 	}
+	// 上游一次只出一张（2026-11-05 实测 n=2 仍只回 1 条），按规范明确拒绝而不是静默少给。
+	if n, ok := numberToInt(req["n"]); ok && n > 1 {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+			"n>1 暂不支持：上游一次只出一张，请逐次请求（每次一张）")
+		return
+	}
 	prompt, _ := req["prompt"].(string)
 	if strings.TrimSpace(prompt) == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
@@ -194,6 +200,9 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 		}
 		lastErr = nil
 		recordImageUsage(h, st, realm, a.UID, bare, modelRate, data, req, start)
+		if asString(req["response_format"]) == "b64_json" {
+			data = b64JSONImages(data)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(data)
 		return
@@ -393,6 +402,59 @@ func fileToDataURL(fh *multipart.FileHeader) (string, error) {
 		ct = "image/png"
 	}
 	return "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(b), nil
+}
+
+// b64JSONImages 把 data[].url 换成 data[].b64_json（OpenAI images 的 response_format）。
+//
+// 上游无视这个参数、永远回签名直链（2026-11-05 实测 response_format=b64_json 仍回 url），
+// 所以只能在网关这一层转。取图失败就保留 url：图已经出了、也已经扣费，不能因为转码失败
+// 把成品丢掉。
+func b64JSONImages(data []byte) []byte {
+	var obj map[string]any
+	if json.Unmarshal(data, &obj) != nil {
+		return data
+	}
+	items, _ := obj["data"].([]any)
+	changed := false
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		u, _ := m["url"].(string)
+		if u == "" {
+			continue
+		}
+		raw, err := fetchMedia(u)
+		if err != nil {
+			log.Printf("images: response_format=b64_json 取图失败，保留直链: %v", err)
+			continue
+		}
+		m["b64_json"] = base64.StdEncoding.EncodeToString(raw)
+		delete(m, "url") // 规范里两者二选一，给了 b64 就不该再给 url
+		changed = true
+	}
+	if !changed {
+		return data
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return data
+	}
+	return out
+}
+
+// fetchMedia 取成品直链的字节（图像转 b64 用；视频走流式转发，见 videos.go videoContent）。
+func fetchMedia(url string) ([]byte, error) {
+	resp, err := mediaFetchHTTP.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("直链回 %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, mediaFetchMax))
 }
 
 // boundaryOf 从 Content-Type 里取 multipart boundary。
