@@ -15,6 +15,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
+	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 	"github.com/misakano7545/workbuddy2api-panel/internal/usage"
 )
@@ -530,7 +532,13 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, videoTaskPayload(taskID, videoTaskStateFromSubmit(taskStatus), model, h.videoLedger))
 			return
 		}
-		final, perr := h.awaitVideo(a, taskID, syncWait)
+		final, perr := h.awaitVideo(r.Context(), a, taskID, syncWait)
+		if r.Context().Err() != nil {
+			// 客户端已断开：任务留在台账里，之后可凭 task_id 查询；连接没人读了，不必再回包。
+			st.status, st.outcome = 499, reqlog.OutcomeInterrupted
+			log.Printf("videos task=%s: 客户端断开，停止同步等待（任务已提交，可继续查询）", taskID)
+			return
+		}
 		if perr != nil {
 			// 等待失败（账号失效/网络抖）：任务其实已提交，不能让客户端以为要重提。
 			log.Printf("videos task=%s 等待失败：%v（任务已提交，可继续查询）", taskID, perr)
@@ -654,7 +662,8 @@ func (h *Handler) videoWait(req map[string]any) (time.Duration, bool) {
 }
 
 // awaitVideo 轮询到终态或超时。返回最后一次状态（未终态时 Done()=false）。
-func (h *Handler) awaitVideo(a *auth.Auth, taskID string, wait time.Duration) (upstream.VideoTaskState, error) {
+// ctx 取消（客户端断开）时立即停手并返回 ctx.Err()：没人等结果了，再问上游只是白占账号的查询额度。
+func (h *Handler) awaitVideo(ctx context.Context, a *auth.Auth, taskID string, wait time.Duration) (upstream.VideoTaskState, error) {
 	deadline := time.Now().Add(wait)
 	var last upstream.VideoTaskState
 	for {
@@ -679,7 +688,13 @@ func (h *Handler) awaitVideo(a *auth.Auth, taskID string, wait time.Duration) (u
 		if time.Now().Add(videoPollInterval).After(deadline) {
 			return last, nil
 		}
-		time.Sleep(videoPollInterval)
+		t := time.NewTimer(videoPollInterval)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return last, ctx.Err()
+		case <-t.C:
+		}
 	}
 }
 
