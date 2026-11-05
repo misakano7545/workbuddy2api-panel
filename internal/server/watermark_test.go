@@ -189,6 +189,34 @@ func TestWatermarkStripFetchAllowedHost(t *testing.T) {
 	}
 }
 
+// 白名单只校验首跳主机：跟随 302 就等于让允许域把请求带去任意地址（SSRF），
+// 所以回读客户端必须不跟随重定向。
+func TestWatermarkStripDoesNotFollowRedirect(t *testing.T) {
+	img := wmTestPNG(t, 40, 120, 80)
+	inner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(img)
+	}))
+	defer inner.Close()
+	outer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, inner.URL+"/x.png", http.StatusFound)
+	}))
+	defer outer.Close()
+
+	old := watermarkHostSuffixes
+	watermarkHostSuffixes = []string{"127.0.0.1"}
+	defer func() { watermarkHostSuffixes = old }()
+
+	h := NewHandler(Config{WatermarkStripEnabled: true})
+	rec, out := postWatermark(t, h, `{"image":"`+outer.URL+`/a.png"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("重定向应被拒绝（400），实际 %d body=%s", rec.Code, rec.Body)
+	}
+	if msg, _ := out["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "302") {
+		t.Fatalf("错误应点明 302，实际 %q", msg)
+	}
+}
+
 func TestWatermarkStripMultipart(t *testing.T) {
 	img := wmTestPNG(t, 40, 120, 80)
 	var buf bytes.Buffer

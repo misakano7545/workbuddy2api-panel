@@ -51,7 +51,11 @@ var watermarkHostSuffixes = []string{".myqcloud.com"}
 
 // watermarkHTTPClient 回读图片用的客户端（超时兜底，不复用 upstream 的指纹传输层：
 // 那是给 api.codebuddy 的，指向 COS 只会把不该带的头带出去）。
-var watermarkHTTPClient = &http.Client{Timeout: 60 * time.Second}
+var watermarkHTTPClient = &http.Client{
+	Timeout: 60 * time.Second,
+	// 不跟随重定向：白名单只校验首跳主机，跟随一次就能被 302 带去任意地址（SSRF）。
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
 
 // watermarkRequest 端点请求体（JSON；multipart 走同名表单字段）。
 type watermarkRequest struct {
