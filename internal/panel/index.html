@@ -185,9 +185,15 @@ input[type=checkbox] { width: auto; accent-color: var(--accent); }
 .account-proxy { margin-top: 7px; max-width: 190px; }
 .account-proxy select { padding: 3px 6px; font-size: 11.5px; min-height: 28px; }
 .proxy-binding-error { display: block; color: var(--bad); font-size: 11.5px; margin-top: 3px; }
-.proxy-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
-.proxy-toolbar .note { flex: 1; min-width: 160px; }
-.proxy-section { border-top: 1px solid var(--line); padding: 16px 0; }
+/* 代理池整页一张卡，分区靠内部横向分隔线切开——线用 .box 内部口径 --line-soft，
+   外框仍是 .box 自己的 --line，层次不打架。 */
+.proxy-section { border-top: 1px solid var(--line-soft); padding: 16px 17px; }
+/* 代理表那一块铺满卡片：行 hover 底纹和表头跟其它视图的表格一样顶到卡片边缘。 */
+.proxy-section.bleed { padding: 16px 0; }
+/* 卡片头的图标按钮（全部检测 / 添加代理）：进 header 后没有 .proxy-actions 包一层，
+   图标尺寸与文字对齐在这里补齐。 */
+#view-proxies .box > header button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+#view-proxies .box > header button svg { width: 15px; height: 15px; flex: none; }
 .proxy-section summary { cursor: pointer; font-weight: 600; }
 .proxy-section textarea { display: block; width: 100%; height: 150px; resize: vertical; margin: 14px 0 10px; font: 13px/1.7 var(--mono); color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
 .proxy-section label { display: block; font-size: 12.5px; color: var(--ink-2); }
@@ -202,7 +208,7 @@ input[type=checkbox] { width: auto; accent-color: var(--accent); }
 .proxy-table .proxy-address { max-width: 260px; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12px; }
 .proxy-table .proxy-error { max-width: 230px; overflow-wrap: anywhere; color: var(--ink-2); font-size: 12px; }
 .proxy-table .proxy-name { max-width: 180px; overflow-wrap: anywhere; }
-.proxy-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding-top: 14px; }
+.proxy-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 14px 17px 0; }
 @media (max-width: 700px) { .proxy-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 420px) { .proxy-fields { grid-template-columns: minmax(0, 1fr); } }
 label.fld { display: block; margin-bottom: 14px; }
@@ -236,6 +242,15 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .stat .v { font: 600 26px/1.15 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; white-space: nowrap; }
 .stat .k { color: var(--ink-3); font-size: 11.5px; margin-top: 5px; }
 .stat.good .v { color: var(--ok); } .stat.warn .v { color: var(--warn); } .stat.bad .v { color: var(--bad); }
+/* 卡内统计条（运行日志「请求记录」、余额趋势、账号池）：.stats 自带边框 / 圆角 /
+   阴影，直接放进 .box 里就成了「卡中卡」——外层那条 1px 边框和卡片自己的边框并排
+   成双线，末列还会多出一条没有内容的竖线，看着像贴错了位置。放进卡片体内时退化成
+   一条分段指标行，与下面的 .fbar 筛选栏同一套分隔线口径。 */
+.box > .stats {
+  border: 0; border-radius: 0; box-shadow: none; margin-bottom: 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.box > .stats .st, .box > .stats .stat { border-bottom: 0; }
 
 /* ── 面板块 ───────────────────────────────────────────────────────── */
 .box { background: var(--surface); border: 1px solid var(--line); border-radius: 11px; box-shadow: var(--shadow); margin-bottom: 20px; overflow: hidden; }
@@ -428,6 +443,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .qrbox svg { border-radius: 6px; }
 .state { font-size: 13px; color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
 .state.ok { color: var(--ok); } .state.err { color: var(--bad); }
+/* 卡片体内的状态行（任务中心的「新增国区账号后自动执行…」）：.state 自身没有内边距，
+   直接当 .box 的子元素会贴着卡片左边框，与 header 的 17px 缩进错位。 */
+.box > .state { padding: 12px 17px; }
 .dots::after { content: "…"; animation: blink 1.2s steps(4) infinite; }
 @keyframes blink { 0% { opacity: 1; } 50% { opacity: .3; } 100% { opacity: 1; } }
 
@@ -696,6 +714,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .vtabs button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.22); }
   .vtabs .cnt { color: var(--ink-3); font-weight: 400; margin-left: 4px; font-variant-numeric: tabular-nums; }
   .vtabs button.on .cnt { color: var(--ink-2); }
+  /* tab 下方的分域说明行：与卡片左边缘对齐，但上下要留白，否则紧贴 tab 药丸和第一张
+     卡片，看起来像一行被挤到边上的注释。 */
+  .vtabs-note { margin: 9px 0 15px; font-size: 12px; color: var(--ink-3); }
 
   /* ── 请求记录表（运行日志）────────────────────────────────────────── */
   .acc.req { min-width: 1080px; }
@@ -784,7 +805,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 /* 请求上下文弹窗：一条消息一块，长文 pre-wrap，纵向滚动交给 .dlg .body。 */
 /* 跨账号合计：默认收起的 <details>，summary 当分隔条用（与代理池的分节同款）。 */
 .exp-total { border-top: 1px solid var(--line-soft); }
-.exp-total summary { cursor: pointer; padding: 10px 0; font-size: 12.5px; color: var(--ink-2); }
+/* 左右留 11px：与上面 .acc th / td 的内边距一致，否则 summary 的三角贴在卡片左边框上，
+   和表格里的「账号」「最近到期」两列错开一截。 */
+.exp-total summary { cursor: pointer; padding: 10px 11px; font-size: 12.5px; color: var(--ink-2); }
 .exp-total summary .note { margin-left: 8px; color: var(--ink-3); }
 #eventTableBody tr[data-ev] { cursor: pointer; }
 .ev-ctx { padding: 2px 0; display: flex; flex-direction: column; gap: 10px; }
@@ -971,65 +994,71 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     </section>
 
     <section class="view" id="view-proxies" hidden>
-      <div class="proxy-toolbar">
-        <span class="note" id="proxySummary" role="status">读取中…</span>
-        <div class="proxy-actions">
-          <button type="button" id="proxyCheckAll"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>全部检测</button>
-          <button type="button" class="primary" id="proxyAdd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>添加代理</button>
+      <!-- 整页一张卡：与运行日志 / 任务中心同构。改前这里是一堆裸的 .proxy-section
+           直接铺在页面底色 --bg 上、整个视图里没有任何 .box，整页灰成一片，和其它视图的
+           白色 --surface 卡片对不上。汇总与两个动作按钮按惯例进 header，分区之间用内部
+           分隔线切开（.proxy-section 自带的 border-top）。 -->
+      <div class="box">
+        <header>
+          <h3>代理池 <span class="hint">账号行可单独绑定；未绑定的走分区默认出口</span></h3>
+          <span class="grow"></span>
+          <button type="button" class="xs" id="proxyCheckAll"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>全部检测</button>
+          <button type="button" class="xs primary" id="proxyAdd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>添加代理</button>
+        </header>
+        <div class="state" id="proxySummary" role="status">读取中…</div>
+        <details class="proxy-section" id="proxyImportPanel">
+          <summary>批量添加</summary>
+          <label for="proxyLines">代理地址（每行一个）</label>
+          <textarea id="proxyLines" spellcheck="false" placeholder="http://HOST:8080&#10;https://USER:PASSWORD@HOST:443&#10;socks5://HOST:1080&#10;socks5h://HOST:1080"></textarea>
+          <button type="button" class="primary" id="proxyImport">添加</button>
+          <div class="proxy-result" id="proxyImportResults" role="status"></div>
+        </details>
+        <section class="proxy-section" id="proxyEditor" hidden aria-label="编辑代理">
+          <h3>编辑代理</h3>
+          <div class="proxy-fields">
+            <label>名称<input id="proxyName" maxlength="128"></label>
+            <label class="wide">代理地址<input id="proxyURL" spellcheck="false" autocomplete="off"></label>
+            <label>密码<input id="proxyPassword" type="password" autocomplete="new-password" placeholder="留空保持原值"></label>
+          </div>
+          <div class="proxy-actions">
+            <button type="button" class="primary" id="proxySave">保存</button>
+            <button type="button" id="proxyCancel">取消</button>
+          </div>
+        </section>
+        <div class="proxy-section bleed">
+          <div class="tbl-wrap">
+            <table class="acc proxy-table">
+              <thead><tr><th>名称 / 协议</th><th>地址</th><th>状态</th><th class="num">延迟</th><th>最近检测</th><th>错误</th><th class="num">绑定数</th><th>启用</th><th>操作</th></tr></thead>
+              <tbody id="proxyBody"><tr><td colspan="9"><div class="empty">读取中…</div></td></tr></tbody>
+            </table>
+          </div>
+          <div class="proxy-pagination">
+            <button type="button" class="icon" id="proxyPrev" title="上一页" aria-label="上一页"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg></button>
+            <span class="note" id="proxyPage">1 / 1</span>
+            <button type="button" class="icon" id="proxyNext" title="下一页" aria-label="下一页"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></button>
+          </div>
         </div>
+        <!-- realm 级默认出口（issue #39 P3）：账号行没显式绑定时取这里 -->
+        <details class="proxy-section" id="proxyRealmPanel">
+          <summary>分区默认出口</summary>
+          <div class="proxy-fields">
+            <label>国内版（cn）<select id="proxyRealmCn"></select></label>
+            <label>国际版（global）<select id="proxyRealmGlobal"></select></label>
+          </div>
+          <div class="note">只对没在账号行单独指定代理的账号生效（账号绑定优先）；留「默认随机」= 从可用代理里挑。</div>
+        </details>
+        <details class="proxy-section" id="proxyHealthPanel">
+          <summary>自动测活设置</summary>
+          <div class="proxy-fields" id="proxyHealthFields">
+            <label class="wide">检测 URL<input id="proxyHealthURL" type="url"></label>
+            <label>检测间隔（秒）<input id="proxyInterval" type="number" min="1" max="86400" value="60"></label>
+            <label>超时（秒）<input id="proxyTimeout" type="number" min="1" max="300" value="10"></label>
+            <label>连续失败禁用次数<input id="proxyFailures" type="number" min="1" max="100" value="3"></label>
+            <label>连续成功恢复次数<input id="proxySuccesses" type="number" min="1" max="100" value="2"></label>
+          </div>
+          <button type="button" class="primary" id="proxyHealthSave">保存设置</button>
+        </details>
       </div>
-      <details class="proxy-section" id="proxyImportPanel">
-        <summary>批量添加</summary>
-        <label for="proxyLines">代理地址（每行一个）</label>
-        <textarea id="proxyLines" spellcheck="false" placeholder="http://HOST:8080&#10;https://USER:PASSWORD@HOST:443&#10;socks5://HOST:1080&#10;socks5h://HOST:1080"></textarea>
-        <button type="button" class="primary" id="proxyImport">添加</button>
-        <div class="proxy-result" id="proxyImportResults" role="status"></div>
-      </details>
-      <section class="proxy-section" id="proxyEditor" hidden aria-label="编辑代理">
-        <h3>编辑代理</h3>
-        <div class="proxy-fields">
-          <label>名称<input id="proxyName" maxlength="128"></label>
-          <label class="wide">代理地址<input id="proxyURL" spellcheck="false" autocomplete="off"></label>
-          <label>密码<input id="proxyPassword" type="password" autocomplete="new-password" placeholder="留空保持原值"></label>
-        </div>
-        <div class="proxy-actions">
-          <button type="button" class="primary" id="proxySave">保存</button>
-          <button type="button" id="proxyCancel">取消</button>
-        </div>
-      </section>
-      <div class="proxy-section">
-        <div class="tbl-wrap">
-          <table class="acc proxy-table">
-            <thead><tr><th>名称 / 协议</th><th>地址</th><th>状态</th><th class="num">延迟</th><th>最近检测</th><th>错误</th><th class="num">绑定数</th><th>启用</th><th>操作</th></tr></thead>
-            <tbody id="proxyBody"><tr><td colspan="9"><div class="empty">读取中…</div></td></tr></tbody>
-          </table>
-        </div>
-        <div class="proxy-pagination">
-          <button type="button" class="icon" id="proxyPrev" title="上一页" aria-label="上一页"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg></button>
-          <span class="note" id="proxyPage">1 / 1</span>
-          <button type="button" class="icon" id="proxyNext" title="下一页" aria-label="下一页"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></button>
-        </div>
-      </div>
-      <!-- realm 级默认出口（issue #39 P3）：账号行没显式绑定时取这里 -->
-      <details class="proxy-section" id="proxyRealmPanel">
-        <summary>分区默认出口</summary>
-        <div class="proxy-fields">
-          <label>国内版（cn）<select id="proxyRealmCn"></select></label>
-          <label>国际版（global）<select id="proxyRealmGlobal"></select></label>
-        </div>
-        <div class="note">只对没在账号行单独指定代理的账号生效（账号绑定优先）；留「默认随机」= 从可用代理里挑。</div>
-      </details>
-      <details class="proxy-section" id="proxyHealthPanel">
-        <summary>自动测活设置</summary>
-        <div class="proxy-fields" id="proxyHealthFields">
-          <label class="wide">检测 URL<input id="proxyHealthURL" type="url"></label>
-          <label>检测间隔（秒）<input id="proxyInterval" type="number" min="1" max="86400" value="60"></label>
-          <label>超时（秒）<input id="proxyTimeout" type="number" min="1" max="300" value="10"></label>
-          <label>连续失败禁用次数<input id="proxyFailures" type="number" min="1" max="100" value="3"></label>
-          <label>连续成功恢复次数<input id="proxySuccesses" type="number" min="1" max="100" value="2"></label>
-        </div>
-        <button type="button" class="primary" id="proxyHealthSave">保存设置</button>
-      </details>
     </section>
 
     <!-- 任务中心：后台自动任务的进展与待办扫描/队列共用一张卡、一个列表
@@ -1298,7 +1327,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button type="button" data-realm="cn">国内版</button>
           <button type="button" data-realm="global">国际版</button>
         </span>
-        <div class="note">切换以分域查看 / 编辑国内版与国际版的独立配置（域名 base 等），共享配置始终显示。</div>
+        <div class="note vtabs-note">切换以分域查看 / 编辑国内版与国际版的独立配置（域名 base 等），共享配置始终显示。</div>
         <div class="box">
           <header><h3>服务</h3><span class="grow"></span><span class="note" id="cfgPath"></span></header>
           <div class="pad">
@@ -1732,7 +1761,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <!-- reqStats：指标行容器（renderRequestMetrics 写入）。合并 #87 时新排版丢了它，
              而 loadLogs 里的 renderRequestMetrics 仍写这个 id —— 元素缺失时抛错被
              loadLogs 的 try/catch 吞掉，整块运行日志渲染不出来（只有它这一个 id 悬空）。 -->
-        <div class="stats" id="reqStats"></div>
+        <div class="stats auto" id="reqStats"></div>
         <div class="fbar" id="reqFilter">
           <input id="reqQ" type="search" placeholder="搜索 IP / UA / 模型 / 账号 / 请求 ID" aria-label="搜索请求记录">
           <select id="reqOutcome" aria-label="按结果筛选">
