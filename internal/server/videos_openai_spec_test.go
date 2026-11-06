@@ -111,13 +111,14 @@ func TestVideoOpenAIPathAcceptsSpecBody(t *testing.T) {
 // GET /v1/videos/{id}/content 取字节；没出片回 409，台账里没有回 404。
 func TestVideoContentEndpoint(t *testing.T) {
 	mp4 := []byte("\x00\x00\x00\x18ftypmp42fake-bytes")
+	allowMediaLoopback(t)
 	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write(mp4)
 	}))
 	defer cdn.Close()
 
-	h := NewHandler(Config{Pool: probePool(1, ""), Upstream: (&videoFake{}).client()})
+	h := NewHandler(Config{Pool: probePool(1, ""), Upstream: (&videoFake{on: func(videoCall) (int, string) { return 200, videoTaskRunning }}).client()})
 	h.videoLedger.put("done-1", "a01", "cn", "minimax-video-h3")
 	h.videoLedger.noteState("done-1", upstream.VideoTaskState{Status: "completed", URLs: []string{cdn.URL + "/v.mp4"}})
 	h.videoLedger.put("run-1", "a01", "cn", "minimax-video-h3")
