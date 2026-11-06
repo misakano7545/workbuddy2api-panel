@@ -20,6 +20,7 @@ func postImage(t *testing.T, h *Handler, body string) *httptest.ResponseRecorder
 
 func TestImagesB64JSONConversion(t *testing.T) {
 	png := []byte("\x89PNG\r\n\x1a\n-fake-png-bytes")
+	allowMediaLoopback(t)
 	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(png)

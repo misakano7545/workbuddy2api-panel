@@ -70,6 +70,7 @@ func newImageToolHandler(f *imageToolFake) *Handler {
 func imageToolCDN(t *testing.T) (string, []byte) {
 	t.Helper()
 	png := []byte("\x89PNG\r\n\x1a\n-fake-png")
+	allowMediaLoopback(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(png)

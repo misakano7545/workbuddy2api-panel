@@ -46,7 +46,7 @@ func imageCallItem(prompt, b64 string) map[string]any {
 }
 
 // imageResultB64 出图回执 → base64：回 b64_json 的模型直接用，回签名直链的取一次字节。
-func imageResultB64(raw []byte) (string, error) {
+func imageResultB64(ctx context.Context, raw []byte) (string, error) {
 	var env struct {
 		Data []struct {
 			URL string `json:"url"`
@@ -65,7 +65,7 @@ func imageResultB64(raw []byte) (string, error) {
 	if env.Data[0].URL == "" {
 		return "", errNoImageData
 	}
-	b, err := fetchMedia(env.Data[0].URL) // 签名直链 12h 有效，取一次就够
+	b, err := fetchMedia(ctx, env.Data[0].URL, mediaFetchMax) // 签名直链 12h 有效，取一次就够
 	if err != nil {
 		return "", err
 	}
@@ -103,7 +103,7 @@ func (h *Handler) imageAugment(ctx context.Context, chat []byte) ([]byte, []any)
 		var b64 string
 		raw, gerr := h.imageGenerate(map[string]any{"prompt": c.Query})
 		if gerr == nil {
-			b64, gerr = imageResultB64(raw)
+			b64, gerr = imageResultB64(ctx, raw)
 		}
 		if gerr != nil {
 			log.Printf("WARN: [responses] image_generation 出图失败: %v", gerr)

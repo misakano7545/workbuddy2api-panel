@@ -50,15 +50,7 @@ const (
 	videoTaskMax = 2048
 	// videoMaxBody 请求体上限（prompt + 可能的 data URL 首帧，1MB 够，避免被塞视频）。
 	videoMaxBody = 4 << 20
-	// videoContentMax 成品下载的字节上限（实测 4s/768P 约 2.9 MB，给足余量但别让单请求吃满内存）。
-	videoContentMax = 256 << 20
-	// mediaFetchMax 图像直链转 base64 时的读取上限（上游出图约 2-4 MB）。
-	mediaFetchMax = 32 << 20
 )
-
-// mediaFetchHTTP 取成品直链（COS 签名 URL）的客户端，视频转字节流与图像转 b64 共用。
-// 超时给足：一个 3 MB 的 mp4 走公网慢链路也要几十秒。
-var mediaFetchHTTP = &http.Client{Timeout: 5 * time.Minute}
 
 // videoPollInterval 轮询间隔。minimax 实测 124s、kling 实测 473s 出片，5s 一跳够用。
 // 用 var 而不是 const：测试把它压到 1ms，避免同步等待用例真睡 5 秒。
@@ -787,34 +779,68 @@ func (h *Handler) videoTasks(w http.ResponseWriter, r *http.Request) {
 
 // videoContent GET /v1/videos/{task_id}/content —— OpenAI Videos 的成品下载口。
 //
-// 上游给的是签名直链（COS，约 12h 有效），本网关不落盘：这里把字节流原样转给客户端，
-// 省掉自己再存一份 3 MB 的 mp4。任务没出片回 409，台账里没有回 404。
+// 上游给的是签名直链（COS，约 12h 有效），本网关不落盘：把字节流原样转给客户端，省掉自己再存
+// 一份 3 MB 的 mp4。任务的定位、单飞、频率护栏与首次出片记账全部复用 GET /v1/videos/{id} 的
+// pollVideoTask，不存在第二套：
+//   - 状态快照只在内存里，提交时存的是 queued、重启后更是空的；没有已出片的快照就按查询路径问一次
+//     所属账号，所以「上游已经出片、网关还停在旧快照」的任务不会被误判成没出片；
+//   - 台账里没有的 id 不探测（noProbe）：取字节是已知任务的事，不该多一个盲查上游的入口，
+//     重启后的任务先用 GET /v1/videos/{id} 收养即可。
+//
+// 任务没出片回 409。
 func (h *Handler) videoContent(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSuffix(strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/videos/"), "/"), "/content")
-	state, _, ok := h.videoLedger.cachedState(id)
-	if !ok || len(state.URLs) == 0 {
-		if _, known := h.videoLedger.get(id); !known {
-			writeVideoNotFound(w, id, videoNotFoundHint)
-			return
+	h.pollVideoTask(w, r, id, videoPollOpts{noProbe: true, serve: h.serveVideoContent})
+}
+
+// serveVideoContent 把已查到的任务状态变成成品字节流（pollVideoTask 的 serve 回调）。
+//
+// 不静默截断：长度已知且超限就在写响应头之前报 502；长度未知（分块 / 被压缩）时边转边数，
+// 超限或读断了就中止连接，让客户端看到一次失败而不是一个被截短的 mp4。只在长度已知时才发
+// Content-Length，且发的就是将要写出的长度。
+func (h *Handler) serveVideoContent(w http.ResponseWriter, r *http.Request, st *chatStat, taskID string, state upstream.VideoTaskState) {
+	fail := func(status int, code, msg, hint string) {
+		st.status, st.outcome = status, "http_error"
+		writeOpenAIErrorHint(w, status, code, msg, hint)
+	}
+	recheck := "GET /v1/videos/" + taskID + " 复查"
+	if !state.Succeeded() {
+		msg := "任务还没有出片"
+		if state.Done() {
+			msg = "任务已失败，没有成品"
 		}
-		writeOpenAIErrorHint(w, http.StatusConflict, "video_not_ready", "任务还没有出片",
-			"GET /v1/videos/"+id+" 查到 completed 再来取字节")
+		fail(http.StatusConflict, "video_not_ready", msg, "GET /v1/videos/"+taskID+" 查到 completed 再来取字节")
 		return
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, state.URLs[0], nil)
-	if err != nil {
-		writeOpenAIError(w, http.StatusInternalServerError, "internal_error", err.Error())
+	if len(state.URLs) == 0 {
+		fail(http.StatusBadGateway, "upstream_error", "任务已完成但上游没给成品直链", recheck)
 		return
 	}
-	resp, err := mediaFetchHTTP.Do(req)
+	resp, err := openMedia(r.Context(), state.URLs[0])
+	if errors.Is(err, errMediaBusy) {
+		w.Header().Set("Retry-After", "5")
+		fail(http.StatusServiceUnavailable, "media_busy", err.Error(), "稍后重试，或直接用 GET /v1/videos/"+taskID+" 里的直链下载")
+		return
+	}
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "取成品失败："+err.Error())
+		hint := recheck
+		var se *mediaStatusError
+		if errors.As(err, &se) {
+			hint = "签名直链一般 12 小时有效，过期请用 " + recheck
+		}
+		log.Printf("videos task=%q: 取成品失败：%v", taskID, err)
+		fail(http.StatusBadGateway, "upstream_error", "取成品失败："+err.Error(), hint)
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		writeOpenAIError(w, http.StatusBadGateway, "upstream_error",
-			fmt.Sprintf("成品直链回 %d（签名一般 12 小时有效，过期请用 GET /v1/videos/%s 复查）", resp.StatusCode, id))
+	n := resp.ContentLength // -1 = 长度未知；0 是确实为空，两者不能混
+	switch {
+	case n == 0:
+		fail(http.StatusBadGateway, "upstream_error", "成品直链回了空内容", recheck)
+		return
+	case n > videoContentMax:
+		fail(http.StatusBadGateway, "upstream_error",
+			fmt.Sprintf("成品 %d 字节，超过转发上限 %d MiB，不转发；请直接用 GET /v1/videos/%s 里的直链下载", n, videoContentMax>>20, taskID), "")
 		return
 	}
 	ct := resp.Header.Get("Content-Type")
@@ -822,11 +848,37 @@ func (h *Handler) videoContent(w http.ResponseWriter, r *http.Request) {
 		ct = "video/mp4"
 	}
 	w.Header().Set("Content-Type", ct)
-	if resp.ContentLength > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
+	if n > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(n, 10))
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, io.LimitReader(resp.Body, videoContentMax))
+	if r.Method == http.MethodHead {
+		return // HEAD 只要头：不读正文，deferred Close 直接放弃这次下载
+	}
+	// 拷贝出错分两种：客户端自己走了（写失败，ctx 已取消）记 499，不算上游故障；上游读短 / 超时记 502。
+	copyFailed := func(written int64, err error) {
+		if r.Context().Err() != nil {
+			st.status, st.outcome = 499, reqlog.OutcomeInterrupted
+			return
+		}
+		st.status, st.outcome = http.StatusBadGateway, "http_error"
+		log.Printf("videos task=%q: 成品转发中断（已转 %d 字节，上限 %d MiB）：%v", taskID, written, videoContentMax>>20, err)
+	}
+	if n > 0 {
+		// 长度已知：传输层保证读到的不会比声明的多；读短了 net/http 会掐断连接，客户端同样看到失败。
+		if written, err := io.Copy(w, resp.Body); err != nil {
+			copyFailed(written, err)
+		}
+		return
+	}
+	written, err := io.Copy(w, io.LimitReader(resp.Body, videoContentMax+1))
+	if written > videoContentMax {
+		err = &mediaTooLargeError{limit: videoContentMax}
+	}
+	if err != nil {
+		copyFailed(written, err)
+		panic(http.ErrAbortHandler) // 响应头已发出，只能掐断连接；不能让分块响应正常收尾
+	}
 }
 
 // videoNotFoundHint 查不到任务时的提示（台账未命中 / 所属账号已不在号池 / 账号说不是它的任务）。
@@ -849,6 +901,14 @@ func (h *Handler) queryVideoTask(taskID string, a *auth.Auth) (upstream.VideoTas
 	return state, a.UID, a.Nickname, nil
 }
 
+// videoPollOpts pollVideoTask 的可选行为（缺省 = GET /v1/videos/{id} 的行为）。
+type videoPollOpts struct {
+	// noProbe 台账里没有的 id 直接 404，不做有界探测（/content 用：取字节只对已知任务有意义）。
+	noProbe bool
+	// serve 拿到状态后替代「回任务 JSON」的出口。
+	serve func(w http.ResponseWriter, r *http.Request, st *chatStat, taskID string, state upstream.VideoTaskState)
+}
+
 // pollVideoTask 查一次任务状态；completed 时（首次）补记扣费。
 //
 // 台账里没有的任务走有界探测（videos_probe.go）；台账命中后分四条路径：
@@ -856,7 +916,19 @@ func (h *Handler) queryVideoTask(taskID string, a *auth.Auth) (upstream.VideoTas
 //  2. 频率护栏（最小间隔 / 限流冷却）内的查询 → 回快照，不打上游；
 //  3. 正常查询 → 单飞合并并发请求，成功则记快照、首次出片记账；
 //  4. 撞上上游限流（429）→ 记冷却窗口，有旧快照就顶上，没有才回 429 + 提示。
-func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID string) {
+func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID string, opts ...videoPollOpts) {
+	var opt videoPollOpts
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	// reply 拿到状态后的出口：缺省回任务 JSON；/content 换成转发字节（见 videoContent）。
+	reply := func(st *chatStat, state upstream.VideoTaskState, model string) {
+		if opt.serve != nil {
+			opt.serve(w, r, st, taskID, state)
+			return
+		}
+		writeJSON(w, http.StatusOK, videoTaskPayload(taskID, state, model, h.videoLedger))
+	}
 	start := time.Now()
 	st := &chatStat{start: start, model: "", mode: "video", toks: -1, budget: h.budget}
 	if tr := requestTraceFrom(r); tr != nil {
@@ -868,6 +940,11 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 
 	owner, known := h.videoLedger.get(taskID)
 	if !known {
+		if opt.noProbe {
+			st.status, st.outcome = http.StatusNotFound, "http_error"
+			writeVideoNotFound(w, taskID, videoNotFoundHint)
+			return
+		}
 		h.pollUnknownVideoTask(w, st, taskID)
 		return
 	}
@@ -880,7 +957,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 	if cached, _, ok := h.videoLedger.cachedState(taskID); ok && cached.Done() {
 		st.uid, st.model = owner.UID, owner.Model
 		st.status, st.outcome = http.StatusOK, "success"
-		writeJSON(w, http.StatusOK, videoTaskPayload(taskID, cached, requestedModel(owner.Model, realm), h.videoLedger))
+		reply(st, cached, requestedModel(owner.Model, realm))
 		return
 	}
 
@@ -889,7 +966,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 		if cached, _, ok := h.videoLedger.cachedState(taskID); ok {
 			st.uid, st.model = owner.UID, owner.Model
 			st.status, st.outcome = http.StatusOK, "throttled"
-			writeJSON(w, http.StatusOK, videoTaskPayload(taskID, cached, requestedModel(owner.Model, realm), h.videoLedger))
+			reply(st, cached, requestedModel(owner.Model, realm))
 			return
 		}
 	}
@@ -914,7 +991,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 		if state.Succeeded() && h.videoLedger.claimCharge(taskID) {
 			h.recordVideoUsage(st, realm, uid, owner.Model, h.modelRate(realm, owner.Model), taskID, state, start)
 		}
-		writeJSON(w, http.StatusOK, videoTaskPayload(taskID, state, requestedModel(owner.Model, realm), h.videoLedger))
+		reply(st, state, requestedModel(owner.Model, realm))
 		return
 	}
 
@@ -926,7 +1003,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 		if cached, _, ok := h.videoLedger.cachedState(taskID); ok {
 			st.model = owner.Model
 			st.status, st.outcome = http.StatusOK, "rate_limited_cached"
-			writeJSON(w, http.StatusOK, videoTaskPayload(taskID, cached, requestedModel(owner.Model, realm), h.videoLedger))
+			reply(st, cached, requestedModel(owner.Model, realm))
 			return
 		}
 		st.status, st.outcome = ue.Status, "http_error"

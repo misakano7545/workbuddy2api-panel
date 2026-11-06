@@ -17,6 +17,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -174,7 +175,7 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 		lastErr = nil
 		recordImageUsage(h, st, realm, a.UID, bare, modelRate, data, req, start)
 		if asString(req["response_format"]) == "b64_json" {
-			data = b64JSONImages(data)
+			data = b64JSONImages(r.Context(), data)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(data)
@@ -464,8 +465,9 @@ func fileToDataURL(fh *multipart.FileHeader) (string, error) {
 //
 // 上游无视这个参数、永远回签名直链（2026-11-05 实测 response_format=b64_json 仍回 url），
 // 所以只能在网关这一层转。取图失败就保留 url：图已经出了、也已经扣费，不能因为转码失败
-// 把成品丢掉。
-func b64JSONImages(data []byte) []byte {
+// 把成品丢掉。回读走 media_fetch.go 的收口（只认产物域、不跟重定向、超限报错不截断），
+// 这些都归入「取图失败」。
+func b64JSONImages(ctx context.Context, data []byte) []byte {
 	var obj map[string]any
 	if json.Unmarshal(data, &obj) != nil {
 		return data
@@ -481,7 +483,7 @@ func b64JSONImages(data []byte) []byte {
 		if u == "" {
 			continue
 		}
-		raw, err := fetchMedia(u)
+		raw, err := fetchMedia(ctx, u, mediaFetchMax)
 		if err != nil {
 			log.Printf("images: response_format=b64_json 取图失败，保留直链: %v", err)
 			continue
@@ -498,19 +500,6 @@ func b64JSONImages(data []byte) []byte {
 		return data
 	}
 	return out
-}
-
-// fetchMedia 取成品直链的字节（图像转 b64 用；视频走流式转发，见 videos.go videoContent）。
-func fetchMedia(url string) ([]byte, error) {
-	resp, err := mediaFetchHTTP.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("直链回 %d", resp.StatusCode)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, mediaFetchMax))
 }
 
 // boundaryOf 从 Content-Type 里取 multipart boundary。
