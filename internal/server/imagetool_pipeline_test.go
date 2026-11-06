@@ -113,6 +113,39 @@ func TestResponsesImageToolBlockedByBudgetGate(t *testing.T) {
 	}
 }
 
+// 前置闸放行之后，出图入账把累计推过日上限：对话一步不能再按新累计把请求拒掉，否则图扣了钱却交不出去。
+// 日上限 10、已用 5，出图 5.71 之后累计 10.71，对话一步照常跑、整个请求 200。
+func TestResponsesImageToolNotRejectedAfterImageCrossesLimit(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run("stream="+strconv.FormatBool(stream), func(t *testing.T) {
+			f := &pipeFake{imgResp: func(int) (int, string, error) { return 200, imageOK, nil }}
+			h := f.handler("c1")
+			h.SetBudgetLimit(10)
+			h.budget.add(5, true)
+
+			rec := postImageToolReq(context.Background(), h, stream)
+			if f.imgCalls.Load() != 1 || f.chatCalls.Load() != 2 {
+				t.Fatalf("出图后对话一步应照常执行：出图 %d 次，对话 %d 次", f.imgCalls.Load(), f.chatCalls.Load())
+			}
+			if rec.Code != 200 || strings.Contains(rec.Body.String(), "response.failed") {
+				t.Fatalf("已放行的请求不该在对话一步被拒：code=%d body=%.300s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+// 流式请求在出图期间断连：回 499、什么都不写，不能补一条 200 + response.failed 被记成成功请求。
+func TestResponsesImageToolStreamDisconnectIs499(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := &pipeFake{imgResp: func(int) (int, string, error) { return 200, imageOK, nil }, onImage: cancel}
+	h := f.handler("c1")
+	rec := postImageToolReq(ctx, h, true)
+	if rec.Code != 499 || strings.Contains(rec.Body.String(), "response.failed") {
+		t.Fatalf("流式断连应 499 且不写回程：code=%d body=%s", rec.Code, rec.Body)
+	}
+}
+
 // 缺陷 3a：代理池不可用与账号无关，出图第一次遇到就停，不轮完全部账号。
 func TestImageGenerateStopsOnProxyError(t *testing.T) {
 	f := &pipeFake{imgResp: func(int) (int, string, error) {

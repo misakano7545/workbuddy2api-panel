@@ -900,8 +900,12 @@ func (h *Handler) admitBudget(w http.ResponseWriter) bool {
 	return false
 }
 
+// budgetAdmittedKey 上游入口（/v1/responses 的托管出图）已经过了积分闸：同一请求后面的对话环节不再判。
+// 否则出图入账后累计越过上限，对话一步就会被拒——图扣了钱却交不出去。代价是最多超支一次对话。
+type budgetAdmittedKey struct{}
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	if !h.admitBudget(w) {
+	if admitted, _ := r.Context().Value(budgetAdmittedKey{}).(bool); !admitted && !h.admitBudget(w) {
 		return
 	}
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
