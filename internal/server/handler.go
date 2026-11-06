@@ -882,16 +882,30 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 	return dynamicModelsCache.ids
 }
 
+// admitBudget 过积分闸，拒绝时已写出错误响应并返回 false。chatCompletions 与「出图先于
+// 对话」的 Responses 入口共用，两处的拒绝形状必须一致。
+func (h *Handler) admitBudget(w http.ResponseWriter) bool {
+	ok, why := h.budget.admit()
+	if ok {
+		return true
+	}
+	used, limit, _, _ := h.budget.snapshot()
+	code, msg := "daily_budget_exceeded", fmt.Sprintf(
+		"daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit)
+	if why != "" {
+		// 快速闸的拒因自带可读说明，别和「当日用光」混成一句话
+		code, msg = "credit_guard_tripped", why
+	}
+	writeOpenAIError(w, http.StatusTooManyRequests, code, msg)
+	return false
+}
+
+// budgetAdmittedKey 上游入口（/v1/responses 的托管出图）已经过了积分闸：同一请求后面的对话环节不再判。
+// 否则出图入账后累计越过上限，对话一步就会被拒——图扣了钱却交不出去。代价是最多超支一次对话。
+type budgetAdmittedKey struct{}
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	if ok, why := h.budget.admit(); !ok {
-		used, limit, _, _ := h.budget.snapshot()
-		code, msg := "daily_budget_exceeded", fmt.Sprintf(
-			"daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit)
-		if why != "" {
-			// 快速闸的拒因自带可读说明，别和「当日用光」混成一句话
-			code, msg = "credit_guard_tripped", why
-		}
-		writeOpenAIError(w, http.StatusTooManyRequests, code, msg)
+	if admitted, _ := r.Context().Value(budgetAdmittedKey{}).(bool); !admitted && !h.admitBudget(w) {
 		return
 	}
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；

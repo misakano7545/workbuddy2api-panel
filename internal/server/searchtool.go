@@ -54,15 +54,21 @@ type serverSearchTool struct {
 // toolProbeFunction 服务端工具声明 → 上游认的 function 工具（模型据此自己写参数：
 // web_search 的检索词、image_generation 的提示词）。
 func toolProbeFunction(name string) map[string]any {
+	// 参数名随工具走：image_generation 的描述要的是 prompt，schema 若还写 query 就前后矛盾，
+	// 只靠 toolCalls 两个键都认才勉强对上；这里让 schema 与描述一致。
+	param, desc := "query", "Search query"
+	if name == imageToolName {
+		param, desc = "prompt", "Detailed visual prompt for the image"
+	}
 	return map[string]any{"type": "function", "function": map[string]any{
 		"name":        name,
 		"description": probeFunctionDescription(name),
 		"parameters": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"query": map[string]any{"type": "string", "description": "Search query"},
+				param: map[string]any{"type": "string", "description": desc},
 			},
-			"required": []string{"query"},
+			"required": []string{param},
 		},
 	}}
 }

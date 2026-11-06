@@ -32,6 +32,7 @@ import (
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
+	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 	"github.com/misakano7545/workbuddy2api-panel/internal/usage"
 )
@@ -233,7 +234,11 @@ func (h *Handler) imageModel(model string) (string, string, error) {
 // imageGenerate 网关侧出一次图：选号 → 出图 → 记账，返回上游原始回执（图片链接在
 // data[].url 里）。托管 image_generation 工具的执行器走这里（见 imagetool.go），
 // 与 HTTP 入口共享模型口径、选号重试与记账口径。
-func (h *Handler) imageGenerate(req map[string]any) ([]byte, error) {
+//
+// 流水行自成一行，带该 Responses 请求的 rid/IP/UA 以便对账；不碰 tr.stat（那是对话
+// 本身的统计对象，归 chatCompletions）。客户端断连后不再起新的出图尝试；已经发出去的
+// 那次不取消——上游多半照扣，取消只会让回执丢失、账本少记。
+func (h *Handler) imageGenerate(ctx context.Context, req map[string]any) ([]byte, error) {
 	realm, bare, err := h.imageModel(asString(req["model"]))
 	if err != nil {
 		return nil, err
@@ -244,6 +249,10 @@ func (h *Handler) imageGenerate(req map[string]any) ([]byte, error) {
 		return nil, err
 	}
 	st := newChatStat(time.Now(), bare, false, h.budget)
+	if tr, _ := ctx.Value(requestTraceKey{}).(*requestTrace); tr != nil {
+		st.requestID = tr.id
+		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
+	}
 	defer st.done()
 	modelRate := ""
 	if h.cfg.Upstream != nil {
@@ -252,6 +261,10 @@ func (h *Handler) imageGenerate(req map[string]any) ([]byte, error) {
 	tried := map[string]bool{}
 	var lastErr error
 	for attempt := 0; attempt < imageAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			lastErr = err
+			break
+		}
 		a := h.cfg.Pool.PickExcludingForRealm(tried, bare, realm)
 		if a == nil {
 			break
@@ -261,15 +274,19 @@ func (h *Handler) imageGenerate(req map[string]any) ([]byte, error) {
 		data, ierr := h.cfg.Upstream.ImageGenerations(a, json.RawMessage(out))
 		if ierr != nil {
 			lastErr = ierr
+			if proxypool.IsError(ierr) {
+				break // 代理池不可用与账号无关，换号只会重复同样的失败（同 images）
+			}
 			var ue *upstream.Error
 			if errors.As(ierr, &ue) {
 				h.applyErrorPolicy(a.UID, ue.Kind, ue.Msg, bare, ue)
 				if requestLevelFailFastKind(ue.Kind) {
 					// 与账号无关的错误：换号必然同样失败
-					st.status = ue.Status
+					st.status, st.outcome = max(ue.Status, http.StatusBadRequest), "http_error"
 					return nil, ierr
 				}
 			}
+			log.Printf("images %s model=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), bare, attempt+1, ierr)
 			continue
 		}
 		recordImageUsage(h, st, realm, a.UID, bare, modelRate, data, req, st.start)
@@ -278,7 +295,11 @@ func (h *Handler) imageGenerate(req map[string]any) ([]byte, error) {
 	if lastErr == nil {
 		lastErr = fmt.Errorf("没有可用的 %s 账号", realm)
 	}
-	st.status = http.StatusBadGateway
+	if ctx.Err() != nil {
+		st.status, st.outcome = 499, reqlog.OutcomeInterrupted // 客户端走了，不算上游故障
+	} else {
+		st.status = http.StatusBadGateway
+	}
 	return nil, lastErr
 }
 

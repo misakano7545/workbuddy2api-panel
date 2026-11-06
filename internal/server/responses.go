@@ -6,6 +6,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -35,6 +36,24 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	// stream 标志在增强前后不变（增强只追加 messages），先建回程写入器：下面的积分闸
+	// 要和 chatCompletions 里的拒绝走同一条回程（流式请求的拒绝也折成 response.failed）。
+	var peek struct {
+		Stream bool `json:"stream"`
+	}
+	_ = json.Unmarshal(chat, &peek)
+	rw := &responsesWriter{ResponseWriter: w, stream: peek.Stream, meta: meta}
+	defer rw.finish()
+	// 声明了托管 image_generation 的请求，探测 + 出图（真扣积分）都发生在 chatCompletions
+	// 的积分闸之前：闸要提前到这里，否则到顶后仍会白出一张图，对话那一步才被拒、图丢了。
+	ctx := r.Context()
+	if meta.imageTool {
+		if !h.admitBudget(rw) {
+			return
+		}
+		// 已经放行：出图会把累计推高，对话一步不能再按新累计把整个请求拒掉（见 budgetAdmittedKey）。
+		ctx = context.WithValue(ctx, budgetAdmittedKey{}, true)
+	}
 	// 声明了托管 web_search → 网关侧执行（探测→检索→结果注入，同 /v1/messages）。
 	if len(srv) > 0 {
 		if augmented, _ := h.searchAugment(r.Context(), chat, srv[0]); augmented != nil {
@@ -46,16 +65,14 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		if augmented, items := h.imageAugment(r.Context(), chat); augmented != nil {
 			chat, meta.preItems = augmented, items
 		}
+		if r.Context().Err() != nil { // 探测或出图期间客户端走了：不再跑对话，也不写任何回程
+			rw.abort(499)
+			return
+		}
 	}
-	var peek struct {
-		Stream bool `json:"stream"`
-	}
-	_ = json.Unmarshal(chat, &peek)
-	r2 := r.Clone(r.Context())
+	r2 := r.Clone(ctx)
 	r2.Body = io.NopCloser(bytes.NewReader(chat))
 	r2.ContentLength = int64(len(chat))
-	rw := &responsesWriter{ResponseWriter: w, stream: peek.Stream, meta: meta}
-	defer rw.finish()
 	h.chatCompletions(rw, r2)
 }
 
@@ -895,6 +912,13 @@ type responsesWriter struct {
 	body    []byte
 	x       streamState
 	meta    *responsesMeta
+	aborted bool // 客户端已走：finish 什么都不写（否则流式会补一条 200 + response.failed，被记成成功）
+}
+
+// abort 客户端已断开时收尾：把状态码直接交给底层写入器（请求统计据此记 499），之后不再写任何内容。
+func (w *responsesWriter) abort(code int) {
+	w.aborted, w.status = true, code
+	w.ResponseWriter.WriteHeader(code)
 }
 
 type streamState struct {
@@ -969,6 +993,9 @@ func (w *responsesWriter) Write(p []byte) (int, error) {
 }
 
 func (w *responsesWriter) finish() {
+	if w.aborted {
+		return
+	}
 	if w.stream {
 		if strings.Contains(w.Header().Get("Content-Type"), "event-stream") || w.hdrSent {
 			if w.x.created && !w.x.completed && !w.x.failed {
