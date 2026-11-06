@@ -330,6 +330,55 @@ HTTP/HTTPS 使用标准代理传输；`socks5` 在本机解析目标域名，`so
 
 成长中心连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。网关把它挂在每日签到排程末尾自动跑闭环（见[定时任务](#定时任务)）：档位解锁当天自动兑换、有抽奖次数自动抽完，全程无需人工盯。
 
+## 🪟 Windows 常驻运行（开机自启 + 崩溃重启）
+
+二进制**不自带守护**：进程退出后不会自己回来，也没有内置服务（SCM）模式。把面板当本地网关用时（上游客户端写死 `127.0.0.1:<端口>`），进程不在等于该 provider 整体不可用——客户端立刻拿到 `connection refused`，不会重试。所以「开机自启 + 退出即重启」得由系统侧提供，下面两种任选一种。
+
+先确认三件事：`wb2api.exe` 的绝对路径（工作目录就是放 `config.json` 的地方）；配置里 `listen` 默认只绑 `127.0.0.1`，不用额外放通防火墙；手动跑一次能起（首次会自动生成含随机 `api_key` 的 `config.json`），再交给常驻项。
+
+### 方案 A：NSSM（推荐，真正的服务）
+
+NSSM 按「进程退出」拉起，不看退出码——面板无论因何退出都会回来，日志也一起接管：
+
+```powershell
+nssm install wb2api-panel 'C:\wb2api\wb2api.exe'
+nssm set wb2api-panel AppDirectory 'C:\wb2api'
+nssm set wb2api-panel Start SERVICE_AUTO_START
+nssm set wb2api-panel AppExit Default Restart
+nssm set wb2api-panel AppStdout 'C:\wb2api\service.log'
+nssm set wb2api-panel AppStderr 'C:\wb2api\service.log'
+nssm start wb2api-panel
+```
+
+WinSW 同理（`<startmode>Automatic</startmode>` + `<onfailure action="restart"/>`），不另举例。
+
+### 方案 B：任务计划程序（系统自带，不需要装东西）
+
+管理员 PowerShell 执行，把路径换掉：
+
+```powershell
+$exe = 'C:\wb2api\wb2api.exe'
+$act = New-ScheduledTaskAction -Execute $exe -WorkingDirectory (Split-Path $exe)
+$trg = New-ScheduledTaskTrigger -AtStartup
+$set = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+       -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+Register-ScheduledTask -TaskName 'wb2api-panel' -Action $act -Trigger $trg -Settings $set -RunLevel Highest
+Start-ScheduledTask -TaskName 'wb2api-panel'
+```
+
+两个坑：
+- `-ExecutionTimeLimit 0`：默认任务跑满 3 天会被结束掉，常驻进程必须关掉这个限制；
+- 这里的「失败后重启」**只对非零退出码生效**——进程自己正常退出（码 0）或被人 `taskkill` 掉，任务不会重来。所以要做到「任何原因退出都拉起」，用方案 A。
+
+### 更新时的注意事项
+
+「一键更新」的设计是**先停旧进程 → 换二进制 → 起新进程**，中间有几秒端口空窗，这期间的请求会失败一次（客户端一般不重试）。两件事别忘：
+
+1. 常驻项若在旧进程退出后立刻拉起，可能抢在 updater 起新进程之前占住端口——更新完确认只有一个进程在跑：`Get-Process wb2api` 与 `netstat -ano | findstr :7863` 的 PID 要对得上；
+2. 更新前后各打一次 `curl http://127.0.0.1:7863/healthz`，确认新进程确实起来了（面板右下角也会显示版本号）。
+
+> 内置服务模式（`wb2api.exe install-service` 走 SCM）没有做：更新重启要连带重写服务控制逻辑，且 CI 只有 Linux 构建机，Windows 服务生命周期没法做回归。用上面两种效果等价。
+
 ## 🆚 与上游的差异
 
 本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（均已在真实多账号环境验证）：
