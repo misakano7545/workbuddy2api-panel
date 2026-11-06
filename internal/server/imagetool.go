@@ -101,7 +101,7 @@ func (h *Handler) imageAugment(ctx context.Context, chat []byte) ([]byte, []any)
 			break
 		}
 		var b64 string
-		raw, gerr := h.imageGenerate(map[string]any{"prompt": c.Query})
+		raw, gerr := h.imageGenerate(ctx, map[string]any{"prompt": c.Query})
 		if gerr == nil {
 			b64, gerr = imageResultB64(ctx, raw)
 		}
