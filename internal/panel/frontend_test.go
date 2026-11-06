@@ -2135,3 +2135,86 @@ func TestAppJSAllCalledFunctionsDefined(t *testing.T) {
 		}
 	}
 }
+
+// TestAppJSBalanceWindowFilterWired 钉住「余额趋势」的窗口选择器与刷新按钮**真的接了事件**。
+//
+// 为什么需要（issue #186）：这两个控件在 index.html 里一直都在，loadBalance 也会读
+// `#bhWindow.value`，但没人给它们绑事件——只有切视图才会重跑一次。用户改窗口、点刷新
+// 全都没反应，看起来就是「时间筛选器失效」。
+//
+// 判据是行为而非字面：在 node + DOM 桩里调用绑上去的处理函数，看它有没有按当前窗口值
+// 去取数据，而不是 grep 源码里有没有那两行。
+func TestAppJSBalanceWindowFilterWired(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; balance filter wiring test skipped")
+	}
+	harness := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; }, apply() { return inert; }, construct() { return inert; }, has() { return true; },
+});
+// 只有这两个控件给真对象：要读回 app.js 绑上去的 onchange/onclick 并调用它们。
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { id, value: '', innerHTML: '', textContent: '', style: {}, className: '', setAttribute() {}, getAttribute() { return null; }, querySelectorAll() { return []; }, addEventListener() {}, appendChild() {} };
+  return els[id];
+}
+const fetched = [];
+// 先把两个控件建出来：撤掉接线时 getElementById 不会被子调用，桩里没有它们就会
+// 以「桩没拿到」这种看不清的错失败，而真正想说的是「没绑事件」。
+el('bhWindow'); el('btnBalHist');
+const sandbox = new Proxy({
+  location: { hash: '#accounts' },   // 不要在加载期就落到 balhist，否则请求数是脏的
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: { getElementById: id => (id === 'bhWindow' || id === 'btnBalHist') ? el(id) : inert,
+    querySelectorAll: () => [], querySelector: () => inert, addEventListener() {},
+    documentElement: inert, head: inert, body: inert, createElement: () => inert, cookie: '' },
+  fetch: u => { fetched.push(String(u)); return new Promise(() => {}); },  // 永不 resolve：只验「有请求发出」
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, WeakMap, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
+}, { get(t, k) { return t[k]; }, has() { return true; } });
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+try { vm.runInContext("'use strict';\n" + src, sandbox, { filename: 'app.js' }); }
+catch (e) { console.log('LOAD FAIL: ' + (e && e.stack ? e.stack : e)); process.exit(2); }
+
+function fail(m) { console.log('FAIL: ' + m); process.exit(1); }
+const w = els.bhWindow, b = els.btnBalHist;
+if (!w) fail('桩没拿到 #bhWindow');
+if (typeof w.onchange !== 'function') fail('#bhWindow 没有绑定 onchange —— 改了窗口不会重新取数（issue #186）');
+w.value = '1'; w.onchange();
+if (!fetched.some(u => u.indexOf('/panel/api/balance_history?days=1') >= 0))
+  fail('改窗口后没有按 days=1 取数，实际请求：' + JSON.stringify(fetched));
+if (!b) fail('桩没拿到 #btnBalHist');
+if (typeof b.onclick !== 'function') fail('#btnBalHist 没有绑定 onclick —— 刷新按钮是死的');
+const before = fetched.length;
+w.value = '7'; b.onclick();
+if (fetched.length <= before) fail('点刷新没有重新取数');
+const last = fetched[fetched.length - 1];
+if (last.indexOf('days=7') < 0) fail('刷新用的是过期的窗口值，实际请求：' + last);
+console.log('OK');
+process.exit(0);
+`
+	hf, err := os.CreateTemp(t.TempDir(), "balwire-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hf.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	hf.Close()
+	out, err := exec.Command(node, hf.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("余额趋势控件接线测试失败: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("OK")) {
+		t.Fatalf("余额趋势控件接线测试未通过:\n%s", out)
+	}
+}

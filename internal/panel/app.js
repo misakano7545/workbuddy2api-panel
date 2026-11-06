@@ -4991,6 +4991,10 @@ async function loadBalance() {
     if (host) host.innerHTML = '<div class="us-empty">读取余额趋势失败：' + esc(e.message) + '</div>';
   }
 }
+/* 窗口选择与「刷新」自己没有事件：切换视图才会重跑 loadBalance，
+   改了窗口或点刷新都没反应，控件形同摆设（issue #186）。 */
+if ($('bhWindow')) $('bhWindow').onchange = loadBalance;
+if ($('btnBalHist')) $('btnBalHist').onclick = loadBalance;
 
 /* ── 图表与域标签工具（迁移遗漏，20261021 补齐）── */
 const CHART_FALLBACK_W = 760;
