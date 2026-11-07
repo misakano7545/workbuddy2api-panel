@@ -835,6 +835,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// （或整个流零有效帧）就返回 HeadVetoError 而不写字节——上层据此换号重试，
 	// 客户端看不到这次失败（见 HeadVetoError）。
 	headOpen := true
+	// upstreamDone 上游是否显式发过 data: [DONE]。与 finishSeen（本层是否已向客户端
+	// 写出过 finish_reason）合起来判「这段流是不是被截断」：两者都没有 = 上游连接在
+	// 说一半时断了，既没有正常收尾也没给终态。
+	upstreamDone := false
 readLoop:
 	for {
 		line, err := br.ReadString('\n')
@@ -843,6 +847,7 @@ readLoop:
 		case strings.HasPrefix(trimmed, "data: [DONE]"):
 			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
 			// [DONE] 统一在循环结束后写出，保证恰好一个。
+			upstreamDone = true
 			break readLoop
 		case strings.HasPrefix(trimmed, "data: "):
 			payload := strings.TrimPrefix(trimmed, "data: ")
@@ -923,6 +928,20 @@ readLoop:
 				return werr
 			}
 		}
+	}
+	// 截断兜底：上游既没给 finish_reason，也没发 data: [DONE] 就 EOF —— 这是上游连接
+	// 说到一半断了，不是正常收尾。此前这种流只会补一个 [DONE]：chat 客户端看到「内容 +
+	// 结束」但 finish_reason 为空，responses 适配器更直接回 response.completed，Agent 侧
+	// 表现就是「说到一半停了、也不报错」，只能人工接着催。这里补一帧截断终态：chat 侧看到
+	// finish_reason=length（TruncationFinishReason），responses 侧映射成
+	// incomplete(max_output_tokens)，由客户端自己决定续写/重试——网关不再把断流伪装成成功。
+	// 只在本层一个终态都没发过时补（否则两个 finish_reason，后一个会洗掉前一个）。
+	if !upstreamDone && !finishSeen && !toolFinishSent && validFrames > 0 {
+		log.Printf("WARN: [server] stream 上游未给终态就结束（无 finish_reason、无 data: [DONE]，%d 个有效帧）→ 按截断收尾", validFrames)
+		if werr := writeChunk(finishOnlyFrame(map[string]any{}, TruncationFinishReason), ""); werr != nil {
+			return werr
+		}
+		finishSeen = true
 	}
 	// 空流（0 有效帧）：尚未写出任何字节时先走首帧否决（上层换号比补一帧假成功的
 	// error 更有价值）；已经写过注释/心跳行（响应头已提交）则只能照旧兜底——先写一帧
