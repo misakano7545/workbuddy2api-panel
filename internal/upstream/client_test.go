@@ -150,6 +150,12 @@ func TestClassify(t *testing.T) {
 		{429, `{"code":1,"msg":"too many requests"}`, ErrSoftRate},
 		{429, `{"requestId":"6021","msg":"rate limit"}`, ErrSoftRate},
 		{429, `{"requestId":"6020","msg":"rate limit"}`, ErrSoftRate},
+		// 11134「model provider is temporarily unavailable」：供应商过载，与账号无关。
+		// 落 ErrServer 会按 5xx 罚号 + 换号，而换号撞同一 provider 且打断账号级前缀缓存
+		// （issue #188）。认结构化 code；只有文案、没有 code 的仍是普通 5xx。
+		{500, `{"code":11134,"msg":"the model provider is temporarily unavailable, please retry later or switch to another model","requestId":"01a1b4d1b3f45f4b99c406eb04d68909","retry_policy":{"retry":true,"retry_after":8}}`, ErrUpstreamBusy},
+		{503, `{"code":11134,"msg":"the model provider is temporarily unavailable"}`, ErrUpstreamBusy},
+		{500, `{"msg":"the model provider is temporarily unavailable"}`, ErrServer},
 		// 11148 工具配对断裂：请求内容级（上游「直接重试无效，请新建任务」），
 		// 换号/重试必然同样失败——不得落 ErrClient 白轮转全池。
 		{400, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrToolMismatch},
@@ -243,6 +249,9 @@ func TestParseQueueRetryAfter(t *testing.T) {
 		{"6020 真机形态", `{"code":6020,"msg":"queue.waiting.title","requestId":"01a181ca3b67934d01c3f64599c8490c","data":{"queue_position":2502,"queue_size":"999+","retry_after":40,"estimated_wait":12510}}`, 40 * time.Second, true},
 		{"retry_after=0（不该出现的边界）", `{"code":6020,"data":{"retry_after":0}}`, 0, false},
 		{"6021 无 data（queue.full 无等待口径）", `{"code":6021,"msg":"queue.full.title","requestId":"b1bc87ea"}`, 0, false},
+		// 11134 供应商过载：口径在 retry_policy.retry_after（issue #188 生产实测形态）。
+		{"11134 retry_policy 形态", `{"code":11134,"msg":"the model provider is temporarily unavailable, please retry later or switch to another model","requestId":"01a1b4d1b3f45f4b99c406eb04d68909","retry_policy":{"retry":true,"retry_after":8}}`, 8 * time.Second, true},
+		{"11134 retry_policy 无 retry_after", `{"code":11134,"msg":"model unavailable","retry_policy":{"retry":true}}`, 0, false},
 		{"非 JSON", `upstream unavailable`, 0, false},
 		{"空 body", ``, 0, false},
 	}

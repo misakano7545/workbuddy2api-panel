@@ -1625,7 +1625,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 原状态，让下游用自己的重试策略消化排队。
 			if kind == upstream.ErrUpstreamBusy {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				// 只释放租约，**不解绑会话粘性**：这是上游容量信号（账号无过错），换号会
+				// 丢掉账号级前缀缓存（issue #188：同号命中 97–99%、换号 0–12%）。保留绑定 →
+				// 客户端按 Retry-After 重试时仍回同一个号，缓存不重建；真换了号成功，
+				// 下方成功分支会用 Bind 覆盖旧绑定，粘性照样跟随。
+				releaseHeld()
 				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
 				// 6020 带 data.retry_after（实测 40s、position 2502）时不再换号：上游已给出
 				// 「N 秒后重试」的通道级口径，在这几毫秒内换号必然撞同一堵墙，只是把同一份

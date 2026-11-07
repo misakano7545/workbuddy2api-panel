@@ -501,24 +501,36 @@ func ParseRetryAfter(h http.Header) (time.Duration, bool) {
 	return 0, false
 }
 
-// parseQueueRetryAfter 从 6020/6021 排队响应的 body 抽上游明示的重试等待
-// （data.retry_after，整数秒）。上游把排队口径放在 body 而不是 Retry-After 头
-// （2026-10-28 真机：429 + code 6020，data 含 queue_position/queue_size/
-// retry_after/estimated_wait，头侧无任何等待信息），ParseRetryAfter（只认头）
-// 拿不到。只认结构化 data 字段——msg 是 i18n 键（queue.waiting.title）无数值
-// 可解析，requestId 等恰好含数字的字段不误伤。超过 retryAfterSanity 按异常值
-// 封顶（estimated_wait 是另一个字段，不会误入；防上游口径漂移时把天文数字带回）。
-// 解析不到返回 false，调用方回落本地兜底。
+// parseQueueRetryAfter 从排队/容量信封的 body 抽上游明示的重试等待时长。
+// 两种形态都认（整数秒，超 retryAfterSanity 按异常值封顶）：
+//
+//	6020/6021 排队：data.retry_after。2026-10-28 真机实测 429 + code 6020，data 含
+//	  queue_position/queue_size/retry_after/estimated_wait，头侧无等待信息。
+//	11134 供应商过载：retry_policy.retry_after。2026-11-07 生产实测 500 + code 11134，
+//	  retry_policy={retry:true,retry_after:N}，同样没有 Retry-After 头。
+//
+// ParseRetryAfter（只认头）拿不到这两处口径。只认结构化字段——msg 是 i18n 键无数值
+// 可解析，requestId 等恰好含数字的字段不误伤。解析不到返回 false，调用方回落本地兜底。
 func parseQueueRetryAfter(body []byte) (time.Duration, bool) {
 	var env struct {
 		Data struct {
 			RetryAfter int64 `json:"retry_after"`
 		} `json:"data"`
+		RetryPolicy struct {
+			RetryAfter int64 `json:"retry_after"`
+		} `json:"retry_policy"`
 	}
-	if err := json.Unmarshal(body, &env); err != nil || env.Data.RetryAfter <= 0 {
+	if err := json.Unmarshal(body, &env); err != nil {
 		return 0, false
 	}
-	d := time.Duration(env.Data.RetryAfter) * time.Second
+	secs := env.Data.RetryAfter
+	if secs <= 0 {
+		secs = env.RetryPolicy.RetryAfter
+	}
+	if secs <= 0 {
+		return 0, false
+	}
+	d := time.Duration(secs) * time.Second
 	if d > retryAfterSanity {
 		d = retryAfterSanity
 	}
@@ -686,6 +698,19 @@ func Classify(status int, body string) ErrKind {
 	// 任意状态码都认（防上游换状态码）；结构化 code 主判，requestId 等字段恰好
 	// 含 "6020"/"6021" 不误伤（hasBusinessCode 只认 "code": 键）。
 	if hasBusinessCode(body, "6020") || hasBusinessCode(body, "6021") {
+		return ErrUpstreamBusy
+	}
+	// 11134「the model provider is temporarily unavailable, please retry later or
+	// switch to another model」：模型供应商侧过载，与账号健康无关（2026-11-07 生产实测
+	// 15 分钟内跨 6 个不同账号同时返回，issue #188）。
+	//
+	// 落 ErrServer 的代价是双向的：①按 5xx 喂熔断/降权（threshold 3 → 30m）把整片
+	// 健康号在高峰期打进冷却；②换号重试撞的是同一个 provider，白耗在途名额，且换号
+	// 打断 session_sticky 的账号级前缀缓存（上游 prompt cache 按账号隔离，同号 97–99%
+	// vs 换号 0–12%）。
+	// 归 ErrUpstreamBusy = 不罚号 + body 侧解析 retry_policy.retry_after 后不轮转，
+	// 与 6020/6021 同一族（上游容量信号，自带重试口径）。
+	if hasBusinessCode(body, "11134") {
 		return ErrUpstreamBusy
 	}
 	// status==429 先于 hardMarkers：限流响应 body 高频携带 "quota exceeded"/

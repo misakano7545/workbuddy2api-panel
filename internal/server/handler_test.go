@@ -311,6 +311,59 @@ func TestChatQueueWaitingRetryAfterFromBody(t *testing.T) {
 	}
 }
 
+// TestChatProviderUnavailableDoesNotRotateOrUnbind 上游 500 + code 11134
+// 「the model provider is temporarily unavailable」是供应商侧过载（issue #188：
+// 15 分钟内跨 6 个不同账号同时返回），与账号健康无关。三件事必须同时成立：
+//   - 不罚号（不冷却/不熔断/不喂连败）——否则高峰期把整片健康号打进 30m 冷却；
+//   - body 的 retry_policy.retry_after 当 Retry-After 上报，且**不换号**——
+//     换号撞同一个 provider，白耗在途名额；
+//   - 会话粘性绑定保留——上游前缀缓存按账号隔离，解绑后重试落到别的号等于从零
+//     重建缓存（同号 97–99% vs 换号 0–12%）。
+func TestChatProviderUnavailableDoesNotRotateOrUnbind(t *testing.T) {
+	const upstreamBody = `{"code":11134,"msg":"the model provider is temporarily unavailable, please retry later or switch to another model","requestId":"01a1b4d1b3f45f4b99c406eb04d68909","retry_policy":{"retry":true,"retry_after":8}}`
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 500, upstreamBody, false
+	})
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"deep1", "deep2"} },
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "deep1", AccessToken: "at-deep1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "deep2", AccessToken: "at-deep2", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("deep1", 2000, 0)
+	p.SetCredits("deep2", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
+	sess.Bind("conv-9", "deep1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-9"}}`)))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d body=%s (want 429 + Retry-After)", rec.Code, rec.Body)
+	}
+	if ra := rec.Header().Get("Retry-After"); ra != "8" {
+		t.Errorf("Retry-After=%q want 8（retry_policy.retry_after，非本地兜底 5s）", ra)
+	}
+	if !strings.Contains(rec.Body.String(), "01a1b4d1b3f45f4b99c406eb04d68909") {
+		t.Errorf("429 body 应透传上游原文（含 requestId）: %s", rec.Body)
+	}
+	if calls["Bearer at-deep1"] != 1 || calls["Bearer at-deep2"] != 0 {
+		t.Errorf("calls=%v want 只打粘性号一次（retry_after 在案时不轮转）", calls)
+	}
+	if uid, ok := st.lastUID("conv-9"); !ok || uid != "deep1" {
+		t.Errorf("会话绑应保留 deep1（换号会丢账号级前缀缓存），got %s ok=%v", uid, ok)
+	}
+	s, _ := p.Status("deep1")
+	if s.Cooling || s.Disabled || s.ErrTotal != 0 || s.BreakerFails != 0 || s.SoftStreak != 0 {
+		t.Errorf("11134 是供应商过载，不得罚号: %+v", s)
+	}
+}
+
 // TestChatModelParamInvalidFailsFastWithoutPenalty 上游 400 + code 11133
 // （model_param_invalid / 「the request parameters were rejected by the model provider」，
 // 实测形态：缺 messages、空 messages、模型不支持图片）→ 请求级错误：不罚账号，
