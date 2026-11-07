@@ -1037,8 +1037,58 @@ func (w *responsesWriter) flushJSON() {
 		_, _ = w.ResponseWriter.Write(w.body)
 		return
 	}
+	// 非流式同一条判据：只有思考、没有正文与工具调用 → 502 让客户端重试，不再回
+	// 一个「成功但内容为空」的 Responses 对象（客户端会把空 output 当模型没话说的
+	// 正常收尾）。流式侧见 emitCompleted 的同名判定。
+	if responsesReasoningOnly(raw) {
+		log.Printf("WARN: [responses] 非流式：上游只返回思考、正文与工具调用皆空 → 502 empty_reasoning_only（交客户端重试）")
+		writeOpenAIError(w.ResponseWriter, http.StatusBadGateway, "empty_reasoning_only",
+			"upstream returned reasoning without output text; retry")
+		return
+	}
 	w.ResponseWriter.WriteHeader(status)
 	_, _ = w.ResponseWriter.Write(raw)
+}
+
+// responsesReasoningOnly 判定序列化后的 Responses 对象是否「只有 reasoning item」：
+// output 里既没有非空正文也没有任何工具调用，但至少有一个 reasoning item。与流式侧
+// 的 reasoningOnlyNoOutput 同口径，只是这里只能看成品 JSON。
+//
+// message 要按**文本内容**判，不能只看 type：chatCompletionToResponse 对空正文也会
+// 产出一个 {"type":"message","content":[{"text":""}]} 的壳，只看 type 会把它当成
+// 有效输出、永远不触发。
+func responsesReasoningOnly(raw []byte) bool {
+	var obj struct {
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		OutputText string `json:"output_text"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return false
+	}
+	if strings.TrimSpace(obj.OutputText) != "" {
+		return false
+	}
+	hasReasoning := false
+	for _, it := range obj.Output {
+		switch it.Type {
+		case "reasoning":
+			hasReasoning = true
+		case "message":
+			for _, c := range it.Content {
+				if strings.TrimSpace(c.Text) != "" {
+					return false
+				}
+			}
+		case "function_call", "custom_tool_call", "web_search_call", "local_shell_call":
+			return false
+		}
+	}
+	return hasReasoning
 }
 
 func (w *responsesWriter) emitJSONErrorAsFailed() error {
@@ -1546,6 +1596,20 @@ func (w *responsesWriter) emitCompleted() error {
 	if w.x.completed || w.x.failed {
 		return nil
 	}
+	// 上游把整轮预算花在思考上、正文与工具调用全空：说 response.completed 等于告诉
+	// 客户端「模型想完了、没什么要说的」，Codex 这类 Agent 就此收尾，用户看到的是
+	// 一条空回复、只能自己再催一句（线上高频形态；也是 issue #508 的同一判据）。
+	// 这里改成 response.failed，客户端据自己的重试策略重来一次——与「只有思考没正文」
+	// 是失败而非答案这一事实一致。
+	// 判据与 hub 实现一致（wb_proxy.reasoning_only_response）：无正文、无工具调用、
+	// 有思考、且不是 length 截断（截断走 incomplete，不抢占）。
+	if w.reasoningOnlyNoOutput() {
+		return w.emitFailed(map[string]any{
+			"code":    "empty_reasoning_only",
+			"type":    "upstream_error",
+			"message": "upstream returned reasoning without output text; retry",
+		})
+	}
 	w.x.completed = true
 	typ, status := "response.completed", "completed"
 	if w.x.status == "incomplete" {
@@ -1574,6 +1638,24 @@ func (w *responsesWriter) emitCompleted() error {
 		resp["usage"] = convertUsage(w.x.usage)
 	}
 	return w.emit(typ, map[string]any{"response": resp})
+}
+
+// reasoningOnlyNoOutput 本轮是否「只有思考、没有正文与工具调用」。
+//
+// 判据（与 hub 的 reasoning_only_response 同口径）：正文空、无工具调用、有思考、
+// 且不是 finish_reason=length 的截断（截断走 incomplete，不能在这里抢成 failed，
+// 否则客户端会把「额度用尽」误读成「上游故障」）。
+func (w *responsesWriter) reasoningOnlyNoOutput() bool {
+	if w.x.status == "incomplete" {
+		return false
+	}
+	if strings.TrimSpace(w.x.messageText.String()) != "" {
+		return false
+	}
+	if len(w.x.toolOrder) > 0 {
+		return false
+	}
+	return strings.TrimSpace(w.x.reasoningText.String()) != ""
 }
 
 func (w *responsesWriter) emitFailed(errObj any) error {

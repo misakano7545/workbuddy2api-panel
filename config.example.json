@@ -88,9 +88,9 @@
     "allowed": []
   },
   "thinking": {
-    "_comment": "网关思考档位策略。enabled=false 完全不碰档位；client_priority=true 客户端优先：客户端传了档位就照单全收（含关闭思考），只在缺档时补 default_effort；false 网关优先，按 override_scope 改写客户端档位（level=只改档位、尊重客户端关闭思考；all=连关闭也改写为开启）。default_effort=max 取模型支持的最高档，也可写 high/xhigh/medium/low/minimal（模型不支持时落到不高于它的最高支持档）。model_defaults 按模型覆盖目标档：\"cn:xxx\"/\"global:xxx\" 精确到域，裸名两域共用；\"inherit\" 表示不覆盖。面板「模型与档位」页每行的「网关档位」下拉直接写本表（域精确键），配置页仅保留总开关与优先级三选一；保存后热生效。",
+    "_comment": "网关思考档位策略。enabled=false 完全不碰档位；client_priority=true 客户端优先：客户端传了档位就照单全收（含关闭思考），只在缺档时补 default_effort；false 网关优先，按 override_scope 改写客户端档位（level=只改档位、尊重客户端关闭思考；all=连关闭也改写为开启）。default_effort 缺省 high：max 取模型支持的最高档，但思考与正文共用一份输出额度，max 会把预算烧在思考上、正文只剩半句（实测 max 正文 1906 token vs high 3236 token），只有确实要最深推理时才改回 max。也可写 xhigh/medium/low/minimal（模型不支持时落到不高于它的最高支持档）。model_defaults 按模型覆盖目标档：\"cn:xxx\"/\"global:xxx\" 精确到域，裸名两域共用；\"inherit\" 表示不覆盖。面板「模型与档位」页每行的「网关档位」下拉直接写本表（域精确键），配置页仅保留总开关与优先级三选一；保存后热生效。",
     "enabled": true,
-    "default_effort": "max",
+    "default_effort": "high",
     "client_priority": true,
     "override_scope": "level",
     "model_defaults": {}

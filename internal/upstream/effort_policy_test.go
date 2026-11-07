@@ -220,3 +220,22 @@ func TestEffortPolicyNormalized(t *testing.T) {
 		t.Fatalf("model defaults=%v", p.ModelDefaults)
 	}
 }
+
+// TestEffortPolicyEmptyDefaultIsHigh 空档位回落 high 而不是 max。
+//
+// 依据（2026-11-07 本机对照实测，cn:deepseek-v4.1-flash，同一 max_tokens=8192）：
+//
+//	max  → think 8192 / 正文≈1906 token；另一轮 think=7612 直接把额度吃光触发截断
+//	high → think 4068 / 正文≈3236 token（正文多 70%）
+//
+// 上游把思考与正文算在同一份输出额度里，max 并不是「更强的回答」，而是「更长的思考」。
+// hub（wb_proxy.default_reasoning_effort_mode）同样默认 high，并在注释里记着 issue #508。
+func TestEffortPolicyEmptyDefaultIsHigh(t *testing.T) {
+	if got := (EffortPolicy{}).Normalized().DefaultEffort; got != "high" {
+		t.Fatalf("空 default_effort 应回落 high，got %q", got)
+	}
+	// 显式配置仍然照单全收：要最深推理的人写 max 就该是 max。
+	if got := (EffortPolicy{DefaultEffort: "max"}).Normalized().DefaultEffort; got != "max" {
+		t.Fatalf("显式 max 不应被改写，got %q", got)
+	}
+}

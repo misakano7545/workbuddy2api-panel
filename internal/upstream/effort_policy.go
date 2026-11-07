@@ -59,7 +59,14 @@ type EffortPolicy struct {
 func (p EffortPolicy) Normalized() EffortPolicy {
 	p.DefaultEffort = strings.ToLower(strings.TrimSpace(p.DefaultEffort))
 	if p.DefaultEffort == "" {
-		p.DefaultEffort = "max"
+		// 缺省 high 而不是 max：上游把思考与正文算在同一份额度里，max 档会把绝大部分
+		// 预算烧在思考上——客户端给一个正常 max_tokens 时正文只剩半句（finish=length）。
+		// 2026-11-07 本机对照实测（cn:deepseek-v4.1-flash，同一 8192 额度）：
+		//   max  → think 8192 / 正文≈1906 token（3398 字），且曾出现 think 7612 触发截断
+		//   high → think 4068 / 正文≈3236 token（6011 字），正文多 70%
+		// 与 hub（wb_proxy.default_reasoning_effort_mode）的默认 high 同口径：那里
+		// 明确记着「强补 high 让 deepseek 把整轮花在 reasoning 上、偶尔无正文」（#508）。
+		p.DefaultEffort = "high"
 	}
 	p.OverrideScope = strings.ToLower(strings.TrimSpace(p.OverrideScope))
 	if p.OverrideScope != OverrideScopeAll {
