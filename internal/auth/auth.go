@@ -44,6 +44,10 @@ type Auth struct {
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
+
+	// wbEncrypted 源文件的字段是 $wbEncrypted 信封（新版桌面端）：SaveAtomic 必须
+	// 回写成同样形态，否则刷新后的 token 会以明文覆盖掉桌面端的加密文件。
+	wbEncrypted bool
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -356,6 +360,13 @@ func Parse(raw []byte) (*Auth, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("empty auth storage")
 	}
+	// 新版桌面端把 auth 字段换成 $wbEncrypted 信封（见 wbencrypted.go）。
+	// 解密后再按原两形态解析；未加密文件原样返回，不吃这条路径。
+	dec, encrypted, err := decryptWBEncrypted(raw)
+	if err != nil {
+		return nil, err
+	}
+	raw = dec
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -423,6 +434,7 @@ func Parse(raw []byte) (*Auth, error) {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
 	a.ExpiresAt = normalizeExpiresAt(a.ExpiresAt)
+	a.wbEncrypted = encrypted
 	return &a, nil
 }
 
@@ -477,6 +489,26 @@ func (a *Auth) SaveAtomic() error {
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
+	}
+	if a.wbEncrypted {
+		// 来源文件是加密的：凭据字段原样重新封装。写失败就直接拒绝落盘——
+		// 用明文降级覆盖加密文件比写不进去更糟（桌面端读不了，密钥也白加密）。
+		authObj := doc["auth"].(map[string]any)
+		for _, k := range []string{"accessToken", "refreshToken", "expiresAt"} {
+			sealed, err := sealWBValue(authObj[k])
+			if err != nil {
+				return err
+			}
+			authObj[k] = sealed
+		}
+		if a.Nickname != "" {
+			acc := doc["account"].(map[string]any)
+			sealed, err := sealWBValue(a.Nickname)
+			if err != nil {
+				return err
+			}
+			acc["nickname"] = sealed
+		}
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
