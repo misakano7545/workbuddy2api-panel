@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,9 +47,10 @@ type Auth struct {
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
 
-	// wbEncrypted 源文件的字段是 $wbEncrypted 信封（新版桌面端）：SaveAtomic 必须
-	// 回写成同样形态，否则刷新后的 token 会以明文覆盖掉桌面端的加密文件。
-	wbEncrypted bool
+	// wbSealed 源文件里原本是 $wbEncrypted 信封的字段（"auth.accessToken" 形态）：
+	// SaveAtomic 回写时必须逐个复原成信封，否则刷新后的 token 会以明文覆盖掉
+	// 桌面端的加密文件。nil = 来源文件没加密。
+	wbSealed map[string]bool
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -362,7 +365,7 @@ func Parse(raw []byte) (*Auth, error) {
 	}
 	// 新版桌面端把 auth 字段换成 $wbEncrypted 信封（见 wbencrypted.go）。
 	// 解密后再按原两形态解析；未加密文件原样返回，不吃这条路径。
-	dec, encrypted, err := decryptWBEncrypted(raw)
+	dec, sealed, err := decryptWBEncrypted(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +437,7 @@ func Parse(raw []byte) (*Auth, error) {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
 	a.ExpiresAt = normalizeExpiresAt(a.ExpiresAt)
-	a.wbEncrypted = encrypted
+	a.wbSealed = sealed
 	return &a, nil
 }
 
@@ -490,25 +493,10 @@ func (a *Auth) SaveAtomic() error {
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
 	}
-	if a.wbEncrypted {
-		// 来源文件是加密的：凭据字段原样重新封装。写失败就直接拒绝落盘——
-		// 用明文降级覆盖加密文件比写不进去更糟（桌面端读不了，密钥也白加密）。
-		authObj := doc["auth"].(map[string]any)
-		for _, k := range []string{"accessToken", "refreshToken", "expiresAt"} {
-			sealed, err := sealWBValue(authObj[k])
-			if err != nil {
-				return err
-			}
-			authObj[k] = sealed
-		}
-		if a.Nickname != "" {
-			acc := doc["account"].(map[string]any)
-			sealed, err := sealWBValue(a.Nickname)
-			if err != nil {
-				return err
-			}
-			acc["nickname"] = sealed
-		}
+	// 来源文件加密的，回写也保持加密：按读入时的信封清单复原（见 sealForSave）。
+	// 封装失败就拒绝落盘——明文降级覆盖加密文件比写不进去更糟。
+	if err := sealForSave(doc, a.wbSealed); err != nil {
+		return err
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -559,9 +547,23 @@ func LoadDir(dir string) ([]*Auth, error) {
 	if err != nil {
 		return nil, err
 	}
-	// seenUID 重复 UID 检测：同 UID 出现在多个文件时（双 realm 同名 UID 概率近零）
-	// 打 WARN 告警含两文件路径，由「后载入者胜出」保持现状行为（不改变加载结果）。
-	seenUID := make(map[string]string, len(files))
+	// 按 mtime 升序：同一个号的轮转备份并存时（客户端会写 <name>.<ts>.<pid>.<uuid>.info），
+	// 池里「后载入者胜出」才等于「最新凭证胜出」。不排序的话 glob 顺序（字典序）可能让
+	// 陈旧备份胜出——那账号在面板上表现为 token 失效。取不到 mtime 的文件排最前（先被覆盖）。
+	sort.SliceStable(files, func(i, j int) bool {
+		fi, erri := os.Stat(files[i])
+		fj, errj := os.Stat(files[j])
+		if erri != nil || errj != nil {
+			return erri != nil && errj == nil
+		}
+		return fi.ModTime().Before(fj.ModTime())
+	})
+	// seenUID 重复 UID 检测：同一个号的**个人版与企业版 uid 完全相同**（企业版只是
+	// type→ultimate + 多一个 enterpriseId，实测如此），两份凭证在池里只有一个槽位，
+	// 后载入者胜出。这里打 WARN 并点出两个文件与各自 enterpriseId——否则用户只看到
+	// 「我导了两个号，面板只有一个」。
+	type dupUID struct{ file, eid string }
+	seenUID := make(map[string]dupUID, len(files))
 	var out []*Auth
 	for _, f := range files {
 		// 坏文件不再静默跳过：safefile.Read 在正文损坏时回退到 .bak（掉电留下的
@@ -582,10 +584,11 @@ func LoadDir(dir string) ([]*Auth, error) {
 		}
 		a.FilePath = f
 		if prev, ok := seenUID[a.UID]; ok {
-			log.Printf("WARN: uid %s duplicated across %s and %s — 后者覆盖（不同 realm 同名 UID？）",
-				logfmt.Label(a.UID, a.Nickname), prev, f)
+			log.Printf("WARN: uid %s 在 %s（enterpriseId=%q）与 %s（enterpriseId=%q）重复 —— "+
+				"同一账号的个人版/企业版 uid 相同，池里只保留后载入的一份；不用的那份删掉",
+				logfmt.Label(a.UID, a.Nickname), prev.file, prev.eid, f, a.EnterpriseID)
 		}
-		seenUID[a.UID] = f
+		seenUID[a.UID] = dupUID{file: f, eid: a.EnterpriseID}
 		if a.RealmStored() == "" {
 			if changed, r := a.BackfillRealm(); changed {
 				if err := a.SaveAtomic(); err != nil {

@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // wbAtRestSecretKey 桌面端 at-rest 静态密钥（canonical base64，44 位）。
@@ -32,30 +33,33 @@ const wbAtRestSecretKey = "Sik9U5aXhCdwTVEwsEySDOmDoB9r9ntFxHF1fst9LQI="
 
 // decryptWBEncrypted 递归解出 doc 里所有 $wbEncrypted 字段并重新 marshal。
 // 无加密字段时返回原字节（不做二次序列化，避免把客户端文件格式改写）；
-// encrypted 报告来源文件是否加密——SaveAtomic 据此决定回写形态。
-func decryptWBEncrypted(raw []byte) (out []byte, encrypted bool, err error) {
+// sealed 记录哪些字段原本是信封（形如 "auth.accessToken"）——回写时按这份清单
+// 复原，见 sealForSave。
+func decryptWBEncrypted(raw []byte) (out []byte, sealed map[string]bool, err error) {
 	if !bytes.Contains(raw, []byte(`"$wbEncrypted"`)) {
-		return raw, false, nil
+		return raw, nil, nil
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		// 交给调用方按原路径报 storage_parse_error，这里不抢错误。
-		return raw, false, nil
+		return raw, nil, nil
 	}
 	key := sha256.Sum256([]byte(wbAtRestSecretKey))
-	v, changed, err := wbDecryptValue(doc, key)
+	sealed = map[string]bool{}
+	v, changed, err := wbDecryptValue(doc, key, "", sealed)
 	if err != nil || !changed {
-		return raw, false, err
+		return raw, nil, err
 	}
 	out, err = json.Marshal(v)
 	if err != nil {
-		return nil, false, fmt.Errorf("at_rest_marshal_failed: %w", err)
+		return nil, nil, fmt.Errorf("at_rest_marshal_failed: %w", err)
 	}
-	return out, true, nil
+	return out, sealed, nil
 }
 
 // wbDecryptValue 深度遍历；命中信封就地替换。changed=false 表示整棵树没有加密字段。
-func wbDecryptValue(v any, key [32]byte) (any, bool, error) {
+// prefix 是当前节点的路径（"auth.accessToken"），命中信封时记进 sealed。
+func wbDecryptValue(v any, key [32]byte, prefix string, sealed map[string]bool) (any, bool, error) {
 	switch t := v.(type) {
 	case map[string]any:
 		if enc, ok := t["$wbEncrypted"].(float64); ok && enc == 1 {
@@ -64,12 +68,13 @@ func wbDecryptValue(v any, key [32]byte) (any, bool, error) {
 				if err != nil {
 					return nil, false, err
 				}
+				sealed[prefix] = true
 				return plain, true, nil
 			}
 		}
 		changed := false
 		for k, item := range t {
-			nv, c, err := wbDecryptValue(item, key)
+			nv, c, err := wbDecryptValue(item, key, wbJoinPath(prefix, k), sealed)
 			if err != nil {
 				return nil, false, err
 			}
@@ -82,7 +87,7 @@ func wbDecryptValue(v any, key [32]byte) (any, bool, error) {
 	case []any:
 		changed := false
 		for i, item := range t {
-			nv, c, err := wbDecryptValue(item, key)
+			nv, c, err := wbDecryptValue(item, key, fmt.Sprintf("%s[%d]", prefix, i), sealed)
 			if err != nil {
 				return nil, false, err
 			}
@@ -94,6 +99,54 @@ func wbDecryptValue(v any, key [32]byte) (any, bool, error) {
 		return t, changed, nil
 	}
 	return v, false, nil
+}
+
+// wbJoinPath 拼 sealed 路径；顶层容器不加前缀（"auth.accessToken"）。
+func wbJoinPath(prefix, key string) string {
+	if prefix == "" {
+		return key
+	}
+	return prefix + "." + key
+}
+
+// sealForSave 只重新封装「读入时确实是信封」的字段。
+//
+// 为什么不按固定清单封：客户端封哪些字段是它自己的契约（实测封 accessToken /
+// refreshToken / nickname / phoneNumber，expiresAt 保持明文），照我们的清单去封会把
+// 它读作明文的字段也加密，桌面端就读不回来了。来源文件没加密的字段一律不碰。
+// 任一字段封装失败即报错（调用方不得落盘），不静默降级成明文。
+func sealForSave(doc map[string]any, sealed map[string]bool) error {
+	for path := range sealed {
+		parts := strings.Split(path, ".")
+		if len(parts) != 2 {
+			continue // accounts[]/allAccounts[] 这类我们不回写的容器，跳过
+		}
+		parent, ok := doc[parts[0]].(map[string]any)
+		if !ok {
+			continue
+		}
+		v, ok := parent[parts[1]]
+		if !ok || v == nil {
+			continue
+		}
+		if _, isEnvelope := v.(map[string]any); isEnvelope {
+			continue // 已经是信封
+		}
+		env, err := sealWBValue(v)
+		if err != nil {
+			return err
+		}
+		parent[parts[1]] = env
+	}
+	// 凭据两个字段必须封上：漏了就是明文 token 覆盖加密文件。
+	for _, k := range []string{"accessToken", "refreshToken"} {
+		if authObj, ok := doc["auth"].(map[string]any); ok && sealed["auth."+k] {
+			if _, isEnvelope := authObj[k].(map[string]any); !isEnvelope {
+				return fmt.Errorf("at_rest_seal_failed: %s 未能封装，拒绝以明文落盘", k)
+			}
+		}
+	}
+	return nil
 }
 
 // wbDecryptEnvelope 解一个 base64 信封，返回明文解包后的值。

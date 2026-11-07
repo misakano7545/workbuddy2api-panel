@@ -130,6 +130,50 @@ func TestSaveAtomicKeepsEnvelopeForEncryptedSource(t *testing.T) {
 	}
 }
 
+// 客户端不加密的字段，回写也必须留明文。
+//
+// 实测客户端的信封清单是 accessToken / refreshToken / nickname / phoneNumber，
+// expiresAt 明文。按固定清单去封会把它读作明文的 expiresAt 加密，桌面端就读不回来。
+func TestSaveAtomicLeavesPlainFieldsPlain(t *testing.T) {
+	raw, err := os.ReadFile(wbVectorPath)
+	if err != nil {
+		t.Fatalf("读向量失败: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("向量不是合法 JSON: %v", err)
+	}
+	doc["auth"].(map[string]any)["expiresAt"] = float64(1800000000000) // 还原成明文数字
+	raw, _ = json.Marshal(doc)
+
+	path := filepath.Join(t.TempDir(), "auth.info")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("写临时 auth 失败: %v", err)
+	}
+	a, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	a.FilePath = path
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("写回失败: %v", err)
+	}
+	saved, _ := os.ReadFile(path)
+	var back map[string]any
+	if err := json.Unmarshal(saved, &back); err != nil {
+		t.Fatalf("写回文件不是合法 JSON: %v", err)
+	}
+	if _, isEnvelope := back["auth"].(map[string]any)["expiresAt"].(map[string]any); isEnvelope {
+		t.Error("expiresAt 原本明文，回写不该加密")
+	}
+	if _, isEnvelope := back["auth"].(map[string]any)["accessToken"].(map[string]any); !isEnvelope {
+		t.Error("accessToken 原本加密，回写必须仍是信封")
+	}
+	if again, err := Parse(saved); err != nil || again.ExpiresAt != 1800000000 {
+		t.Errorf("回写后再解析失败或到期时间不对: %v %+v", err, again)
+	}
+}
+
 // 未加密文件必须原样走老路径（零回归）。
 func TestParseUnencryptedStillWorks(t *testing.T) {
 	a, err := Parse([]byte(`{"auth":{"accessToken":"at","refreshToken":"rt","realm":"global"},"account":{"uid":"u1"}}`))

@@ -1,12 +1,14 @@
 package auth
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseNested(t *testing.T) {
@@ -219,6 +221,37 @@ func TestLoadDirBackfillWriteFailureDoesNotBlock(t *testing.T) {
 	}
 }
 
+// TestLoadDirNewestFileWinsForDuplicateUID 同一 uid 多份文件时，最后一项必须是 mtime 最新的那份
+// ——pool.SyncToDir 的 upsert 是「后载入者胜出」，所以 LoadDir 的顺序决定了哪个凭证活下来。
+// 客户端会写 <name>.<ts>.<pid>.<uuid>.info 这类轮转备份，字典序可能让陈旧备份排在后面。
+func TestLoadDirNewestFileWinsForDuplicateUID(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, at string, mt time.Time) {
+		body := fmt.Sprintf(`{"auth":{"accessToken":%q,"refreshToken":"r","expiresAt":1800000000,"domain":"www.codebuddy.cn"},"account":{"uid":"u7"}}`, at)
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 字典序在后、但内容陈旧的那份故意命名 workbuddy-z-，mtime 设为 2020。
+	write("workbuddy-z-stale.json", "at-stale", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	write("workbuddy-a-fresh.json", "at-fresh", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	list, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("load err=%v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("want 2 files loaded, got %d", len(list))
+	}
+	if got := list[len(list)-1].AccessToken; got != "at-fresh" {
+		t.Fatalf("最后一项应是 mtime 最新的凭证（pool 按后载入者胜出），实际 %q", got)
+	}
+}
+
 // TestLoadDirDuplicateUIDWarning 同 UID 双 realm auth 文件（概率近零的 EDGE）：LoadDir
 // 检测到重复 UID 时打 WARN（含两文件路径），且不改变加载行为——后载入者胜出（返回 1 个、
 // 不 panic、realm 为后载入者值）。LoadDir 现在有额外 seenUID 副作用，逐字验证 WARN。
@@ -256,9 +289,9 @@ func TestLoadDirDuplicateUIDWarning(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("want 2 accounts loaded (dedup later in pool), got %d", len(list))
 	}
-	// WARN 已触发且含两文件路径。
+	// WARN 已触发，含两文件路径，并点明真实成因（同一账号的个人版/企业版 uid 相同）。
 	if !strings.Contains(string(raw), "WARN: uid") ||
-		!strings.Contains(string(raw), "duplicated") ||
+		!strings.Contains(string(raw), "个人版/企业版") ||
 		!strings.Contains(string(raw), "workbuddy-a-cn.json") ||
 		!strings.Contains(string(raw), "workbuddy-z-global.json") {
 		t.Errorf("expected WARN with both paths, got output: %s", string(raw))
