@@ -131,6 +131,11 @@ func kindOf(line string) (kind, code string, sev string) {
 			kind, sev = "积分保底让位", sevInfo
 		case strings.Contains(line, "本次大前缀未命中"):
 			kind, sev = "缓存重算（费用）", sevWarn
+		case strings.Contains(line, "finish_reason=length 正文截断"):
+			// 输出额度用尽被切断（客户端 max_tokens 太小，或思考吃光同一份额度）。
+			// 上游回的是 200 + finish_reason=length，链路本身成功，所以既不是 bad 也不是
+			// 上游故障——单独成一类，运维才能把「回答写到一半停了」与真正的失败分开看。
+			kind, sev = "正文截断（finish=length）", sevWarn
 		case strings.Contains(line, "rotate backoff aborted"):
 			kind, sev = "轮转退避中止", sevInfo
 		default:

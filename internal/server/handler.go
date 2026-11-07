@@ -1833,6 +1833,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				log.Printf("INFO: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (本轮无工具调用，正常收尾)",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools))
 			}
+			// 正文截断留痕：finish_reason=length 表示上游在输出额度处切断了这一轮。
+			// 此前 reqlog 不记 finish_reason、日志也没有任何 length 行，「回答写到一半
+			// 就停了」在运维侧完全不可见（只能靠猜）。这里落一行可计数的 WARN（进
+			// 错误汇总），带用量与「客户端是否自带限额」——一眼分清「客户端额度太小」
+			// 与「思考吃光同一份额度」（后者是 cn:deepseek 系的真实高频成因）。
+			if stats.FinishReason() == "length" && !stats.SawToolCalls() {
+				ct, hasCT := stats.Tokens()
+				th, hasTh := stats.Thinking()
+				log.Printf("WARN: [server] stream acct=%s model=%s: finish_reason=length 正文截断（tok=%d think=%d hasTok=%v hasThink=%v 客户端限额=%v）——输出额度用尽，上游在此处切断",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, ct, th, hasCT, hasTh, bodyHasOutputLimit(body))
+			}
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），
 			// 不写入零值——否则「没观测到 usage」被伪造成「测得 0 token」，
