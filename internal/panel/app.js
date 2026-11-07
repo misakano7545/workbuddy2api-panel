@@ -5390,6 +5390,10 @@ if ($('btnEventClearFilters')) $('btnEventClearFilters').onclick = () => {
   if ($('eventFilterModel')) $('eventFilterModel').value = '';
   if ($('eventFilterAccount')) $('eventFilterAccount').value = '';
   if ($('eventFilterStatus')) $('eventFilterStatus').value = '';
+  // 记住的状态也是「筛选条件」的一部分（issue #160 引入的偏好）：只清下拉不清偏好，
+  // 下次打开页面 / reload 时会把「错误」重新选回去，用户以为清除筛选没生效。
+  // 模型 / 来源两项本来就不落盘（每次按归档重建选项），无需处理。
+  prefSet('eventStatus', '');
   renderEventTable();
 };
 if ($('btnEventRefresh')) $('btnEventRefresh').onclick = loadEvents;

@@ -184,3 +184,81 @@ func TestEventsTableHeaderColumns(t *testing.T) {
 		t.Errorf("事件表表头应为 13 列，实际 %d", n)
 	}
 }
+
+// TestAppJSClearEventFiltersDropsPref 清除筛选必须同时清掉「记住的状态偏好」。
+//
+// 复现（用户反馈）：状态选「错误」→ onchange 把它写进 localStorage（issue #160 的
+// 下拉记忆）；点「清除筛选」只把下拉的 value 置空，偏好还在 → 刷新页面又被恢复成
+// 「错误」，看起来像「清除筛选没生效、状态被钉死了」。
+//
+// 判据是行为：真跑 app.js 里那两段代码（偏好读写 + 加载期恢复 + 清除按钮），
+// 在 localStorage 桩里塞一个 eventStatus=error，点一次清除按钮，看偏好有没有被删掉。
+func TestAppJSClearEventFiltersDropsPref(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; events filter reset test skipped")
+	}
+	harness := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+// 只取三段：偏好读写（LS_PREF/prefGet/prefSet）、加载期恢复 + 各控件接线（含清除按钮）。
+const pStart = src.indexOf('const LS_PREF');
+const pEnd = src.indexOf('let remarksCache');
+const hStart = src.indexOf('// 筛选下拉记住上次选择');
+const hEnd = src.indexOf("if ($('btnEventRefresh'))");
+if (pStart < 0 || pEnd < 0 || hStart < 0 || hEnd < 0 || pEnd < pStart || hEnd < hStart)
+  throw new Error('events filter region not found');
+
+const store = { 'wb2api.pref.v1': JSON.stringify({ eventStatus: 'error', eventLimit: '300' }) };
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { value: '', textContent: '' };
+  return els[id];
+}
+let rendered = 0;
+const ctx = {
+  JSON, Object, String, console,
+  localStorage: {
+    getItem: k => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+  },
+  $: id => el(id),
+  renderEventTable: () => { rendered++; },
+  loadEvents: () => {},
+};
+vm.createContext(ctx);
+vm.runInContext("'use strict';\n" + src.slice(pStart, pEnd) + '\n' + src.slice(hStart, hEnd), ctx);
+vm.runInContext('this.prefGet = prefGet;', ctx);
+
+// 加载期：状态应从偏好恢复成「错误」（这是记住选择的本意，先确认它确实生效）。
+const restored = els.eventFilterStatus.value;
+if (typeof els.btnEventClearFilters.onclick !== 'function') {
+  console.log(JSON.stringify({ fail: '清除筛选按钮没有绑定 onclick' }));
+  process.exit(1);
+}
+els.btnEventClearFilters.onclick();
+process.stdout.write(JSON.stringify({
+  restored: restored,
+  afterClear: els.eventFilterStatus.value,
+  prefAfter: ctx.prefGet('eventStatus'),
+  limitKept: ctx.prefGet('eventLimit'),   // 展示条数不是筛选条件，清除筛选不该动它
+  rendered: rendered,
+}));
+`
+	f, err := os.CreateTemp(t.TempDir(), "evfilter-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("events filter reset node test failed: %v\n%s", err, out)
+	}
+	const want = `{"restored":"error","afterClear":"","prefAfter":"","limitKept":"300","rendered":1}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("清除筛选后的状态不符:\n got=%s\nwant=%s", strings.TrimSpace(string(out)), want)
+	}
+}
