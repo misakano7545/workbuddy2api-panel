@@ -67,6 +67,11 @@ body {
   font: 550 10.5px/1.2 var(--sans); padding: 3px 7px; cursor: pointer;
 }
 .version-update:hover { border-color: var(--warn); }
+/* 版本与更新的动作行：按钮的左缘必须和上方 .switch / .hint 对齐。
+   这里曾经放过一个 <span class="grow"></span>，但 .grow 只在 .topbar / .box>header /
+   .savebar / .fbar 里被定义成 flex:1，在这个容器里宽度为 0、只吃掉一个 8px 的
+   flex gap —— 「检查更新」因此比左边的文字右移 8px。按钮本来就是左对齐，这个
+   占位元素直接去掉。 */
 .update-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; }
 #updateNote { overflow-wrap: anywhere; min-width: 0; }
 .nav ul { list-style: none; padding: 10px 8px; flex: 1; }
@@ -221,7 +226,15 @@ input[type=checkbox] { width: auto; accent-color: var(--accent); }
 label.fld { display: block; margin-bottom: 14px; }
 label.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
 label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
-.inline { display: flex; align-items: center; gap: 9px; }
+/* 「输入框 + 按钮」挤在同一行（配置页的 API 密钥 + 显示/隐藏）。
+   input 全局是 width:100%，作为 flex 项时会把按钮挤到 min-content —— 窄屏下
+   手机端的 `button.xs { height: auto; padding: 6px 12px }` 一生效，「显示」两个字
+   就会被压成上下两行（实测 49 × 52.8px，比旁边 40.8px 的输入框高一截）。
+   input 占满剩余宽度、按钮不参与收缩也不折行；对齐用 stretch，让按钮高度
+   自动跟随输入框（桌面 37.7 / 手机 40.8），不用写死高度。 */
+.inline { display: flex; align-items: stretch; gap: 9px; }
+.inline > input { flex: 1 1 0; min-width: 0; }
+.inline > button { flex: none; white-space: nowrap; }
 
 /* ── 统计条（观测区）──────────────────────────────────────────────── */
 /* 余额趋势的统计卡（bhCard 生成 .st：k 标签在上、v 数值在下）。
@@ -1384,7 +1397,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">改动需重启进程</span></label>
               <label class="fld"><span class="lb">API 密钥</span>
                 <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不鉴权">
-                <button type="button" class="xs" id="btnEye">显示</button></div>
+                <button type="button" id="btnEye">显示</button></div>
                 <span class="hint">立即生效（含面板自身）</span></label>
             </div>
             <label class="fld"><span class="lb">单账号明细默认展示条数</span>
@@ -1431,7 +1444,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">仅原生 Linux / Windows 二进制支持一键安装</span></label>
             </div>
             <div class="update-actions">
-              <span class="grow"></span>
               <button type="button" id="btnUpdateCheck">检查更新</button>
               <button type="button" id="btnUpdateRelease" hidden>打开 Release</button>
               <button type="button" class="primary" id="btnUpdateInstall" hidden>立即更新</button>
