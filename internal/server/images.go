@@ -76,9 +76,9 @@ const imageAttempts = 3
 // imagesGenerations / imagesEdits 共用实现；edit 决定上游路径与入参校验。
 func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	start := time.Now()
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+	raw, berr := h.readBody(w, r)
+	if berr != nil {
+		h.writeBodyError(w, berr, false)
 		return
 	}
 	req, err := imageRequest(r, raw, edit)

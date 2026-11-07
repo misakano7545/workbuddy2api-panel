@@ -26,9 +26,9 @@ func (h *Handler) responsesWebsocketUnsupported(w http.ResponseWriter, r *http.R
 }
 
 func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+	body, berr := h.readBody(w, r)
+	if berr != nil {
+		h.writeBodyError(w, berr, false)
 		return
 	}
 	chat, meta, srv, err := responsesToChat(body)

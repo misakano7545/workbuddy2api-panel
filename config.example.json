@@ -6,7 +6,8 @@
   "dns_servers": [],
   "server": {
     "read_timeout": "300s",
-    "shutdown_timeout": "30s"
+    "shutdown_timeout": "30s",
+    "max_payload_bytes": 67108864
   },
   "panel": {
     "package_detail_limit": 5,
@@ -72,7 +73,8 @@
     "device_token_file": "",
     "passthrough_ip": false,
     "dump_dir": "",
-    "dump_max_bytes": 0
+    "dump_max_bytes": 0,
+    "restriction_hold_seconds": 1800
   },
   "features": {
     "sanitize_blacklist_fingerprints": true,

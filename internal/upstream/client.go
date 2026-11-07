@@ -661,6 +661,12 @@ func Classify(status int, body string) ErrKind {
 			return ErrSessionDead
 		}
 	}
+	// 11140 的第二种形态（账号风控限制文书）：必须先于 accountFaultMarkers——它不带
+	// "request illegal" 字样，落下去会一路滑到通用 4xx 兜底（ErrClient，只换号不罚号），
+	// 于是同一请求顺着轮转把整池账号挨个送进风控。见 restrict.go。
+	if IsRestricted(body) {
+		return ErrAccountFault
+	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
 			return ErrAccountFault

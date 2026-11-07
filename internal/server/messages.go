@@ -65,9 +65,9 @@ func (h *Handler) withDualAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "read body: "+err.Error())
+	body, berr := h.readBody(w, r)
+	if berr != nil {
+		h.writeBodyError(w, berr, true)
 		return
 	}
 	chat, srv, err := messagesToChat(body)
@@ -99,9 +99,9 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 // Claude Code 上下文将满时会先调它决定要不要压缩；上游没有计数接口，只能本地估算。
 // 估算值只影响客户端何时压缩，不影响真实请求，偏差不致命；缺了这个端点客户端直接报错。
 func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "read body: "+err.Error())
+	raw, berr := h.readBody(w, r)
+	if berr != nil {
+		h.writeBodyError(w, berr, true)
 		return
 	}
 	var obj map[string]any

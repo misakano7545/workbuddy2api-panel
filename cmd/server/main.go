@@ -547,6 +547,9 @@ func main() {
 		BudgetLimit:      cfg.Budget.DailyCreditLimit,
 		BurstCreditLimit: cfg.Budget.BurstCreditLimit,
 		CacheLowRate:     cfg.Budget.CacheLowRate,
+		// 入站请求体 OOM 护栏 + 11140 连坐暂停（两处都只在启动时读，改完需重启）。
+		MaxPayloadBytes: cfg.Server.MaxPayloadBytes,
+		RestrictionHold: time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
