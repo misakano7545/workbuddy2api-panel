@@ -10,9 +10,6 @@ upstream:
     # 备用入口与 HTTPDNS、业务码处置都有抓包依据，docs/official-client.md 是现成清单
     - yreidev/workbuddy2api-panel
     - yuechuya/WorkBuddy2API-Gateway
-    # 同为 Go 单二进制网关，与上游行为对齐最勤的一个（v1.14.45，每周多次）：提示词身份、
-    # 出站兼容档位、TTFT 口径、凭据覆盖前三态校验都有实测依据的注释
-    - CangShui/workbuddy-gateway
     - HUIdada1/AgentHub
     - 3155498108/workbuddy-one
     - OHCJ099/BuddyHub
