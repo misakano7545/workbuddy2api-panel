@@ -1177,7 +1177,10 @@ func TestConfigExampleParses(t *testing.T) {
 	if err := cfg.normalizeThinking(); err != nil {
 		t.Fatalf("normalize example thinking: %v", err)
 	}
-	if !cfg.Thinking.Enabled || !cfg.Thinking.ClientPriority || cfg.Thinking.OverrideScope != "level" || cfg.Thinking.DefaultEffort != "max" {
+	// default_effort 期望 high 而不是 max：思考与正文共用一份输出额度，max 会把预算
+	// 烧在思考上、正文只剩半句（实测 max 正文 1906 token vs high 3236 token）。
+	// 与 hub 的 WB_DEFAULT_REASONING_EFFORT 默认值同口径（issue #508）。
+	if !cfg.Thinking.Enabled || !cfg.Thinking.ClientPriority || cfg.Thinking.OverrideScope != "level" || cfg.Thinking.DefaultEffort != "high" {
 		t.Fatalf("unexpected example thinking defaults: %+v", cfg.Thinking)
 	}
 }
