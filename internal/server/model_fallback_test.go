@@ -156,6 +156,42 @@ func TestModelFallbackOn6004(t *testing.T) {
 	}
 }
 
+// TestModelFallbackLogsModelEff 降级后 model_eff 必须真的落到 stdout 流水行，
+// 且两端都按线协议原值（不补自造的域前缀）。
+//
+// 为什么需要：model_eff 是 #190 加的「实际使用模型」，前端请求记录与可用性标注都靠它；
+// 它只在两处 applyFallback 成功分支里赋值，没有端到端用例的话，改回不赋值也全绿。
+// 这里跑真降级路径（6004 → 等价模型），断言那一行是
+// `deepseek-v4.1-flash->deepseek-v4-flash`：
+//   - 左边是请求模型（裸名），右边必须是同口径的裸名；
+//   - 曾经实现成给降级目标补 realm 前缀，于是出现 `bare->cn:bare` 这种两端对不上、
+//     面板按 id 比对也命中不了的写法。
+func TestModelFallbackLogsModelEff(t *testing.T) {
+	up := &modelAwareUpstream{}
+	up.reply = append(up.reply, struct {
+		status int
+		body   string
+	}{429, rateLimit6004Body})
+	up.reply = append(up.reply, struct {
+		status int
+		body   string
+	}{200, okChatSSE})
+
+	h := newFallbackHandler(map[string]string{"deepseek-v4.1-flash": "deepseek-v4-flash"}, up.client())
+	withChatLog(t)
+	var rec *httptest.ResponseRecorder
+	out := captureStdout(t, func() { rec = doFallbackChat(h, "deepseek-v4.1-flash") })
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200（降级后应成功），body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(out, "deepseek-v4.1-flash->deepseek-v4-flash") {
+		t.Fatalf("流水行没有按 requested->effective 显示降级，实际输出：\n%s", out)
+	}
+	if strings.Contains(out, "->cn:") || strings.Contains(out, "->global:") {
+		t.Fatalf("model_eff 不该自造域前缀（两端口径必须一致），实际输出：\n%s", out)
+	}
+}
+
 // TestModelFallbackNoConfigKeepsOldBehavior 未配置降级表时零回归。
 func TestModelFallbackNoConfigKeepsOldBehavior(t *testing.T) {
 	up := &modelAwareUpstream{}
@@ -279,12 +315,20 @@ func TestModelFallbackWhenNoAccountForModel(t *testing.T) {
 	h.cfg.Pool.BlockModelBackoff("u1", "deepseek-v4.1-flash", "6004 test")
 	h.cfg.Pool.CooldownModelBusy("u1", "deepseek-v4.1-flash", "6004 test")
 
-	rec := doFallbackChat(h, "deepseek-v4.1-flash")
+	withChatLog(t)
+	var rec *httptest.ResponseRecorder
+	out := captureStdout(t, func() { rec = doFallbackChat(h, "deepseek-v4.1-flash") })
 	if rec.Code != 200 {
 		t.Fatalf("全池该模型冷却时应降级成功，实际 status=%d body=%s", rec.Code, rec.Body)
 	}
 	if got := up.seen(); len(got) != 1 || got[0] != "deepseek-v4-flash" {
 		t.Fatalf("应直接改用等价模型，实际上游收到 %v", got)
+	}
+	// 这条降级分支（选号前就把 curModel 换掉）同样要记 model_eff：它是最常见的
+	// 稳态降级路径（模型已经全池冷却，后续请求直接走等价模型），漏记的话请求记录
+	// 里看不到降级发生过。
+	if !strings.Contains(out, "deepseek-v4.1-flash->deepseek-v4-flash") {
+		t.Fatalf("选号前降级也要在流水行标出 requested->effective，实际输出：\n%s", out)
 	}
 }
 

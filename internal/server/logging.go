@@ -725,7 +725,8 @@ func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, st
 		return
 	}
 	seq := chatSeq.Add(1)
-	// 降级后 model 与 modelEff 两个值都不同），显示成 requested->effective——与 effort 的双值口径一致；未降级保持
+	// 降级（model_eff 非空且与请求模型不同）时显示成 requested->effective——与 effort
+	// 的双值口径一致：一个字段两处取值对不上时，才需要把两端都摊开给人看。未降级保持
 	// 旧宽度。带箭头时允许超宽（同账号列：宁可该行变宽，不丢可辨性）。
 	if modelEff != "" && modelEff != model {
 		model = model + "->" + modelEff // 带箭头时允许超宽，不再截断补齐
