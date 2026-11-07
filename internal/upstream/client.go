@@ -1709,8 +1709,13 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 				return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
 			}
 			kind := Classify(resp.StatusCode, string(raw))
+			// 这一行是排查「上游到底回了什么」的唯一入口，截断长度不能太短：
+			// 200 字符时连 `retry_policy:{retry:true,retry_af…` 都截在值前面（#188
+			// 实案），运维据此判断不了 retry_after 是秒还是毫秒。512 足够把业务码、
+			// 文案、retry_policy 与 requestId 一起带出来，又不至于把日志冲成一片。
+			// Error.Msg 仍按 200 截断——那条会透传给客户端，不跟着放大。
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
-				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
+				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 512))
 			// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链）。
 			// 分类一次、随 Kind 信封返回（含 Retry-After 头解析）：
 			// ErrNone 是防御分支（≥400 不应产生 None），返回原文让 handler 兜底。
