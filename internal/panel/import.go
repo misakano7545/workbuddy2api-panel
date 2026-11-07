@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
 // cockpitAccount 映射 cockpit tools 导出格式的单个账号。
@@ -132,13 +133,30 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			_, _ = a.BackfillRealm()
 		}
 
+		// 覆盖已有凭据是不可逆动作：先用 refresh 求证这份新凭据还活着，只接受
+		// 「明确活着」。起因是把一份旧 cockpit 导出重新导入时，文件里的 RT 早已被
+		// 轮换，直接覆盖会让本来能用的账号变成要重新登录——.bak 里虽然留着旧凭据，
+		// 但没有任何东西会自动拿它回退。判据用 VerifySessionByRefresh 的三态
+		// （alive/dead/inconclusive）：dead 是上游明确拒绝，inconclusive 是没判词
+		// （网络/5xx/429），后者同样不覆盖——主动销毁时没有判词就不能动手。
+		// 顺带一提：alive 分支里 a 已被 refresh 轮换过 RT，下面的落盘存的是新值。
+		existing := p.cfg.Pool.AuthByUID(uid)
+		if existing != nil {
+			verdict := p.cfg.Upstream.VerifySessionByRefresh(a)
+			if verdict != upstream.VerifyAlive {
+				skipped++
+				errs = append(errs, fmt.Sprintf("uid=%s: 新凭据校验未通过（%s），保留原有凭据", uid, verdict))
+				continue
+			}
+		}
+
 		if err := a.SaveAtomic(); err != nil {
 			skipped++
 			errs = append(errs, fmt.Sprintf("uid=%s: save auth failed: %v", uid, err))
 			continue
 		}
 
-		isNewAccount := p.cfg.Pool.AuthByUID(uid) == nil
+		isNewAccount := existing == nil
 		p.cfg.Pool.Add(a)
 		p.cfg.Pool.Revive(uid)
 
