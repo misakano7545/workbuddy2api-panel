@@ -3901,20 +3901,31 @@ function renderExpirySnapshot(d) {
     return ax < ay ? -1 : ax > ay ? 1 : 0;
   });
   const EXP_HEAD = 3;  // 默认只展开最近到期的 3 个账号，其余收纳成一行
+  /* 「最近到期」这一格分两层（用户反馈：旧版日期 / 随后 N 批 / 7 天内合计 三行
+     同字号同颜色，主次分不出来）：
+       第一行 = 日期（加大加粗）+「（明天到期）」+「7 天内合计 N」，
+       第二行 = 后续批次索引，只给日期与剩余量，弱化到 --ink-3 / 12px。
+     该批积分与日均需耗本来就有独立列，这里不再重复一遍；紧急性依旧只由
+     「距到期」列着色，不额外加色点。 */
   const rowOf = ({ a, bs }, hidden) => {
     const first = bs[0];
     const days = expDayDiff(first.date);
     const daily = Math.ceil(first.remain / Math.max(1, days));
     const week = bs.filter(b => expDayDiff(b.date) <= 7).reduce((s, b) => s + b.remain, 0);
     const color = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
-    const more = bs.length > 4 ? '　等 ' + bs.length + ' 批' : '';
-    const rest = bs.slice(1, 4).map(b =>
-      '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　') + more;
-    const sub = (rest ? '<div class="note">' + rest + '</div>' : '') +
-      (week > first.remain ? '<div class="note">7 天内合计 ' + fmtTok(week) + '</div>' : '');
+    const when = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
+    const head = '<div class="exp-first">' +
+      '<span class="exp-date">' + esc(first.date) + '</span>' +
+      '<span class="exp-days">（' + when + '）</span>' +
+      (week > first.remain ? '<span class="exp-week">7 天内合计 <b>' + fmtTok(week) + '</b></span>' : '') +
+      '</div>';
+    const rest = bs.slice(1, 4).map(b => '<span>随后 ' + esc(b.date.slice(5)) + ' · ' +
+      fmtTok(b.remain) + '</span>').join('');
+    const more = bs.length > 4 ? '<span>等 ' + bs.length + ' 批</span>' : '';
     return '<tr' + (hidden ? ' data-exp-row="rest" hidden' : '') + '>' +
       '<td>' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</td>' +
-      '<td>' + esc(first.date) + sub + '</td>' +
+      '<td>' + head +
+        (rest ? '<div class="exp-batches">' + rest + more + '</div>' : '') + '</td>' +
       '<td class="num" style="color:' + color + '">' +
         (days === 0 ? '今天' : days === 1 ? '明天' : days + ' 天') + '</td>' +
       '<td class="num">' + fmtTok(first.remain) + '</td>' +

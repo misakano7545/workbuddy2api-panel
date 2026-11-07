@@ -67,6 +67,11 @@ body {
   font: 550 10.5px/1.2 var(--sans); padding: 3px 7px; cursor: pointer;
 }
 .version-update:hover { border-color: var(--warn); }
+/* 版本与更新的动作行：按钮的左缘必须和上方 .switch / .hint 对齐。
+   这里曾经放过一个 <span class="grow"></span>，但 .grow 只在 .topbar / .box>header /
+   .savebar / .fbar 里被定义成 flex:1，在这个容器里宽度为 0、只吃掉一个 8px 的
+   flex gap —— 「检查更新」因此比左边的文字右移 8px。按钮本来就是左对齐，这个
+   占位元素直接去掉。 */
 .update-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; }
 #updateNote { overflow-wrap: anywhere; min-width: 0; }
 .nav ul { list-style: none; padding: 10px 8px; flex: 1; }
@@ -97,8 +102,8 @@ body {
 .sel-note select {
   appearance: none; -webkit-appearance: none;
   background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 8px center;
-  border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
-  font: 550 12px var(--sans); padding: 3px 24px 3px 9px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; color: var(--ink);
+  font: 550 12.5px var(--sans); height: 28px; padding: 0 24px 0 9px; cursor: pointer;
 }
 .qprog { display: flex; align-items: center; gap: 12px; padding: 12px 16px 0; }
 .qprog .qbar { flex: 1; height: 4px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
@@ -171,7 +176,14 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 button.ghost { background: transparent; }
 button.danger { color: var(--bad); }
 button.danger:hover:not(:disabled) { border-color: var(--bad); }
-button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
+/* 紧凑控件（卡片头 / 筛选栏里的按钮与下拉）：同一行必须是同一把尺子。
+   以前 .xs 只作用于 button，<select class="xs"> 落到全局 input/select 的
+   7px 11px / 14px，于是「全部分组」「近 30 天」比旁边的按钮高一头、字也大一档。
+   高度用定值 28px（不再靠 padding 撑），select / input / button 三者等高。 */
+button.xs, select.xs {
+  height: 28px; padding: 0 9px; font-size: 12.5px; border-radius: 6px;
+}
+select.xs { width: auto; cursor: pointer; }
 /* 图标按钮：flex 居中。默认 inline-block 时 SVG 坐在文字基线上，行盒的下沉空间全落在图标下方（实测上 8 / 下 14.7）。 */
 button.icon { padding: 7px 9px; display: inline-flex; align-items: center; justify-content: center; }
 input, select {
@@ -214,7 +226,15 @@ input[type=checkbox] { width: auto; accent-color: var(--accent); }
 label.fld { display: block; margin-bottom: 14px; }
 label.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
 label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
-.inline { display: flex; align-items: center; gap: 9px; }
+/* 「输入框 + 按钮」挤在同一行（配置页的 API 密钥 + 显示/隐藏）。
+   input 全局是 width:100%，作为 flex 项时会把按钮挤到 min-content —— 窄屏下
+   手机端的 `button.xs { height: auto; padding: 6px 12px }` 一生效，「显示」两个字
+   就会被压成上下两行（实测 49 × 52.8px，比旁边 40.8px 的输入框高一截）。
+   input 占满剩余宽度、按钮不参与收缩也不折行；对齐用 stretch，让按钮高度
+   自动跟随输入框（桌面 37.7 / 手机 40.8），不用写死高度。 */
+.inline { display: flex; align-items: stretch; gap: 9px; }
+.inline > input { flex: 1 1 0; min-width: 0; }
+.inline > button { flex: none; white-space: nowrap; }
 
 /* ── 统计条（观测区）──────────────────────────────────────────────── */
 /* 余额趋势的统计卡（bhCard 生成 .st：k 标签在上、v 数值在下）。
@@ -291,14 +311,20 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .acc .efs .tag { margin: 1px 0; }
 /* 模型表：紧凑一些，7 列在常见窗口下尽量免横向滚动 */
 .acc.md { min-width: 700px; }
-.acc.md th, .acc.md td { padding: 10px 9px; }
+/* 模型表：9 列信息密，纵向沿用 10px（比其它表的 11px 紧一点），
+   但左右内距必须和别的表同一档（11px）——原先是 9px，整张表贴着卡片边框，
+   每列文字与边线的距离都比账号池 / 用量 / 运行日志的表小一圈。
+   首列再补到 14px：账号表首列是 3px 健康条 + 11px 内距，这里 .mark 是
+display:none，不补就比「账号」列左 3px。 */
+.acc.md th, .acc.md td { padding: 10px 11px; }
+.acc.md th:nth-child(2), .acc.md td.who { padding-left: 14px; }
 /* 下游可见开关列：窄列 + 弱化说明；被隐藏的行整体降透明度（仍可点回） */
 .acc.md td.vis { width: 1px; white-space: nowrap; }
 .acc.md td.vis label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); cursor: pointer; }
 .acc.md tbody tr.md-off td { opacity: .52; }
 .acc.md tbody tr.md-off td.vis { opacity: 1; }
 /* 行内「网关档位」下拉：贴着表格，按行宽自适应，禁用态（策略关闭）灰显 */
-.acc.md td.gw select { width: 100%; min-width: 96px; padding: 3px 6px; font-size: 12.5px; }
+.acc.md td.gw select { width: 100%; min-width: 96px; height: 28px; padding: 0 6px; font-size: 12.5px; border-radius: 6px; }
 .acc.md td.gw select:disabled { color: var(--ink-3); background: transparent; }
 /* 思考档位策略：三选一单选组（客户端优先 / 网关优先·只档位 / 网关优先·档位+开关） */
 .radios { display: flex; flex-direction: column; gap: 2px; }
@@ -515,7 +541,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .chips { display: flex; min-width: 0; overflow-x: auto; padding-bottom: 2px; }
   .chips .chip { flex: none; }
   /* 触控：按钮放大；输入 16px 防 iOS 聚焦自动放大 */
-  button.xs { padding: 6px 12px; }
+  button.xs { height: auto; padding: 6px 12px; }
   .chips .chip { padding: 5px 12px; }
   input, select, textarea { font-size: 16px; }
   /* 弹窗：底部抽屉式（!important 压过内联 width） */
@@ -673,7 +699,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     padding: 10px 17px; border-bottom: 1px solid var(--line-soft); background: var(--surface-2);
   }
   .fbar > input, .fbar > select {
-    width: auto; padding: 5px 10px; font-size: 12.5px; border-radius: 6px;
+    width: auto; height: 28px; padding: 0 10px; font-size: 12.5px; border-radius: 6px;
   }
   .fbar > input[type=search] { min-width: 200px; flex: 0 1 280px; }
   .fbar > input[type=search]::-webkit-search-cancel-button { cursor: pointer; }
@@ -697,7 +723,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .trange { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .trange .tr-custom { display: inline-flex; align-items: center; gap: 6px; }
   .trange .tr-sep { color: var(--ink-3); font-size: 12px; }
-  .trange select, .trange input { width: auto; padding: 5px 9px; font-size: 12.5px; border-radius: 6px; }
+  .trange select, .trange input { width: auto; height: 28px; padding: 0 9px; font-size: 12.5px; border-radius: 6px; }
   .trange input[type=datetime-local] { font-family: var(--mono); font-size: 12px; }
   /* 原生日期选择器的弹出面板要跟随明暗主题，否则深色下是一块刺眼的白。 */
   .trange input[type=datetime-local] { color-scheme: light; }
@@ -707,7 +733,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   /* ── 视图内维度切换（用量「按账号/按模型/按域」等）────────────────── */
   .vtabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 8px; padding: 3px; }
   .vtabs button {
-    padding: 3.5px 13px; border: none; background: transparent; border-radius: 6px;
+    height: 22px; padding: 0 13px; border: none; background: transparent; border-radius: 6px;
     color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer;
   }
   .vtabs button:hover:not(:disabled) { border: none; color: var(--ink); }
@@ -717,6 +743,20 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   /* tab 下方的分域说明行：与卡片左边缘对齐，但上下要留白，否则紧贴 tab 药丸和第一张
      卡片，看起来像一行被挤到边上的注释。 */
   .vtabs-note { margin: 9px 0 15px; font-size: 12px; color: var(--ink-3); }
+
+  /* ── 域切换分段控件（余额趋势头部的「国内·N / 国际·N」）──────────────
+     这个 .seg 以前只有 class 没有样式：里面的 <button> 落到全局 7px 13px / 14px，
+     比同一行的「近 30 天」下拉和「刷新」按钮高一头。改成和 .vtabs 同一套药丸，
+     外高 3 + 1 + 20 + 1 + 3 = 28px，与紧凑控件等高。 */
+  .seg { display: inline-flex; align-items: center; gap: 2px; padding: 3px;
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; }
+  .seg button {
+    height: 20px; padding: 0 10px; border: none; background: transparent; border-radius: 6px;
+    color: var(--ink-3); font: 550 12px var(--sans); cursor: pointer; white-space: nowrap;
+  }
+  .seg button:hover:not(:disabled) { border: none; color: var(--ink); }
+  .seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink);
+    box-shadow: 0 1px 3px rgba(0,0,0,.18); }
 
   /* ── 请求记录表（运行日志）────────────────────────────────────────── */
   .acc.req { min-width: 1080px; }
@@ -769,7 +809,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .events-filter-bar { display: flex !important; flex-direction: row !important; align-items: center !important; gap: 14px !important; padding: 12px 20px !important; border-bottom: 1px solid var(--line-soft) !important; flex-wrap: wrap !important; background: var(--surface); }
 .events-filter-group { display: inline-flex !important; align-items: center !important; gap: 6px !important; font-size: 12.5px; color: var(--ink-2); width: auto !important; margin: 0 !important; }
 .events-filter-group label { font-weight: 500; font-size: 12px; color: var(--ink-3); margin: 0; white-space: nowrap; }
-.events-filter-group select { width: auto !important; min-width: 140px !important; height: 32px; padding: 2px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-size: 12.5px; outline: none; }
+.events-filter-group select { width: auto !important; min-width: 140px !important; height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-size: 12.5px; outline: none; }
 .event-tbl-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .event-table { width: 100%; min-width: 1520px; border-collapse: collapse; font-size: 12px; text-align: left; }
 .event-table th { padding: 11px 14px; font-weight: 600; color: var(--ink-3); border-bottom: 1px solid var(--line); font-size: 11.5px; white-space: nowrap; background: var(--surface-2); }
@@ -805,10 +845,30 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 /* 请求上下文弹窗：一条消息一块，长文 pre-wrap，纵向滚动交给 .dlg .body。 */
 /* 跨账号合计：默认收起的 <details>，summary 当分隔条用（与代理池的分节同款）。 */
 .exp-total { border-top: 1px solid var(--line-soft); }
-/* 左右留 11px：与上面 .acc th / td 的内边距一致，否则 summary 的三角贴在卡片左边框上，
-   和表格里的「账号」「最近到期」两列错开一截。 */
-.exp-total summary { cursor: pointer; padding: 10px 11px; font-size: 12.5px; color: var(--ink-2); }
+/* 左右留 14px：与上面表格的首列同一左内距（见 .acc.exp），否则 summary 的三角贴在
+   卡片左边框上，和表里的「账号」列错开一截。 */
+.exp-total summary { cursor: pointer; padding: 10px 14px; font-size: 12.5px; color: var(--ink-2); }
 .exp-total summary .note { margin-left: 8px; color: var(--ink-3); }
+/* ── 到期提醒表格 ───────────────────────────────────────────────
+   这张表没有账号表那个 3px 健康色条列（那是账号表专属），首列若仍按 .acc 的 11px
+   内距，就会比下面账号池的「账号」列（3px 色条 + 11px 内距 = 14px）左移 3px，
+   两张表叠在同一页时左边缘对不齐。这里把首列补到 14px。 */
+.acc.exp th:first-child, .acc.exp td:first-child { padding-left: 14px; }
+/* 「最近到期」列的排版：旧版把「日期 / 随后 N 批 / 7 天内合计」插成同字号同颜色的
+   三行 .note，三行权重一样，主次不分。这里只调这一格的排版，列结构原样保留：
+     第一行 = 日期（加大加粗、等宽数字）+「（明天到期）」+「7 天内合计 N」，
+     第二行 = 后续批次索引，弱化到 --ink-3 / 12px，列距 16px（不再靠全角空格对齐）。
+   紧急性仍只由「距到期」列着色，不额外加色点。 */
+.exp-first { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 6px; }
+.exp-first .exp-date { font-size: 13px; font-weight: 600; color: var(--ink);
+  font-variant-numeric: tabular-nums; }
+.exp-first .exp-days,
+.exp-first .exp-week { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.exp-first .exp-week { margin-left: 4px; }
+.exp-first .exp-week b { color: var(--ink-2); font-weight: 600; }
+/* 后续批次：块级换行 + 自动换行，列距 16px（比字内全角空格稳定）。 */
+.exp-batches { display: flex; flex-wrap: wrap; gap: 3px 16px; margin-top: 3px;
+  font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 #eventTableBody tr[data-ev] { cursor: pointer; }
 .ev-ctx { padding: 2px 0; display: flex; flex-direction: column; gap: 10px; }
 .ev-ctx-msg { display: grid; grid-template-columns: 76px 1fr; gap: 10px; align-items: start; }
@@ -911,7 +971,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note" id="expNote"></span>
         </header>
         <div class="tbl-wrap">
-        <table class="acc">
+        <table class="acc exp">
           <thead><tr>
             <th>账号</th><th>最近到期</th><th class="num">距到期</th>
             <th class="num">该日到期</th><th class="num">日均需耗</th>
@@ -949,7 +1009,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note" id="accNote"></span>
           <!-- 分组筛选（issue #159）：账号的分组标签是服务端字段，这里只做筛选；
                组内批量按钮平时隐藏，选了某一组才出现——避免「以为在操作整池」。 -->
-          <select id="accGroupFilter" aria-label="按分组筛选"><option value="">全部分组</option></select>
+          <select id="accGroupFilter" class="xs" aria-label="按分组筛选"><option value="">全部分组</option></select>
           <span id="accGroupActions" hidden>
             <button class="xs" type="button" data-gact="checkin">组内签到</button>
             <button class="xs" type="button" data-gact="pause">组内暂停选号</button>
@@ -1337,7 +1397,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">改动需重启进程</span></label>
               <label class="fld"><span class="lb">API 密钥</span>
                 <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不鉴权">
-                <button type="button" class="xs" id="btnEye">显示</button></div>
+                <button type="button" id="btnEye">显示</button></div>
                 <span class="hint">立即生效（含面板自身）</span></label>
             </div>
             <label class="fld"><span class="lb">单账号明细默认展示条数</span>
@@ -1384,7 +1444,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">仅原生 Linux / Windows 二进制支持一键安装</span></label>
             </div>
             <div class="update-actions">
-              <span class="grow"></span>
               <button type="button" id="btnUpdateCheck">检查更新</button>
               <button type="button" id="btnUpdateRelease" hidden>打开 Release</button>
               <button type="button" class="primary" id="btnUpdateInstall" hidden>立即更新</button>

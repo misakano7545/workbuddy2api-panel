@@ -1558,8 +1558,12 @@ ctx.renderExpirySnapshot({ accounts: [
   { uid: 'dddddddd-4', nickname: '零批次', credits_earliest_expiry: day(5), credits_earliest_remaining: 0 },
 ]});
 const html = els['expBody'].innerHTML;
+// 单元格可能含嵌套标签（「最近到期」格里是两行排版），取文本时去标签；
+// 日期换成 <D> 占位（用例不绑定具体哪天，日期是否落在对应行由 datesOK 校验）。
+const strip = h => h.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+const mask = s => s.replace(/20\d\d-\d\d-\d\d/g, '<D>');
 const cells = h => h.split('<tr>').slice(1).map(r =>
-  [...r.matchAll(/<td[^>]*>([^<]*)<\/td>/g)].map(m => m[1]));
+  [...r.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => strip(m[1])));
 const rows = cells(html);
 const note = els['expNote'].textContent;   // 两次渲染前先取，下同
 
@@ -1569,6 +1573,8 @@ ctx.renderExpirySnapshot({ accounts: [1,2,3,4,5].map(n => ({ uid: 'u' + n, nickn
 const html2 = els['expBody'].innerHTML;
 process.stdout.write(JSON.stringify({
   rows: rows.map(c => [c[0], c[2], c[3], c[4]]),
+  when: mask(rows[0][1]),
+  datesOK: mask(rows[0][1]).indexOf('<D>') >= 0 && mask(rows[1][1]).indexOf('<D>') >= 0,
   note: note,
   head: cells(html2.split('<tr class="pk-group-summary"')[0]).map(c => [c[0], c[2]]),
   restHidden: (html2.match(/<tr data-exp-row="rest" hidden>/g) || []).length,
@@ -1588,7 +1594,11 @@ process.stdout.write(JSON.stringify({
 	}
 	// 41 分 2 天后到期 → 日均需耗 21（ceil 20.5）；499 分 20 天 → 25（ceil 24.95）。
 	// 若把 ceil 改成 floor，这里必须变成 20 / 24。
+	// 「最近到期」格拆成两行：日期 +（N 天后到期）在第一行，随后批次在第二行；
+	// 单批次时没有随后行，也没有「7 天内合计」。
 	want := `{"rows":[["秋千易","2 天","41","21"],["秋","20 天","499","25"]],` +
+		`"when":"<D>（2 天后到期）",` +
+		`"datesOK":true,` +
 		`"note":` + strconv.Quote("2 个账号有未到期批次 · 未开启后台刷新 · 明细见「积分构成」") + `,` +
 		// 收纳：只展开最近到期的 3 个（A1/A2/A3 按到期升序），其余 2 个 hidden。
 		`"head":[["A1","明天"],["A2","2 天"],["A3","3 天"]],"restHidden":2,"label":"其余 2 个账号，展开"}`
@@ -1911,6 +1921,8 @@ const fb = ctx.expBody.innerHTML.includes('77');  // 后面还要渲混域快照
 const tot = buckets.tot;
 const rowsOf = html => (html.match(/<tr>/g) || []).length;
 const cellsOf = html => (html.match(/<td/g) || []).length;
+// 主行里的数字加粗了（<b>），断言「7 天内合计 420」时先去掉标签。
+const stripTags = h => h.replace(/<[^>]*>/g, '');
 // 混域：同一份快照里 cn 与 global 必须分行合计，不能加成一笔。
 ctx.renderExpirySnapshot({ accounts: [
   { uid: 'x', realm: 'cn', credits_expiry_buckets: [{ date: day(3), remain: 100 }] },
@@ -1920,7 +1932,7 @@ const mixed = ctx.expTotalBody.innerHTML;
 process.stdout.write(JSON.stringify({
   order: buckets.html.indexOf('>A<') >= 0 && buckets.html.indexOf('>A<') < buckets.html.indexOf('>B<'),
   hasRest: buckets.html.includes('随后'),
-  weekSum: buckets.html.includes('7 天内合计 420'),
+  weekSum: stripTags(buckets.html).includes('7 天内合计 420'),
   dayLabel: buckets.html.includes('3 天'),
   note: buckets.note,
   fallback: fb,
