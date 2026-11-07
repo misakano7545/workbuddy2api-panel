@@ -26,12 +26,17 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/cst"
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
+	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
 // webActivityBudget 单账号网页腿的总预算：建会话 + 等沙箱 + 跑一轮 + 收尾。
 // 一轮「Hi」实测约 7 秒；upstream.RunWebAgentTurn 自己还有 120 秒的内部上限，
 // 这里再兜一层，避免沙箱卡死时拖住整轮巡检（activity 是遍历型任务）。
 const webActivityBudget = 180 * time.Second
+
+// webConversationPruneKeep 撞活跃上限后清理时保留的会话条数：留一点余量，
+// 别把名额清到刚好等于上限（下一轮又立刻撞）。
+const webConversationPruneKeep = 8
 
 // webLegDay 记录「本进程内该账号今天已在网页通道成功过」的日期（CST）。
 // 键 = uid，值 = 2026-10-29 形态的自然日。
@@ -84,6 +89,17 @@ func (s *Scheduler) runWebActivityLeg(ctx context.Context, a *auth.Auth) {
 	defer cancel()
 
 	conv, err := up.CreateWebConversation(lctx, a, "", "")
+	if upstream.IsWebConversationLimit(err) {
+		// 撞活跃上限：进程被 kill（部署重启 / updater 换二进制）会留下没人收尾的
+		// working 会话，攒满 10 条后这条腿就永久静默失败。清掉最旧的几条再试一次。
+		n, perr := up.PruneWebConversations(lctx, a, webConversationPruneKeep)
+		if perr != nil {
+			log.Printf("WARN: web activity %s: 活跃会话已满且清理失败: %v", label, perr)
+			return
+		}
+		log.Printf("web activity %s: 活跃会话已满，停掉 %d 条最旧会话后重试", label, n)
+		conv, err = up.CreateWebConversation(lctx, a, "", "")
+	}
 	if err != nil {
 		log.Printf("WARN: web activity %s: 建会话失败: %v", label, err)
 		return

@@ -5,6 +5,7 @@ package scheduler
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
@@ -110,6 +111,9 @@ func (s *Scheduler) travelOne(a *auth.Auth) {
 		s.travelAdopt(a)
 		return
 	}
+	// 有猫才有盲盒入口（盲盒开的是猫的道具，无猫的号连配额接口都没有意义）。
+	// 放在状态机之前：与派出/领奖互不影响，早开早省得撞上游时段限流。
+	s.openBlindBox(a)
 	ts, err := s.cfg.Upstream.TravelStatus(a)
 	if err != nil {
 		log.Printf("WARN: travel %s: status: %v", logfmt.Label(a.UID, a.Nickname), err)
@@ -187,6 +191,48 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) {
 	default:
 		log.Printf("WARN: travel %s: adopt: %v", logfmt.Label(a.UID, a.Nickname), err)
 	}
+}
+
+// blindBoxMaxOpens 单轮最多开几个盲盒：一次扣 10 能量，一轮把存下的能量全花光
+// 既没必要也更容易撞风控；剩下的留给下一个旅行时点。
+const blindBoxMaxOpens = 5
+
+// openBlindBox 有能量就开盲盒（任务奖励发的 energy 到这里才第一次被消费）。
+//
+// 顺序：挂在旅行巡检同一条腿上、每号旅行动作之后跑。能量由任务在 growth 时点
+// （默认 11 点）结算，而旅行时点是 9/21 点——21 点这轮读到的已是当日结算后的
+// 余额；配额每次都现查，不缓存，所以不存在「今天发的能量还没到账就判能量不足」。
+func (s *Scheduler) openBlindBox(a *auth.Auth) {
+	q, err := s.cfg.Upstream.BuddyQuota(a)
+	if err != nil {
+		log.Printf("WARN: blindbox %s: quota: %v", logfmt.Label(a.UID, a.Nickname), err)
+		return
+	}
+	if q == nil || q.Affordable <= 0 {
+		balance := 0
+		if q != nil {
+			balance = q.Balance
+		}
+		log.Printf("blindbox %s: skip (energy %d < 10)", logfmt.Label(a.UID, a.Nickname), balance)
+		return
+	}
+	n := q.Affordable
+	if n > blindBoxMaxOpens {
+		n = blindBoxMaxOpens
+	}
+	got := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		item, err := s.cfg.Upstream.BuddyOpen(a)
+		if err != nil {
+			log.Printf("WARN: blindbox %s: open %d/%d: %v", logfmt.Label(a.UID, a.Nickname), i+1, n, err)
+			break
+		}
+		got = append(got, item.String())
+	}
+	if len(got) == 0 {
+		return
+	}
+	log.Printf("blindbox %s: open %d/%d (%s)", logfmt.Label(a.UID, a.Nickname), len(got), n, strings.Join(got, "、"))
 }
 
 // adoptTriedToday 该账号当日是否已判定领养门槛未达。

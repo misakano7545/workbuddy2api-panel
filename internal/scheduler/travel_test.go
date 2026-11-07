@@ -21,9 +21,12 @@ type travelStub struct {
 	buddy       string // /buddy/info 的 data.buddy 原文（"null" 或对象）
 	state       string // /travel/status 的 data 原文
 	firstStatus int    // /buddy/first 的 HTTP 状态码（非 0 时按业务错误返回）
+	quota       int    // /buddy/quota 的 data.affordable（0 = 能量不足，不开盲盒）
+	energy      int    // /buddy/quota 的 data.balance
 
 	infoCalls, statusCalls, departCalls atomic.Int32
 	claimCalls, firstCalls, agreeCalls  atomic.Int32
+	openCalls                           atomic.Int32
 	location, record                    atomic.Int64
 }
 
@@ -63,6 +66,11 @@ func (s *travelStub) handler() http.Handler {
 		case "/activity/growth/buddy/agreement":
 			s.agreeCalls.Add(1)
 			w.Write([]byte(`{"code":0,"msg":"ok","data":{"agreed":true}}`))
+		case "/activity/growth/buddy/quota":
+			fmt.Fprintf(w, `{"code":0,"msg":"ok","data":{"balance":%d,"affordable":%d}}`, s.energy, s.quota)
+		case "/activity/growth/buddy/open":
+			n := s.openCalls.Add(1)
+			fmt.Fprintf(w, `{"code":0,"msg":"ok","data":{"results":[{"instance":{"name":"道具%d","rarity":"R"}}]}}`, n)
 		default:
 			http.Error(w, "not found", 404)
 		}
@@ -517,5 +525,39 @@ func TestTravelDayAlignsCST(t *testing.T) {
 		if got := travelDay(c.in); got != c.want {
 			t.Errorf("%s: travelDay=%s want %s", c.name, got, c.want)
 		}
+	}
+}
+
+// TestRunTravelNowOpensBlindBox 盲盒：能量够就开，单轮最多 5 个，不够一个都不开。
+//
+// 这条是「任务发的 energy 真的被消费掉」的唯一出口：没有它，任务奖励的能量只解析
+// 不消费，等于白领。
+func TestRunTravelNowOpensBlindBox(t *testing.T) {
+	cases := []struct {
+		name     string
+		quota    int
+		energy   int
+		wantOpen int32
+	}{
+		{"能量不足不开", 0, 5, 0},
+		{"够 3 次开 3 个", 3, 35, 3},
+		{"单轮上限 5", 9, 95, 5},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fastTravel(t)
+			// 有猫且在途：跳过派出/领奖，只看盲盒。
+			stub := &travelStub{buddy: `{"id":1,"name":"档案喵"}`, state: `{"state":"traveling","record_id":7}`,
+				quota: c.quota, energy: c.energy}
+			srv := stub.server()
+			defer srv.Close()
+
+			s, _ := newTravelScheduler(t, srv, "u1")
+			s.RunTravelNow()
+
+			if n := stub.openCalls.Load(); n != c.wantOpen {
+				t.Errorf("buddy/open calls=%d want %d", n, c.wantOpen)
+			}
+		})
 	}
 }

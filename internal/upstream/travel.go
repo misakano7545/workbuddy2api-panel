@@ -1,4 +1,4 @@
-// travel.go growth 域「猫猫旅行」接口：状态查询 / 派出 / 领奖 / 领养 / 协议。
+// travel.go growth 域「猫猫旅行」与「盲盒」接口：状态查询 / 派出 / 领奖 / 领养 / 协议 / 能量。
 // 全部走 chatBase（缺省 www.workbuddy.cn，不带 /v2 前缀）+ BillingHeaders，信封同 doJSON。
 package upstream
 
@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -21,6 +22,8 @@ const (
 	buddyInfoPath      = "/activity/growth/buddy/info"
 	buddyFirstPath     = "/activity/growth/buddy/first"
 	buddyAgreementPath = "/activity/growth/buddy/agreement"
+	buddyQuotaPath     = "/activity/growth/buddy/quota"
+	buddyOpenPath      = "/activity/growth/buddy/open"
 	streakPath         = "/activity/growth/streak"
 )
 
@@ -163,4 +166,78 @@ func IsBuddyTaskIncomplete(err error) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(ue.Msg), buddyTaskIncompleteMarker)
+}
+
+// BuddyQuota 盲盒能量额度：Balance 剩余能量，Affordable 现在还能开几次。
+// 上游每开一次扣 10 能量，Affordable 即 balance/10 的口径值，直接用它比自己算稳
+// （阈值若变不必跟着改）。
+type BuddyQuota struct {
+	Balance    int `json:"balance"`
+	Affordable int `json:"affordable"`
+}
+
+// BlindBoxItem 一次开出的道具（名字 + 稀有度）。BuddyOpen 拿不到明细时返回 nil。
+type BlindBoxItem struct {
+	Name   string
+	Rarity string
+}
+
+func (b *BlindBoxItem) String() string {
+	if b == nil {
+		return "?"
+	}
+	if b.Rarity == "" {
+		return b.Name
+	}
+	return fmt.Sprintf("%s(%s)", b.Name, b.Rarity)
+}
+
+// BuddyQuota 查询盲盒可用次数。
+func (c *Client) BuddyQuota(a *auth.Auth) (*BuddyQuota, error) {
+	data, err := c.growthJSON(a, http.MethodGet, buddyQuotaPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var q BuddyQuota
+	if err := json.Unmarshal(data, &q); err != nil {
+		return nil, err
+	}
+	return &q, nil
+}
+
+// BuddyOpen 开一个盲盒（count 恒 1：一次 10 能量，多开由调用方循环控制节奏）。
+// 明细缺失不视为失败——道具已经开出来了，只有请求本身失败才算。
+func (c *Client) BuddyOpen(a *auth.Auth) (*BlindBoxItem, error) {
+	data, err := c.growthJSON(a, http.MethodPost, buddyOpenPath, map[string]any{"count": 1})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Results []struct {
+			Instance struct {
+				Name   string `json:"name"`
+				Rarity string `json:"rarity"`
+			} `json:"instance"`
+			Template struct {
+				Name   string `json:"name"`
+				Rarity string `json:"rarity"`
+			} `json:"template"`
+		} `json:"results"`
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if err := json.Unmarshal(data, &resp); err != nil || len(resp.Results) == 0 {
+		return nil, nil
+	}
+	it := resp.Results[0]
+	// instance 是开出的实例，template 是它的模板：实例缺字段时用模板补。
+	name, rarity := it.Instance.Name, it.Instance.Rarity
+	if name == "" {
+		name = it.Template.Name
+	}
+	if rarity == "" {
+		rarity = it.Template.Rarity
+	}
+	return &BlindBoxItem{Name: name, Rarity: rarity}, nil
 }

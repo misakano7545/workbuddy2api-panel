@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -266,6 +267,71 @@ func (c *Client) StopWebConversation(ctx context.Context, a *auth.Auth, id strin
 // DeleteWebConversation 删掉会话（失败轮次没保留价值，免得网页端历史堆满「Hi」）。
 func (c *Client) DeleteWebConversation(ctx context.Context, a *auth.Auth, id string) error {
 	return c.webConversationAction(ctx, a, id, "delete")
+}
+
+// IsWebConversationLimit 判定建会话被「活跃会话已达上限」拒绝（code 10105）。
+// 上游对单账号同时存在的活跃会话有硬上限（webActiveConversationLimit 条）。
+func IsWebConversationLimit(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "10105")
+}
+
+// WebConversationRow 会话列表里的一条（只取清理要用的字段）。
+type WebConversationRow struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// webActiveStatuses 占活跃名额的会话状态（小写比较：本通道实测回的是大写
+// CREATING/working，写法不统一）。
+var webActiveStatuses = map[string]bool{"working": true, "creating": true, "pending": true}
+
+// ListWebConversations 列账号的网页会话（第一页，够清理用）。
+//
+// shortcut: 只取第一页 50 条、字段形状取自 webchat 端抓包（conversations 数组 +
+// id/name/status/createdAt），/console/as/ 路径未逐字段实测；形状不符时清理会
+// 静默返回 0 条（不误删），升级时机是第一次真在生产 global 号上触发 10105。
+func (c *Client) ListWebConversations(ctx context.Context, a *auth.Auth) ([]WebConversationRow, error) {
+	url := c.webConversationsURL(a) + "?page=1&pageSize=50"
+	var data struct {
+		Conversations []WebConversationRow `json:"conversations"`
+	}
+	if err := c.webJSON(ctx, a, http.MethodGet, url, nil, &data); err != nil {
+		return nil, err
+	}
+	return data.Conversations, nil
+}
+
+// PruneWebConversations 撞 10105 后的自救：停掉最旧的活跃会话，把活跃条数降到 keep
+// 以内，返回实际停掉的条数。
+//
+// 上限是**账号级**的，不能按任务名/前缀分组清理（跨任务累计到 10 条时按前缀永远
+// 清不掉）。会话只在确认处于活跃状态时才停，completed 的不动。
+func (c *Client) PruneWebConversations(ctx context.Context, a *auth.Auth, keep int) (int, error) {
+	rows, err := c.ListWebConversations(ctx, a)
+	if err != nil {
+		return 0, err
+	}
+	active := make([]WebConversationRow, 0, len(rows))
+	for _, r := range rows {
+		if webActiveStatuses[strings.ToLower(strings.TrimSpace(r.Status))] && r.ID != "" {
+			active = append(active, r)
+		}
+	}
+	// createdAt 是 RFC3339 一类的可比较字符串，升序即最旧在前。
+	sort.Slice(active, func(i, j int) bool { return active[i].CreatedAt < active[j].CreatedAt })
+	stopped := 0
+	for _, r := range active {
+		if len(active)-stopped <= keep {
+			break
+		}
+		if err := c.StopWebConversation(ctx, a, r.ID); err != nil {
+			continue // 单条失败不影响继续清下一条
+		}
+		stopped++
+	}
+	return stopped, nil
 }
 
 // RunWebAgentTurn 接上沙箱把这一轮跑完：ACP 四步 + 轮询状态到 completed。

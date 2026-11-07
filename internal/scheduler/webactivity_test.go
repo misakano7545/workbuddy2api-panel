@@ -210,3 +210,90 @@ func TestWebActivityGlobalOncePerDay(t *testing.T) {
 		t.Fatalf("当日第二轮不该再建会话（首轮 %d 次调用，现在 %d 次）: %v", first, len(f.paths), f.paths)
 	}
 }
+
+// TestWebActivityRecoversFromActiveConversationLimit 撞活跃上限（10105）后先清最旧的
+// 活跃会话、再重试建会话。
+//
+// 为什么需要：正常路径每轮必 stop，名额不会泄漏；但进程被 kill（部署重启 / updater
+// 换二进制）会留下没人收尾的 working 会话。攒满 10 条后这条腿就永久静默失败，表现
+// 只是每天一条 WARN。清理必须账号级——按 expert-<slug> 前缀分组清不掉跨任务累计。
+func TestWebActivityRecoversFromActiveConversationLimit(t *testing.T) {
+	withGlobalSwitch(t)
+	inner := newWebAgentFake(t) // 建会话成功后的全链路由它兜（/session /acp /stop）
+	innerHandler := inner.srv.Config.Handler
+	var creates, lists atomic.Int32
+	var pruneStops int32 // 重试建会话之前的 stop 次数 = 清理动作本身
+	stoppedIDs := make([]string, 0, 4)
+	var mu sync.Mutex
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/console/as/conversations/" && r.Method == http.MethodGet:
+			lists.Add(1)
+			// 一条已 completed 的（不该被停）+ 10 条活跃的，最旧的 2 条要被停掉。
+			fmt.Fprint(w, `{"code":0,"data":{"conversations":[
+				{"id":"done","status":"completed","createdAt":"2026-10-01T00:00:00Z"},
+				{"id":"a1","status":"working","createdAt":"2026-11-01T00:00:01Z"},
+				{"id":"a2","status":"WORKING","createdAt":"2026-11-01T00:00:02Z"},
+				{"id":"a3","status":"creating","createdAt":"2026-11-01T00:00:03Z"},
+				{"id":"a4","status":"pending","createdAt":"2026-11-01T00:00:04Z"},
+				{"id":"a5","status":"working","createdAt":"2026-11-01T00:00:05Z"},
+				{"id":"a6","status":"working","createdAt":"2026-11-01T00:00:06Z"},
+				{"id":"a7","status":"working","createdAt":"2026-11-01T00:00:07Z"},
+				{"id":"a8","status":"working","createdAt":"2026-11-01T00:00:08Z"},
+				{"id":"a9","status":"working","createdAt":"2026-11-01T00:00:09Z"},
+				{"id":"a10","status":"working","createdAt":"2026-11-01T00:00:10Z"}]}}`)
+		case r.URL.Path == "/console/as/conversations/" && r.Method == http.MethodPost:
+			if creates.Add(1) == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				fmt.Fprint(w, `{"code":10105,"msg":"maximum number of active conversations"}`)
+				return
+			}
+			mu.Lock()
+			pruneStops = int32(len(stoppedIDs))
+			mu.Unlock()
+			innerHandler.ServeHTTP(w, r)
+		case strings.HasSuffix(r.URL.Path, "/stop"):
+			mu.Lock()
+			stoppedIDs = append(stoppedIDs, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/console/as/conversations/"), "/stop"))
+			mu.Unlock()
+			innerHandler.ServeHTTP(w, r)
+		default:
+			innerHandler.ServeHTTP(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	a := globalAccount(t, "g1")
+	p.Add(a)
+	up := &upstream.Client{HTTP: srv.Client(), GlobalEnabled: true,
+		ChatBaseCN: srv.URL, BillingBaseCN: srv.URL,
+		ChatBaseGlobal: srv.URL, BillingBaseGlobal: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.runWebActivityLeg(context.Background(), a)
+
+	if n := creates.Load(); n != 2 {
+		t.Errorf("建会话次数=%d want 2（撞限 → 清理 → 重试一次）", n)
+	}
+	if n := lists.Load(); n != 1 {
+		t.Errorf("会话列表次数=%d want 1", n)
+	}
+	if pruneStops != 2 {
+		t.Errorf("清理停掉 %d 条 want 2（11 条里 10 条活跃，保留 8）", pruneStops)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(stoppedIDs) < 2 || stoppedIDs[0] != "a1" || stoppedIDs[1] != "a2" {
+		t.Errorf("应停最旧两条 a1/a2，实际 %v", stoppedIDs)
+	}
+	for _, id := range stoppedIDs {
+		if id == "done" {
+			t.Errorf("已 completed 的会话不该被停: %v", stoppedIDs)
+		}
+	}
+	if !inner.sawPath("/session") {
+		t.Errorf("重试后应继续走完整链路，实际路径 %v", inner.paths)
+	}
+}
