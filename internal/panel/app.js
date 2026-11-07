@@ -1238,7 +1238,10 @@ function mdAvailabilityOf(m, locks, recent) {
   }
   // 同时匹配请求模型与降级后实际模型（model_eff）：请求 A 实际用 B 成功时，
   // B 的「可用」标注也要由这条真实流量合成（2026-10-25 链路补齐）。
-  const ev = recent.find(e => e && (e.model === id || e.model_eff === id));
+  // model_eff 记的是出站线协议原值（通常是裸名），而这里的 id 带域前缀，
+  // 两种形态都要认——只比 id 会让 global 域的降级流量完全命中不了。
+  const ev = recent.find(e => e && (e.model === id || e.model === bare ||
+    e.model_eff === id || e.model_eff === bare));
   if (ev) {
     const status = Number(ev.status || 0);
     const when = ev.time ? new Date(ev.time).toLocaleString('zh-CN', { hour12: false }) : '';
