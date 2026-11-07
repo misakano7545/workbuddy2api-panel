@@ -834,6 +834,12 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"models": p.withLiveFlags(out),
+		// fetch_errors 分域取数失败清单（域成功但另一域失败时也要让前端看到——
+		// 否则 global 探测失败（如 DNS 抖动 → 5min 负缓存）时页面只剩 CN 模型，
+		// 用户不知道国际模型「为什么没了」。2026-10-25 实案。
+		// 上游已把单一的 fetchErrs 拆成 catalogErrs / busyErrs，这里取目录失败即可
+		// （繁忙度失败另有 busy_errs，前端单独提示）。
+		"fetch_errors": catalogErrs,
 		// global_source global 目录来源（v3-desktop / v3-union / enterprise）。
 		// 前端据此提示「拿到的是回落/降级目录」——issue #216 里用户只看到「少了 11 个模型」，
 		// 完全不知道已经降级到企业端点（那份目录只有 18 条、hy4-preview 的倍率还是旧值）。

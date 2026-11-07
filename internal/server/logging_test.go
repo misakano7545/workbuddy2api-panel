@@ -546,7 +546,7 @@ func TestLogChatRowShowsThinkingTokens(t *testing.T) {
 	out := captureStdout(t, func() {
 		logChatRowFull(1200*time.Millisecond, 8*time.Second, "deepseek-v4.1-flash", "stream",
 			"u123456789", "示例号", http.StatusOK, 1450, 1255, 0, 0, false,
-			"req-x", reqlog.OutcomeSuccess, 1, 0.02, true, "", "", 15*time.Millisecond, 1400*time.Millisecond, "high", "max")
+			"req-x", reqlog.OutcomeSuccess, 1, 0.02, true, "", "", 15*time.Millisecond, 1400*time.Millisecond, "high", "max", "")
 	})
 	if !strings.Contains(out, "tok=1450 think=1255") {
 		t.Errorf("row should show thinking tokens: %s", out)
@@ -564,7 +564,7 @@ func TestLogChatRowShowsThinkingTokens(t *testing.T) {
 	outSame := captureStdout(t, func() {
 		logChatRowFull(1200*time.Millisecond, 8*time.Second, "deepseek-v4.1-flash", "stream",
 			"u123456789", "示例号", http.StatusOK, 1450, 1255, 0, 0, false,
-			"req-y", reqlog.OutcomeSuccess, 1, 0.02, true, "", "", 15*time.Millisecond, 1400*time.Millisecond, "high", "high")
+			"req-y", reqlog.OutcomeSuccess, 1, 0.02, true, "", "", 15*time.Millisecond, 1400*time.Millisecond, "high", "high", "")
 	})
 	if !strings.Contains(outSame, "effort=high") || strings.Contains(outSame, "effort=high->") {
 		t.Errorf("same-tier row should show plain effort=high: %s", outSame)
@@ -581,7 +581,7 @@ func TestLogChatRowShowsThinkingTokens(t *testing.T) {
 	outOff := captureStdout(t, func() {
 		logChatRowFull(1200*time.Millisecond, 8*time.Second, "deepseek-v4.1-flash", "stream",
 			"u123456789", "示例号", http.StatusOK, 1450, -1, 0, 0, false,
-			"req-z", reqlog.OutcomeSuccess, 1, 0.02, true, "", "", 15*time.Millisecond, 1400*time.Millisecond, "", "off")
+			"req-z", reqlog.OutcomeSuccess, 1, 0.02, true, "", "", 15*time.Millisecond, 1400*time.Millisecond, "", "off", "")
 	})
 	if !strings.Contains(outOff, "effort=off") {
 		t.Errorf("关思考请求行应显示 effort=off: %s", outOff)

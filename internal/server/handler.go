@@ -912,6 +912,16 @@ func (h *Handler) admitBudget(w http.ResponseWriter) bool {
 // 否则出图入账后累计越过上限，对话一步就会被拒——图扣了钱却交不出去。代价是最多超支一次对话。
 type budgetAdmittedKey struct{}
 
+// fallbackDisplay 把降级目标转成流水行 model 列的显示口径：带前缀目标原样；
+// 裸名目标继承当前域前缀（与 routeModel 的 realm 限定口径一致，让
+// "global:deepseek-v4.1-flash->global:deepseek-v4.1-flash-sg" 两端可直接对照）。
+func fallbackDisplay(realm, to string) string {
+	if _, _, cut := strings.Cut(to, ":"); cut || realm == "" {
+		return to
+	}
+	return realm + ":" + to
+}
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if admitted, _ := r.Context().Value(budgetAdmittedKey{}).(bool); !admitted && !h.admitBudget(w) {
 		return
@@ -1337,6 +1347,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if to := fallbackTo(); to != "" {
 				log.Printf("model fallback: %s -> %s (no account for model, 6004 blocked)", curModel, to)
 				if applyFallback(to) {
+					st.modelEff = fallbackDisplay(realm, to)
 					continue
 				}
 			}
@@ -1506,6 +1517,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 					savedBare := bareModel
 					if applyFallback(to) {
+						st.modelEff = fallbackDisplay(realm, to)
 						// 同账号重试：把该账号从 tried 移除（降级是「换模型」不是「换号」，
 						// 同一账号仍应有机会），并让 sticky 保持（本请求内不重绑）。
 						delete(tried, acct.UID)
