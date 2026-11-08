@@ -69,6 +69,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 上游明示「直接重试无效，请新建任务」。措辞指向「开新会话」而不是「换个账号
 		// 重试」——换号/重试都必然同样失败。
 		return "request tool-call history is broken (call/result mismatch); upstream rejects this request as-is — start a new conversation instead of retrying"
+	case ErrEmptyContent:
+		// 11151 空段：上游对「某条消息的 text 段是空串」判硬 400。出站前网关已补位，
+		// 客户端能做的是把那条空消息删掉或换新会话——重试必然复现。
+		return "request history contains an empty text block; upstream rejects it as-is — drop that message or start a new conversation"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
 	case ErrContentBlocked:

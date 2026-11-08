@@ -1682,17 +1682,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
-			// 请求级参数拒绝（11101 请求体解析失败 / 11133 模型供应商拒绝参数）：与
-			// 11115 / 图片无效同一哲学——同一 body 换任何账号都是同样的拒绝，轮转只会
+			// 请求级参数拒绝（11101 请求体解析失败 / 11133 模型供应商拒绝参数 / 11151 空 text 段）：
+			// 与 11115 / 图片无效同一哲学——同一 body 换任何账号都是同样的拒绝，轮转只会
 			// 放大无效请求（每号一次上游调用 + rotateBackoff 占用在途名额）。更要紧的
 			// 是：继续轮转后末端会落到「其余保持 503」，把确定失败的请求伪装成
 			// "账号不可用、稍后再试"，客户端于是对必然失败的请求无限重试。立即透传
 			// 上游原文回 400。（11101 吸收上游 fd5c5a6；11133 见 payload.go 实测
-			// 「全号轮转同样被拒」）
-			if kind == upstream.ErrBadParams || kind == upstream.ErrModelParamInvalid {
+			// 「全号轮转同样被拒」；11151 的空段本该在出站前就补掉，走到这里是兜底）
+			if kind == upstream.ErrBadParams || kind == upstream.ErrModelParamInvalid || kind == upstream.ErrEmptyContent {
 				code, fallback := "bad_params", "chat request body was rejected by upstream"
-				if kind == upstream.ErrModelParamInvalid {
+				switch kind {
+				case upstream.ErrModelParamInvalid:
 					code, fallback = "model_param_invalid", "request parameters were rejected by the upstream model provider"
+				case upstream.ErrEmptyContent:
+					code, fallback = "empty_content", "a message in the request history has empty content"
 				}
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
@@ -2571,6 +2574,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// ErrSoftRate 罚号，会与全冷却兜底互相喂成整池停摆（2026-10-15 实案）。
 		// chatCompletions 轮转耗尽后走末端 ErrUpstreamBusy 分支回 429 + Retry-After，
 		// 不罚号原则在此保持不变。
+	case upstream.ErrEmptyContent:
+		// 11151 空 text 段：请求内容的问题（历史里某个 text 段是空串/缺失），同一 body
+		// 换任何账号都是同样的拒绝。零动作（不冷却/不熔断/不 NoteError/不喂连败，同
+		// ErrToolMismatch 待遇）；出站前 empty_text_part.go 已补位，走到这里说明补位
+		// 没覆盖该端点，chatCompletions 已 fail-fast 400 透传原文、终止轮转。
 	case upstream.ErrToolMismatch:
 		// 11148 工具配对断裂：请求内容的问题（会话历史里的 tool_calls / tool 结果对不上），
 		// 同一 body 换任何账号都是同样的拒绝。零动作（不冷却/不熔断/不 NoteError/不喂

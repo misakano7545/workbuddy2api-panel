@@ -309,7 +309,7 @@ func (h *Handler) imageGenerate(ctx context.Context, req map[string]any) ([]byte
 func requestLevelFailFastKind(kind upstream.ErrKind) bool {
 	switch kind {
 	case upstream.ErrBadParams, upstream.ErrPromptTooLong, upstream.ErrImageInvalid,
-		upstream.ErrModelParamInvalid,
+		upstream.ErrModelParamInvalid, upstream.ErrEmptyContent,
 		upstream.ErrContentBlocked, upstream.ErrModelBlocked:
 		return true
 	}

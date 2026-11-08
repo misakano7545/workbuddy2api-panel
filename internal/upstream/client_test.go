@@ -164,6 +164,14 @@ func TestClassify(t *testing.T) {
 		// 防过宽：相邻错误码不误伤（11140 账号级风控、11115 超长各有归属）。
 		{400, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
 		{400, `{"code":11115,"msg":"prompt is too long"}`, ErrPromptTooLong},
+		// 11151 空 text 段（a message has empty content）：请求内容级，出站前由
+		// empty_text_part.go 补位；真打到这里说明补位没覆盖，也不能轮转全池。
+		{400, `{"code":11151,"msg":"a message has empty content"}`, ErrEmptyContent},
+		{400, `{"code": 11151 , "msg":"a message has empty content"}`, ErrEmptyContent},
+		// 只认结构化 code：文案单独出现不算（用户自己的消息里可能就有这句）。
+		{400, `{"msg":"a message has empty content"}`, ErrClient},
+		// 非 400 不认（上游目前只用 400，放宽会让别的状态码误入不轮转通道）。
+		{500, `{"code":11151,"msg":"a message has empty content"}`, ErrServer},
 	}
 	for _, c := range cases {
 		if got := Classify(c.status, c.body); got != c.want {
