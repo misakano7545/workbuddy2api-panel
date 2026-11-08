@@ -9,6 +9,9 @@ upstream:
     # 官方客户端行为的对照实现最全的一个：product.json 取值、每类请求的头/体形状、
     # 备用入口与 HTTPDNS、业务码处置都有抓包依据，docs/official-client.md 是现成清单
     - yreidev/workbuddy2api-panel
+    # 大仓（3.6k star），2026-11 恢复活跃推送后重新纳入：按行为吸收过的部分（11140
+    # 连坐、入站请求体上限）不重复提案，看的是它这之后新增的东西。
+    - ardeyouxipianyi/workbuddy2api-hub
     - yuechuya/WorkBuddy2API-Gateway
     - HUIdada1/AgentHub
     - 3155498108/workbuddy-one
