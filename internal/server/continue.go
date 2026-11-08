@@ -332,6 +332,37 @@ func (r *continueReader) starvedByThinking() bool {
 	return r.segThink >= continueThinkingShare*r.segCompletion
 }
 
+// budgetWasRaised 客户端原本给的额度是否低于本轮下限（即网关抬过额度）。
+//
+// 用途：抬过额度时，真正生效的上限是网关选的数，不是客户端意图——被它切断就该续写，
+// 否则只是把断点从客户端的 1024 挪到 8192，长回答照样停在半句。
+func (r *continueReader) budgetWasRaised() bool {
+	if r.budgetFloor <= 0 {
+		return false
+	}
+	v, ok := clientOutputBudget(r.body)
+	return ok && v > 0 && v < r.budgetFloor
+}
+
+// clientOutputBudget 读客户端原始请求体里的输出额度（三个别名）。
+func clientOutputBudget(body []byte) (int64, bool) {
+	var obj map[string]any
+	if json.Unmarshal(body, &obj) != nil {
+		return 0, false
+	}
+	for _, k := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		switch v := obj[k].(type) {
+		case float64:
+			return int64(v), true
+		case int:
+			return int64(v), true
+		case int64:
+			return v, true
+		}
+	}
+	return 0, false
+}
+
 func (r *continueReader) emit(payload string) {
 	r.lastClientAt = time.Now()
 	r.out = append(r.out, "data: "...)
@@ -382,6 +413,8 @@ func (r *continueReader) endSegment(sawDone bool) {
 				starvedNote := ""
 				if r.limitSet && r.starvedByThinking() {
 					starvedNote = fmt.Sprintf(" (思考吃光预算 think=%d/%d，关思考续写)", int(r.segThink), int(r.segCompletion))
+				} else if r.budgetWasRaised() {
+					starvedNote = fmt.Sprintf(" (额度已被网关抬到下限 %d，续接被该上限切断的正文)", r.budgetFloor)
 				}
 				log.Printf("[continue] seg=%d model=%s text=%dB reason=%dB%s%s -> 续写",
 					r.seg, bareModelOf(r.body), r.text.Len(), r.reason.Len(), blindNote, starvedNote)
@@ -490,11 +523,13 @@ func (r *continueReader) canContinue(sawDone bool) bool {
 		return false
 	case r.errSeen:
 		return false
-	case r.limitSet && !r.starvedByThinking():
+	case r.limitSet && !r.starvedByThinking() && !r.budgetWasRaised():
 		// 客户端显式带限额 = 它只要这么多，截断是预期语义（Claude 客户端必带
-		// max_tokens，每回合 8192）。例外是「额度被思考吃光」：上游把思考与正文
-		// 算同一份额度，客户端要的那份回答根本没写出来（实测 max 档下思考占 93%、
-		// 正文只剩半句）。此时续写才是尊重意图，见 continueThinkingShare。
+		// max_tokens，每回合 8192）。两种例外都续写：
+		//   1) 额度被思考吃光（见 continueThinkingShare）——客户端要的那份回答没写出来；
+		//   2) 网关把这个额度抬到过下限（budgetWasRaised）——此时生效的上限是**网关**
+		//      选的数，不是客户端的意图，被它切断就该接着写（否则「抬了额度还是断」
+		//      只是把断点从 1024 挪到 8192，问题没真正解决）。
 		return false
 	case r.cutNoFinish(sawDone):
 		// 段无 finish 结束 = 上游偶发断流（线上实测：15 次续写里 1 次）。已产出内容时
@@ -544,7 +579,9 @@ func (r *continueReader) continuationBody() ([]byte, error) {
 	// 以同一思路再烧一遍思考，三个段合计还是只写出半句（实测每段正文 ~580 token）。
 	// 关思考后整份额度留给正文，一次续写就能收尾（与 starved.go 的救援同一手法：
 	// 不放大客户端额度，只把预算从思考手里拿回来）。
-	if r.limitSet && r.starvedByThinking() {
+	// 额度被网关抬过（budgetWasRaised）同样关思考：这一档的思考本身就要吃掉大半
+	// 额度，继续开着只会让第二段卡在同一个上限上。
+	if r.limitSet && (r.starvedByThinking() || r.budgetWasRaised()) {
 		model, _ := obj["model"].(string)
 		if _, has := obj["thinking"].(map[string]any); has || upstream.ThinkingSwitchSupported(model) {
 			obj["thinking"] = map[string]any{"type": "disabled"}
