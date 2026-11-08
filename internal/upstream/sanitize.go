@@ -13,10 +13,10 @@ import (
 // sanitizeFeatures 特征预检：任一命中才进入净化（strings.Contains 快速路径，
 // 普通请求全不中 → 原样返回，零分配）。
 var sanitizeFeatures = []string{
-	"x-anthropic-billing-header",                      // header 键值段键名
-	"cc_entrypoint=",                                  // 尾随裸键值（截断前缀即可命中）
-	"You are Claude Code",                             // 身份句（截断前缀即可命中）
-	"Main branch (",                                   // 注入指令句（截断前缀即可命中）
+	"x-anthropic-billing-header", // header 键值段键名
+	"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
+	"You are Claude Code",        // 身份句（截断前缀即可命中）
+	"Main branch (",              // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
@@ -211,38 +211,137 @@ func sanitizeTextWith(text string, brand bool) string {
 	return strings.TrimSpace(text)
 }
 
+// sanitizeBareHdrProbe 裸键名兜底正则的字面量探针，**从正则本身推导**而不是手抄。
+//
+// 手抄一份的风险是刚踩过的：探针与正则体不同步（"…-hdr" vs "…-header"）时预检永远
+// 判假，整条净化被静默跳过，而测试仍然全绿（它测的是正则，不是预检）。这里直接取
+// sanitizeBareHdrRe.String() 去掉 "(?i)" 的部分；一旦正则不再是纯字面量（含元字符），
+// 探针置空，hasFingerprint 回落成「直接跑正则」——慢但绝不会判错。
+var sanitizeBareHdrProbe = func() string {
+	const foldPrefix = "(?i)"
+	s := sanitizeBareHdrRe.String()
+	if !strings.HasPrefix(s, foldPrefix) {
+		return ""
+	}
+	body := s[len(foldPrefix):]
+	if body == "" || strings.ContainsAny(body, `\[](){}*+?|^$.`) {
+		return ""
+	}
+	return body
+}()
+
+// containsFoldASCII 大小写不敏感（仅 ASCII）的子串查找，零分配。
+//
+// 用途：`(?i)` 正则做「有没有这个词」的存在性判断，RE2 会给每个字节跑一遍
+// fold 状态机；线上实测这一项占整个请求体预处理 CPU 的 56%（170K token 的
+// 代理上下文里，每个 message 都要过一遍）。这里换成单遍扫描 + 首字符快跳，
+// 命中即返回。
+//
+// 只做预检：非字母字符的 |0x20 折叠会出现少量误命中（如 '^' 与 '~'），
+// 代价只是多跑一次正则确认，不会漏判、不会改文本。
+func containsFoldASCII(s, sub string) bool {
+	if sub == "" {
+		return true
+	}
+	n := len(sub)
+	if len(s) < n {
+		return false
+	}
+	c0 := sub[0]
+	c0f := c0 | 0x20
+	for i := 0; i+n <= len(s); i++ {
+		c := s[i]
+		if c|0x20 != c0f {
+			continue
+		}
+		ok := true
+		for j := 1; j < n; j++ {
+			a, b := s[i+j], sub[j]
+			if a != b && a|0x20 != b|0x20 {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 // hasFingerprint 特征预检：先走 strings.Contains 快速路径（零分配）；
 // header 键名有大小写变体（X-Anthropic-...）且可能以裸键名形态出现（无冒号），
 // Contains 大小写敏感、sanitizeHdrRe 要求冒号——两者都会漏掉「混合大小写 + 裸键名」，
-// 必须再用不要求冒号的 (?i) 正则兜底（sanitizeBareHdrRe），否则整条净化被跳过。
-// sanitizeBareHdrRe 不要求冒号，是 sanitizeHdrRe 的超集，故无需再单独匹配后者。
+// 必须再兜一层不要求冒号的检测（sanitizeBareHdrRe），否则整条净化被跳过。
+//
+// 兜底检测用 containsFoldASCII 而不是 sanitizeBareHdrRe.MatchString：判据完全等价
+// （该正则只匹配这一个字面量、只关心是否存在），但 RE2 大小写折叠是整条净化链上
+// 最贵的一步（线上 profile：占预处理 CPU 56%）。
 func hasFingerprint(text string) bool {
 	for _, f := range sanitizeFeatures {
 		if strings.Contains(text, f) {
 			return true
 		}
 	}
-	return sanitizeBareHdrRe.MatchString(text)
+	if sanitizeBareHdrProbe == "" {
+		// 正则形状变了（不再是纯 (?i) 字面量）：回落成直接跑正则，正确性优先。
+		return sanitizeBareHdrRe.MatchString(text)
+	}
+	return containsFoldASCII(text, sanitizeBareHdrProbe)
+}
+
+// hasIdentityVerbShape 身份句式的廉价形状探测：「 by 」或「 on 」是否出现过。
+//
+// 这是 sanitizeIdentitySentenceRe 的必要条件——正则里的动词表（powered by / built on /
+// built by / created by / developed by / made by / trained by）每一项都含「 by 」或
+// 「 on 」，所以形状不成立时正则必然不匹配，直接跳过。
+//
+// 为什么值得单独写：原实现是「逐个动词 containsFoldASCII」= 7 次全量扫描；
+// 线上 profile 里这一段占预处理 CPU 的 26%（170K token 上下文里每个 message 都扫 7 遍）。
+// 这里改成一遍扫描同时看两个形状，命中即返回。
+func hasIdentityVerbShape(s string) bool {
+	for i := 0; i+3 <= len(s); i++ {
+		c := s[i] | 0x20
+		var want byte
+		switch c {
+		case 'b':
+			want = 'y' // "by "
+		case 'o':
+			want = 'n' // "on "
+		default:
+			continue
+		}
+		if s[i+1]|0x20 != want || s[i+2] != ' ' {
+			continue
+		}
+		if i > 0 && s[i-1] != ' ' { // 前置必须是空格：「 by 」/「 on 」是动词的一部分
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // hasIdentityFingerprint 身份类特征（品牌词 / 身份句式）预检；只在需要应用身份类规则时调用，
 // 保证 brand=false 的路径不会因为只含品牌词而进入清洗（否则末尾 TrimSpace 会裁掉用户空白）。
 //
-// 身份句式先走动词字面量探测（纯 C 单遍扫描），命中才交给正则确认——正则确认是必需的：
-// 只按 "powered by" 这类词判真会把「讲解某产品」的普通用户消息也拖进清洗。
+// 命中也只是"形状成立"，仍要正则确认：只按 "by"/"on" 判真会把「讲解某产品」的普通
+// 用户消息也拖进清洗。
 func hasIdentityFingerprint(text string) bool {
 	for _, f := range sanitizeIdentityFeatures {
 		if strings.Contains(text, f) {
 			return true
 		}
 	}
-	low := strings.ToLower(text)
-	for _, v := range sanitizeIdentityVerbs {
-		if strings.Contains(low, v) {
-			return sanitizeIdentitySentenceRe.MatchString(text)
-		}
+	// 动词探测用 hasIdentityVerbShape 而不是 strings.ToLower(text)：后者对每条消息
+	// 都整段小写化（170K token 的上下文里是 600KB 的分配 + 拷贝），而这里只需要
+	// 「有没有这个词」——线上 profile 里 ToLower 占预处理 CPU 6.5%。
+	// 命中也只是形状成立，仍需正则确认：只按 "by"/"on" 判真会把「讲解某产品」的
+	// 普通用户消息也拖进清洗。
+	if !hasIdentityVerbShape(text) {
+		return false
 	}
-	return false
+	return sanitizeIdentitySentenceRe.MatchString(text)
 }
 
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
