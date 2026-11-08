@@ -580,6 +580,16 @@ type StreamOption func(*streamOptions)
 type streamOptions struct {
 	markup    *MarkupRepair
 	echoModel string
+	// clientGone 客户端是否已经断开（handler 传 r.Context().Err()!=nil）。
+	// 只用于「日志归因」：客户端自己走了，上游只是被动跟随，那条「上游未给终态」
+	// 的 WARN 就不该记（线上实测过一次 pkill 客户端就刷出一条 WARN，进「错误汇总」
+	// 的未归类桶，把真正的上游断流盖掉）。
+	clientGone func() bool
+}
+
+// WithClientGoneFn 注入「客户端是否已断开」的判定（可为 nil）。
+func WithClientGoneFn(fn func() bool) StreamOption {
+	return func(o *streamOptions) { o.clientGone = fn }
 }
 
 // WithModelEcho 强制所有出站帧的顶层 model 字段为 name（issue #30：模型映射）。
@@ -937,7 +947,12 @@ readLoop:
 	// incomplete(max_output_tokens)，由客户端自己决定续写/重试——网关不再把断流伪装成成功。
 	// 只在本层一个终态都没发过时补（否则两个 finish_reason，后一个会洗掉前一个）。
 	if !upstreamDone && !finishSeen && !toolFinishSent && validFrames > 0 {
-		log.Printf("WARN: [server] stream 上游未给终态就结束（无 finish_reason、无 data: [DONE]，%d 个有效帧）→ 按截断收尾", validFrames)
+		// 客户端自己断开时上游只是被动跟随断连，这条不是上游故障——记 WARN 会把
+		// 真正的中断盖掉（错误汇总按类别聚合，噪音会挤掉信噪比）。归因交给 handler
+		// 的 interrupted 观测（499），这里只在客户端还在等时才告警。
+		if o.clientGone == nil || !o.clientGone() {
+			log.Printf("WARN: [server] stream 上游未给终态就结束（无 finish_reason、无 data: [DONE]，%d 个有效帧）→ 按截断收尾", validFrames)
+		}
 		if werr := writeChunk(finishOnlyFrame(map[string]any{}, TruncationFinishReason), ""); werr != nil {
 			return werr
 		}

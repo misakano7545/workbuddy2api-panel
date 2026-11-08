@@ -163,6 +163,10 @@ func prepareBodyOpt(src []byte, sanitize, brandGlobal bool, efforts map[string][
 		// 也可能返回空）。
 		effort = policyEffort
 	}
+	// 输出预算下限（见 output_budget.go）：客户端既要高档位思考、又把 max_tokens
+	// 给得比「这一档的思考都装不下」还小的时候，抬到该档的下限。抬的是上限不是
+	// 目标长度——模型写完了照样停，只是不再被思考挤掉正文。
+	ensureMinOutputBudget(obj, effort, maxOut)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)

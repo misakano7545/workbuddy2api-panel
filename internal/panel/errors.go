@@ -136,6 +136,12 @@ func kindOf(line string) (kind, code string, sev string) {
 			// 上游回的是 200 + finish_reason=length，链路本身成功，所以既不是 bad 也不是
 			// 上游故障——单独成一类，运维才能把「回答写到一半停了」与真正的失败分开看。
 			kind, sev = "正文截断（finish=length）", sevWarn
+		case strings.Contains(line, "上游未给终态就结束"):
+			// 上游连接说到一半断开（无 finish_reason、无 [DONE]）。网关已补截断终态，
+			// 客户端知道被截断，但这是上游侧的真故障，值得单独一类盯。
+			// 客户端自己断开的场景不再记这条（见 StreamHint 的 clientGone 判定），
+			// 所以这里看到的都是上游的问题。
+			kind, sev = "上游断流（已补截断终态）", sevWarn
 		case strings.Contains(line, "rotate backoff aborted"):
 			kind, sev = "轮转退避中止", sevInfo
 		default:
