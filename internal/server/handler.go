@@ -1112,18 +1112,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// session.ExtractKey 的 anti-monopoly 闸）时用内容派生键——否则这些客户端的
 	// prompt_cache_key 退化成每账号一个常量槽，同账号上多段对话互相覆盖前缀缓存
 	// （issue #5：glm-5.3 大上下文周期性命中率掉到 0.2%）。
-	// 只供缓存槽使用：账号绑定仍只认 sessKey，不复活 user 维度粘性。
 	cacheKeyID := sessKey
 	if cacheKeyID == "" {
 		cacheKeyID = session.DeriveCacheKey(body)
 	}
+	// 账号粘性也认这个派生键：上游前缀缓存按账号隔离（cache_key 里掺 uid），
+	// 账号一换就是全量 miss。只发 user_id 的客户端（ExtractKey 的 anti-monopoly
+	// 闸返回空）此前每轮都被轮换到新号——实测同一份 3.6k body 连发两次，落两个
+	// 不同账号、miss 3634/3634；带 conversation_id 或什么都不带时第二轮命中
+	// 3456/3634（95%）。派生键是 system+首条 user 的内容哈希，天然是**对话级**
+	// 而非用户级：同一用户的并行对话首条 user 不同 → 键不同 → 照旧分散，原契约
+	// 想避免的「一个 user 全钉在同一号」不会发生；相对的是每条 8k 前缀从 0.02
+	// credit 涨到 0.34（cache_key.go 实测，17×）。
+	bindKey := sessKey
+	if bindKey == "" {
+		bindKey = cacheKeyID
+	}
 	stickyUID := ""
-	if h.cfg.Session != nil && sessKey != "" {
+	if h.cfg.Session != nil && bindKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
 		// 用 routeModel 而非 peek.Model（issue #30）：映射后必须按真实模型的
 		// 可用性口径判绑定，别名名不在任何账本里。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, routeModel); ok {
+		if uid, ok := h.cfg.Session.ResolveForModel(bindKey, routeModel); ok {
 			stickyUID = uid
 		}
 	}
@@ -1157,7 +1168,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 幂等：stickyUID 已空则空操作；不会误解绑其他轮的绑定。仅当 Session != nil 时 stickyUID 才会非空。
 	unbindSticky := func() {
 		if stickyUID != "" {
-			h.cfg.Session.Unbind(sessKey)
+			h.cfg.Session.Unbind(bindKey)
 			stickyUID = ""
 		}
 	}
@@ -1726,8 +1737,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Pool.BlockModelClear(acct.UID, curModel)
 		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-		if sessKey != "" && h.cfg.Session != nil {
-			h.cfg.Session.Bind(sessKey, acct.UID)
+		if bindKey != "" && h.cfg.Session != nil {
+			h.cfg.Session.Bind(bindKey, acct.UID)
 		}
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
