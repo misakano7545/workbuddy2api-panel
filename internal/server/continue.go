@@ -37,9 +37,23 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
-// maxContinueSegments 单请求最多上游段数（1 段原生 + 最多 2 次续写）。
-// 封顶防失控：连续截断会级联，3 段 ≈ 3×32000 输出。要更长改这里。
-const maxContinueSegments = 3
+// maxContinueSegments 单请求最多上游段数（1 段原生 + 最多 7 次续写）。
+// 段数不是主要闸门——真正管住开销的是 continueTotalCap（累计输出 token）；
+// 这里只是防「续写自己也在截断」时无限套娃的硬上限。
+const maxContinueSegments = 8
+
+// defaultContinueTotalCap 没有档位下限时（客户端未指定档位、也就没算下限）
+// 累计输出 token 的兜底上限。
+const defaultContinueTotalCap = 32768
+
+// continueTotalCapRatio 累计输出上限 = 该轮输出预算下限 × 这个系数。
+//
+// 为什么按 token 而不是按段数管：固定 3 段时，低档位（下限 4096）每段只有 ~4096
+// 正文，写到第 3 段就撞上限收工——线上实测 effort=low + max_tokens=1024 写
+// 「3000 字以上」的文档，3 段合计正文 9414 token 处还是半句（finish=length，尾
+// 巴停在「### 5.3 …- 正常请求」）。同样的段数在高档位（下限 8192）够用，说明
+// 该管的是「一共准写多少」，不是「允许问上游几次」。
+const continueTotalCapRatio = 4
 
 // continueThinkingShare 思考占「本段输出」的比例达到这个值，就认为这次截断是
 // 思考吃光同一份额度造成的，而不是客户端要的长度。
@@ -114,6 +128,9 @@ type continueReader struct {
 	// 续写/救援段的 max_tokens 至少是它：那些段从原始 body 重建、又常关掉思考，
 	// 拿不到首段被抬过的额度，否则会继续用客户端那个装不下正文的小额度。
 	budgetFloor int64
+
+	// continueCapped 本请求因累计输出到顶而停止续写（用于日志与终态归因）。
+	continueCapped bool
 
 	done bool
 }
@@ -432,6 +449,12 @@ func (r *continueReader) endSegment(sawDone bool) {
 			log.Printf("WARN: [continue] acct=%s 续写请求体构造失败: %v",
 				logfmt.Label(r.acct.UID, r.acct.Nickname), err)
 		}
+	} else if r.continueCapped {
+		// 撞的是网关自己的累计输出上限，不是上游故障——写清楚，免得排障时
+		// 把它当成「又在半句处断了」。
+		log.Printf("INFO: [continue] acct=%s 累计输出 %d token 已达上限（下限 %d × %d）→ 停止续写，按截断收尾",
+			logfmt.Label(r.acct.UID, r.acct.Nickname), int(r.totalOutput()),
+			r.budgetFloor, continueTotalCapRatio)
 	}
 	// 段在没有任何 finish 的情况下以 EOF/读错误结束：疑似上游断流（正常收尾都带
 	// finish_reason）。客户端此前会看到「被标 completed 的中途截断」——这里把
@@ -510,11 +533,35 @@ func (r *continueReader) emitTruncationTerminal() {
 	}
 }
 
+// totalOutput 累计输出 token（跨段求和；mergeUsage 已按段累加 completion_tokens）。
+// 段内还没有 usage 时按 0 算——续写资格主要看 finish=length，不靠这个数。
+func (r *continueReader) totalOutput() float64 {
+	if f, ok := r.usage["completion_tokens"].(float64); ok {
+		return f
+	}
+	return 0
+}
+
+// outputCapped 累计输出是否已达本请求上限（下限 × continueTotalCapRatio，兜底
+// defaultContinueTotalCap）。没算下限时（客户端没指定档位）用兜底值。
+func (r *continueReader) outputCapped() bool {
+	capTokens := float64(defaultContinueTotalCap)
+	if r.budgetFloor > 0 {
+		capTokens = float64(r.budgetFloor * continueTotalCapRatio)
+	}
+	return r.totalOutput() >= capTokens
+}
+
 // canContinue 续写资格判定（sawDone=false 表示 EOF/读错误收尾——只有显式
 // finish_reason=length 才续，读错误不续，避免把故障流当截断流续错）。
 func (r *continueReader) canContinue(sawDone bool) bool {
 	switch {
 	case r.seg >= maxContinueSegments-1:
+		return false
+	case r.outputCapped():
+		// 累计输出到顶：再续就是无节制地烧配额了。标出来，让终态归因能区分
+		// 「撞网关自己的上限」与「上游断流」。
+		r.continueCapped = true
 		return false
 	case r.clientGone():
 		// 客户端已断连：ctx 取消后重试请求发不出去，只会白烧一次上游额度。
