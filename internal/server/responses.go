@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/misakano7545/workbuddy2api-panel/internal/debugcap"
 )
 
 // responsesWebsocketUnsupported 回应 Codex 的 WS 升级探测（GET /v1/responses）。
@@ -113,6 +115,10 @@ func responsesToChat(src []byte) ([]byte, *responsesMeta, []serverSearchTool, er
 			out["tools"] = chatTools
 		}
 		meta.customTools, meta.nsMap, meta.alias = custom, nsMap, alias
+		meta.toolsDeclared = len(chatTools)
+	}
+	if _, ok := out["tool_choice"]; ok {
+		meta.toolChoiceSet = true
 	}
 	// tool_choice 也要与出站工具名对齐：重名改名过的工具，客户端仍按原名点名。
 	if v, ok := out["tool_choice"]; ok {
@@ -182,6 +188,10 @@ type responsesMeta struct {
 	imageTool bool
 	// preItems 网关侧已执行完的托管工具产出（image_generation_call），按序排在 output 最前。
 	preItems []any
+	// toolsDeclared 出站声明的工具数（取证用：判断「声明了工具却零调用」的形态）。
+	toolsDeclared int
+	// toolChoiceSet 客户端是否显式带了 tool_choice（取证用：none 会让网关删掉 tools）。
+	toolChoiceSet bool
 	// alias 出站扁平名 -> 客户端原名（只对重名改名过的有值）。
 	// namespace 组内（或与顶层）重名时子工具被改成稳定后缀名（read_file_2），回程必须
 	// 还原成客户端声明的原名，否则客户端下一轮按自己声明的名字回传工具结果就匹配不上；
@@ -1603,6 +1613,23 @@ func (w *responsesWriter) emitCompleted() error {
 	// 是失败而非答案这一事实一致。
 	// 判据与 hub 实现一致（wb_proxy.reasoning_only_response）：无正文、无工具调用、
 	// 有思考、且不是 length 截断（截断走 incomplete，不抢占）。
+	// 取证（默认关闭）：声明了工具、却只回了正文就收尾 —— 用户看到的是「说一句就停，
+	// 要人喊继续」。这条形态的成因（模型自己选择、还是客户端 tool_choice、还是出站被
+	// 改写）无法从元数据判断，抓一条真实正文与出站形态比在生产上试参数可靠。
+	// 只在 WB2API_CAPTURE_DIR 设了目录时才写盘，且每个 tag 有硬上限（见 debugcap）。
+	if debugcap.Enabled() && w.meta != nil && w.meta.toolsDeclared > 0 && len(w.x.toolOrder) == 0 {
+		if text := strings.TrimSpace(w.x.messageText.String()); text != "" {
+			debugcap.Capture("stop-no-toolcall", map[string]any{
+				"time":            debugcap.Now(),
+				"model":           w.x.model,
+				"tools_declared":  w.meta.toolsDeclared,
+				"tool_choice_set": w.meta.toolChoiceSet,
+				"text_len":        len(text),
+				"text":            text,
+				"usage":           w.x.usage,
+			})
+		}
+	}
 	if w.reasoningOnlyNoOutput() {
 		return w.emitFailed(map[string]any{
 			"code":    "empty_reasoning_only",
