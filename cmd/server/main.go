@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof" // WB2API_PPROF 打开时提供 /debug/pprof（默认无监听）
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -613,6 +614,18 @@ func main() {
 	// 模型归零；倍率表当时尚未建立）。
 	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
 	go warmModelRates(ctx, up, p)
+
+	// 诊断用：WB2API_PPROF=127.0.0.1:6060 时另起一个只跑 pprof 的监听。
+	// 默认不开启（不设环境变量就完全没有这个监听），供「并发一高就降速」这类
+	// 只能靠真实负载定位的 CPU 问题取 profile（取完即关容器，不常驻生产）。
+	if addr := os.Getenv("WB2API_PPROF"); addr != "" {
+		go func() {
+			log.Printf("[pprof] 诊断监听开启 %s（CPU: /debug/pprof/profile?seconds=30）", addr)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				log.Printf("WARN: [pprof] 监听失败 %v", err)
+			}
+		}()
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
