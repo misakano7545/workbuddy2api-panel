@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
 func TestDefault(t *testing.T) {
@@ -1103,8 +1105,10 @@ func TestThinkingDefaults(t *testing.T) {
 	if !c.Thinking.Enabled {
 		t.Error("thinking.enabled default should be true")
 	}
-	if c.Thinking.DefaultEffort != "max" {
-		t.Errorf("thinking.default_effort=%q want max", c.Thinking.DefaultEffort)
+	// 缺省 high（upstream.DefaultGatewayEffort），不是 max：思考与正文共用一份输出
+	// 额度，max 会把预算烧在思考上、正文只剩半句。
+	if c.Thinking.DefaultEffort != upstream.DefaultGatewayEffort {
+		t.Errorf("thinking.default_effort=%q want %q", c.Thinking.DefaultEffort, upstream.DefaultGatewayEffort)
 	}
 	if !c.Thinking.ClientPriority {
 		t.Error("thinking.client_priority default should be true")

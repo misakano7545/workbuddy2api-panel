@@ -54,3 +54,6 @@ server.exe
 # 编译产物（16MB 误提交过一次，20261021）
 /server
 /app.toml
+
+# Local build artifacts (local-45/build.sh 的产物，不进仓库)
+/local-45/dist/

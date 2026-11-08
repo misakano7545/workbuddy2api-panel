@@ -95,8 +95,9 @@ type continueReader struct {
 	br  *bufio.Reader
 	out []byte // 已生成待输出字节
 
-	seg      int  // 当前段序号（0 起）
-	limitSet bool // 客户端显式带了输出限额：尊重之，不续写
+	seg      int   // 当前段序号（0 起）
+	limitSet bool  // 客户端显式带了输出限额：尊重之，不续写
+	limit    int64 // 该限额的值（0 = 没带或不可解析）
 
 	finish   string   // 本段 finish_reason（续写时每段重置）
 	tail     []string // finish 之后的帧：续写时丢弃，降级时原样回放
@@ -146,24 +147,44 @@ func newContinueReaderWithFloor(ctx context.Context, up *upstream.Client, acct *
 	r := &continueReader{ctx: ctx, up: up, acct: acct, body: body, clientIP: clientIP, meta: meta, cur: rc,
 		lastClientAt: time.Now(), budgetFloor: budgetFloor}
 	r.br = bufio.NewReaderSize(rc, 64*1024)
-	r.limitSet = bodyHasOutputLimit(body)
+	r.limitSet, r.limit = bodyOutputLimit(body)
 	return r
 }
 
-// bodyHasOutputLimit 请求体是否显式带输出限额（任一别名）。带限额 = 客户端有意
-// 只要这么多（如 Claude 客户端必带 max_tokens），截断是它的预期语义，不续写。
+// clientLimitLongAnswer 客户端额度达到这个数时按「要长文」处理，而不是「只要这么短」。
+//
+// 实测（global:deepseek-v4.1-flash-sg，同一句「数到 20000」）：max_tokens=32000 在
+// completion=32000 整处 finish=length、正文停在半句；同一提示词不带额度能写 60660
+// token 自然收尾。即上游是「给多少切多少」，不是有 32000 硬上限——这一档额度不代表
+// 客户端只要这么短，只是它随手给的上限。
+const clientLimitLongAnswer int64 = 32000
+
+// bodyOutputLimit 请求体显式带的输出限额（任一别名，取第一个有效值）与「是否带了」。
+// 带限额 = 客户端有意只要这么多（如 Claude 客户端必带 max_tokens），截断是它的预期
+// 语义，不续写；但额度 ≥ clientLimitLongAnswer 时按「要长文」处理（见 canContinue）。
 // 解析失败按「有限额」处理（不续），宁可少续不可续错。
-func bodyHasOutputLimit(body []byte) bool {
+func bodyOutputLimit(body []byte) (bool, int64) {
 	var obj map[string]any
 	if json.Unmarshal(body, &obj) != nil {
-		return true
+		return true, 0
 	}
 	for _, k := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
-		if v, ok := obj[k]; ok && v != nil {
-			return true
+		v, ok := obj[k]
+		if !ok || v == nil {
+			continue
 		}
+		if f, ok := v.(float64); ok && f > 0 {
+			return true, int64(f)
+		}
+		return true, 0
 	}
-	return false
+	return false, 0
+}
+
+// bodyHasOutputLimit 请求体是否显式带输出限额（见 bodyOutputLimit）。
+func bodyHasOutputLimit(body []byte) bool {
+	has, _ := bodyOutputLimit(body)
+	return has
 }
 
 func (r *continueReader) Read(p []byte) (int, error) {
@@ -570,13 +591,14 @@ func (r *continueReader) canContinue(sawDone bool) bool {
 		return false
 	case r.errSeen:
 		return false
-	case r.limitSet && !r.starvedByThinking() && !r.budgetWasRaised():
+	case r.limitSet && r.limit < clientLimitLongAnswer && !r.starvedByThinking() && !r.budgetWasRaised():
 		// 客户端显式带限额 = 它只要这么多，截断是预期语义（Claude 客户端必带
-		// max_tokens，每回合 8192）。两种例外都续写：
+		// max_tokens，每回合 8192）。三种例外都续写：
 		//   1) 额度被思考吃光（见 continueThinkingShare）——客户端要的那份回答没写出来；
 		//   2) 网关把这个额度抬到过下限（budgetWasRaised）——此时生效的上限是**网关**
 		//      选的数，不是客户端的意图，被它切断就该接着写（否则「抬了额度还是断」
-		//      只是把断点从 1024 挪到 8192，问题没真正解决）。
+		//      只是把断点从 1024 挪到 8192，问题没真正解决）；
+		//   3) 额度 ≥ clientLimitLongAnswer——这一档额度不代表「只要这么短」（见该常量）。
 		return false
 	case r.cutNoFinish(sawDone):
 		// 段无 finish 结束 = 上游偶发断流（线上实测：15 次续写里 1 次）。已产出内容时

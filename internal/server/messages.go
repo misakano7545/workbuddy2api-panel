@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
 func (h *Handler) withAnthropicAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -623,10 +624,14 @@ func chatCompletionToMessage(obj map[string]any) map[string]any {
 	if msg != nil {
 		// 上游 reasoning_content 无 signature，作为 thinking 块下发（Claude Code 展示用）；
 		// 客户端回传的 thinking 块在 blocksToMessages 里被丢弃，不会触发签名校验。
-		if rc, ok := msg["reasoning_content"].(string); ok && rc != "" {
-			content = append(content, map[string]any{"type": "thinking", "thinking": rc})
+		rc, _ := msg["reasoning_content"].(string)
+		// reasoning parser 偶发把整段 CoT 当正文下发（issue #194）：正文里的
+		// <think:SUF>…</think:SUF> 归到同一个 thinking 块，别当正文发出去。
+		inline, text := upstream.SplitThinkTags(messageText(msg["content"]))
+		if rc != "" || inline != "" {
+			content = append(content, map[string]any{"type": "thinking", "thinking": rc + inline})
 		}
-		if text := messageText(msg["content"]); text != "" {
+		if text != "" {
 			content = append(content, map[string]any{"type": "text", "text": text})
 		}
 		if tcs, ok := msg["tool_calls"].([]any); ok {
@@ -798,6 +803,7 @@ type messagesWriter struct {
 	// 只能在 message_start 之后、正文之前落地，且占用正文之前的内容块下标。
 	prelude []any
 	x       anthState
+	tt      upstream.ThinkTag // 正文里漏出的 <think:SUF> 标签拆分（issue #194）
 }
 
 type anthState struct {
@@ -810,6 +816,8 @@ type anthState struct {
 	tools                 map[int]*anthTool
 	toolOrder             []int
 	usage                 map[string]any
+	fed                   bool // 已出过内容（thinking 或 text）
+	full                  bool // 已收过整条 message，后续 delta 不再重复拼
 }
 
 type anthTool struct {
@@ -959,33 +967,44 @@ func (w *messagesWriter) handleChunk(obj map[string]any) error {
 	if c == nil {
 		return nil
 	}
-	if d, _ := c["delta"].(map[string]any); d != nil {
+	// 一帧里的内容字段：delta（流式分片）与 message（上游整条下发）同构，
+	// 与 upstream/sse.go 的 mergeMessageFields 对齐。此前只认 delta，message
+	// 整帧被丢——上游一旦用非 delta 形态，正文与思考会一起消失（issue #194）。
+	emitFields := func(d map[string]any) error {
 		// 上游 reasoning_content → thinking 块（Claude Code 会展示）。无 signature：
 		// 客户端回传时被 blocksToMessages 丢掉，不会触发校验。
 		if rc, ok := d["reasoning_content"].(string); ok && rc != "" {
-			if err := w.ensureThinking(); err != nil {
-				return err
-			}
-			if err := w.emit("content_block_delta", map[string]any{
-				"index": w.x.thinkIdx,
-				"delta": map[string]any{"type": "thinking_delta", "thinking": rc},
-			}); err != nil {
+			if err := w.emitThinking(rc); err != nil {
 				return err
 			}
 		}
 		if s, ok := d["content"].(string); ok && s != "" {
-			if err := w.ensureText(); err != nil {
+			// upstream 的 reasoning parser 偶发把整段 CoT 当正文下发（usage 里
+			// reasoning_tokens=0，正文首尾带 <think:SUF>）。拆开后控制 token
+			// 不进 text_delta，见 upstream.ThinkTag。
+			think, body := w.tt.Feed(s)
+			if err := w.emitThinking(think); err != nil {
 				return err
 			}
-			if err := w.emit("content_block_delta", map[string]any{
-				"index": w.x.textIdx,
-				"delta": map[string]any{"type": "text_delta", "text": s},
-			}); err != nil {
+			if err := w.emitText(body); err != nil {
 				return err
 			}
 		}
-		if tcs, ok := d["tool_calls"].([]any); ok {
-			if err := w.onTools(tcs); err != nil {
+		if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
+			return w.onTools(tcs)
+		}
+		return nil
+	}
+	// message 是整条下发，优先认；认过之后同请求的 delta 不再重复拼
+	// （与 sse.go 的 gotAnyContent latch 同一口径）。
+	if msg, ok := c["message"].(map[string]any); ok && !w.x.fed {
+		w.x.full = true
+		if err := emitFields(msg); err != nil {
+			return err
+		}
+	} else if !w.x.full {
+		if d, _ := c["delta"].(map[string]any); d != nil {
+			if err := emitFields(d); err != nil {
 				return err
 			}
 		}
@@ -1039,6 +1058,34 @@ func (w *messagesWriter) emitPrelude() error {
 	}
 	w.prelude = nil
 	return nil
+}
+
+func (w *messagesWriter) emitThinking(s string) error {
+	if s == "" {
+		return nil
+	}
+	if err := w.ensureThinking(); err != nil {
+		return err
+	}
+	w.x.fed = true
+	return w.emit("content_block_delta", map[string]any{
+		"index": w.x.thinkIdx,
+		"delta": map[string]any{"type": "thinking_delta", "thinking": s},
+	})
+}
+
+func (w *messagesWriter) emitText(s string) error {
+	if s == "" {
+		return nil
+	}
+	if err := w.ensureText(); err != nil {
+		return err
+	}
+	w.x.fed = true
+	return w.emit("content_block_delta", map[string]any{
+		"index": w.x.textIdx,
+		"delta": map[string]any{"type": "text_delta", "text": s},
+	})
 }
 
 func (w *messagesWriter) ensureThinking() error {
@@ -1171,6 +1218,15 @@ func (w *messagesWriter) closeAndStop() error {
 	w.x.done = true
 	if !w.x.started {
 		if err := w.ensureStart(nil); err != nil {
+			return err
+		}
+	}
+	// 拆分器里可能还压着半个标签，收尾前吐完，否则末尾几个字符会丢。
+	if think, body := w.tt.Flush(); think != "" || body != "" {
+		if err := w.emitThinking(think); err != nil {
+			return err
+		}
+		if err := w.emitText(body); err != nil {
 			return err
 		}
 	}
