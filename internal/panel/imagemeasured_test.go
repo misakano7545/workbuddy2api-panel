@@ -102,7 +102,7 @@ func TestPanelImageModelCreditWithCatalogPrice(t *testing.T) {
 				Header: http.Header{"Content-Type": []string{"application/json"}},
 				Body:   io.NopCloser(strings.NewReader(body))}, nil
 		})},
-		ChatBaseCN: "https://cn.example",
+		ChatBaseCN:        "https://cn.example",
 		ChatBaseGlobal:    "https://global.example",
 		BillingBaseGlobal: "https://global.example",
 	}

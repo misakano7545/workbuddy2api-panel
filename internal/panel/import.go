@@ -289,11 +289,18 @@ func decodeCockpitAccounts(raw []byte) ([]cockpitAccount, error) {
 			return nil, err
 		}
 		for _, k := range []string{"accounts", "data", "list", "items", "results", "auths"} {
-			if sub, ok := obj[k]; ok {
-				var items []json.RawMessage
-				if err := json.Unmarshal(sub, &items); err == nil {
-					return decodeCockpitItems(items), nil
-				}
+			sub, ok := obj[k]
+			if !ok {
+				continue
+			}
+			var items []json.RawMessage
+			if err := json.Unmarshal(sub, &items); err == nil {
+				return decodeCockpitItems(items), nil
+			}
+			// 信封的值是**单个账号对象**（用户把单账号详情又包了一层）：
+			// 按条目解，但绝不能拿信封键当 uid——见字典分支的说明。
+			if acc, ok := decodeCockpitOne(sub); ok {
+				return []cockpitAccount{acc}, nil
 			}
 		}
 		if _, ok := obj["account"]; ok {
@@ -306,8 +313,16 @@ func decodeCockpitAccounts(raw []byte) ([]cockpitAccount, error) {
 			return []cockpitAccount{acc}, nil
 		}
 		// 字典：{"<uid>": {...}}，键当 uid 兜底
+		//
+		// 信封名不能当 uid：`{"accounts":{"refresh_token":"r"}}` 是「信封的值是单个
+		// 对象」形态，走到这里时 accounts 这个键会命中内层（有 token），兜底就会把
+		// 账号的 uid 写成字面量 "accounts"——池里从此多一个格式合法、内容垃圾的号。
+		// 信封名本身不是 uid（真实 uid 是手机号/UUID），直接跳过。
 		keys := make([]string, 0, len(obj))
 		for k := range obj {
+			if isCockpitEnvelopeKey(k) {
+				continue
+			}
 			keys = append(keys, k)
 		}
 		sort.Strings(keys) // 稳定顺序，便于前端展示与测试比对
@@ -329,6 +344,16 @@ func decodeCockpitAccounts(raw []byte) ([]cockpitAccount, error) {
 	default:
 		return nil, fmt.Errorf("expected JSON array or object")
 	}
+}
+
+// isCockpitEnvelopeKey 报告键名是否是导出工具的信封名（不是 uid）。
+func isCockpitEnvelopeKey(k string) bool {
+	for _, e := range []string{"accounts", "data", "list", "items", "results", "auths"} {
+		if strings.EqualFold(strings.TrimSpace(k), e) {
+			return true
+		}
+	}
+	return false
 }
 
 // decodeCockpitItems 逐条解码；认不出的条目保留一个空占位，
