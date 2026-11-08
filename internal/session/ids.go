@@ -16,6 +16,8 @@ import (
 	"math/rand/v2"
 	"strings"
 	"time"
+
+	"github.com/misakano7545/workbuddy2api-panel/internal/jsonscan"
 )
 
 // ResolveConversationID 从请求体提取会话头族的 conversationId（snake/camel 双形态，
@@ -27,6 +29,31 @@ func ResolveConversationID(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
+	// 只读 4 个键：单遍零分配扫描，不做整树解析。线上这一步此前要为 100~500KB
+	// 的 body 建整棵 map（占 chat 请求 CPU 的 ~9%），而它只关心这几个字符串。
+	// 扫描器走不通时回落整树解析，行为与旧实现逐字一致。
+	res := jsonscan.Lookup(body, jsonscan.Query{
+		Top:        []string{"conversation_id", "conversationId"},
+		Nested:     "metadata",
+		NestedKeys: []string{"conversation_id", "conversationId"},
+	})
+	if !res.Ok {
+		return resolveConversationIDFull(body)
+	}
+	if v := res.GetNested("conversation_id"); v != "" {
+		return v
+	}
+	if v := res.GetNested("conversationId"); v != "" {
+		return v
+	}
+	if v := res.Get("conversation_id"); v != "" {
+		return v
+	}
+	return res.Get("conversationId")
+}
+
+// resolveConversationIDFull 整树解析版（扫描器走不通时的回落路径，语义与旧实现一致）。
+func resolveConversationIDFull(body []byte) string {
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return ""

@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"strings"
+	"sync/atomic"
 )
 
 // PrepareBodyOpt 单 pass 改写；sanitize=false 时行为完全还原（仅强制 stream + 归一化 tool_choice）。
@@ -32,6 +33,17 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	body, _ := PrepareBodyOptWithEffortsDefaultAndCaps(src, sanitize, efforts, defaultEfforts, nil)
 	return body
 }
+
+// prepareBodyParses 记录 prepareBodyOpt 对请求体的整树解析次数（观测/回归用）。
+// 每个 chat 请求在这里只应解析一次：会话键、首条 role、kimi 工具、会话字段
+// 注入都已各自走零分配扫描或并入本次解析。
+var prepareBodyParses atomic.Int64
+
+// PrepareBodyParseCount 返回累计整树解析次数（供测试与面板观测）。
+func PrepareBodyParseCount() int64 { return prepareBodyParses.Load() }
+
+// ResetPrepareBodyParseCount 归零计数（供测试）。
+func ResetPrepareBodyParseCount() { prepareBodyParses.Store(0) }
 
 // SplitRealmPrefix 解析网关的 realm 前缀协议（"[realm:]model"）：
 // 取第一个 ":"，前段恰为 "cn"/"global" 才剥离；否则视为裸名，realm 回落 "cn"。
@@ -67,7 +79,7 @@ func normalizeModelName(obj map[string]any) {
 // 导出入口不注入 prompt_cache_key（保持既有公开语义）；生产路径由
 // client.prepareBody 调用 prepareBodyOpt 并传入 cache 参数。
 func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64) ([]byte, string) {
-	body, _, eff := prepareBodyOpt(src, sanitize, true, efforts, defaultEfforts, maxOut, "", nil, "", "", false, 0)
+	body, _, eff := prepareBodyOpt(src, sanitize, true, efforts, defaultEfforts, maxOut, "", nil, "", "", false, 0, "")
 	return body, eff
 }
 
@@ -77,7 +89,7 @@ func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts 
 // realm 用于 thinking.model_defaults 的 "realm:model" 精确匹配；policy 为 nil
 // 或未启用时与 …Caps 完全一致。
 func PrepareBodyOptWithEffortPolicy(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64, realm string, policy *EffortPolicy) ([]byte, string) {
-	body, _, eff := prepareBodyOpt(src, sanitize, true, efforts, defaultEfforts, maxOut, realm, policy, "", "", false, 0)
+	body, _, eff := prepareBodyOpt(src, sanitize, true, efforts, defaultEfforts, maxOut, realm, policy, "", "", false, 0, "")
 	return body, eff
 }
 
@@ -88,10 +100,11 @@ func PrepareBodyOptWithEffortPolicy(src []byte, sanitize bool, efforts map[strin
 //   - requested 在 injectThinking 之前抓取，因此不含网关补的默认档——它回答
 //     「客户端到底发没发、发的哪一档」（issue #43/#18 的判别依据）；
 //   - effective 是降级后的出站档位，未携带/未知模型/未知档位 → ""。
-func prepareBodyOpt(src []byte, sanitize, brandGlobal bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64, realm string, policy *EffortPolicy, cacheUID, cacheConversation string, injectCache bool, keepRounds int) ([]byte, string, string) {
+func prepareBodyOpt(src []byte, sanitize, brandGlobal bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64, realm string, policy *EffortPolicy, cacheUID, cacheConversation string, injectCache bool, keepRounds int, convReqID string) ([]byte, string, string) {
 	if len(src) == 0 {
 		return src, "", ""
 	}
+	prepareBodyParses.Add(1)
 	var obj map[string]any
 	if err := json.Unmarshal(src, &obj); err != nil {
 		return src, "", ""
@@ -178,6 +191,9 @@ func prepareBodyOpt(src []byte, sanitize, brandGlobal bool, efforts map[string][
 		// （上游 issue：只洗 messages 时整段工具描述原样出站）。issue #395 同类。
 		sanitizeTools(obj["tools"], brandGlobal)
 	}
+	// 会话轮级字段（issue #51）：本轮已解析好的 map 就地补，与本函数的序列化合并；
+	// 旧实现是在 prepared body 上再 Unmarshal+Marshal 一次（100~500KB 的整树往返）。
+	injectConversationFieldsObj(obj, convReqID)
 	// prompt_cache_key：与 body 改写共用同一次 map，避免再 Unmarshal/Marshal 一遍。
 	if injectCache {
 		if key, ok := promptCacheKeyFor(obj, cacheUID, cacheConversation); ok {

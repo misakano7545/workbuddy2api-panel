@@ -271,7 +271,7 @@ func TestPrepareBodyOptRequestedVsEffectiveEffort(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, req, eff := prepareBodyOpt([]byte(c.body), false, true, c.efforts, defaults, nil, "", nil, "", "", false, 0)
+			_, req, eff := prepareBodyOpt([]byte(c.body), false, true, c.efforts, defaults, nil, "", nil, "", "", false, 0, "")
 			if req != c.wantReq {
 				t.Errorf("requested=%q want %q（客户端原始档位）", req, c.wantReq)
 			}

@@ -1141,7 +1141,7 @@ func (c *Client) brandScopeGlobal() bool {
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
 // 返回改写后的请求体、客户端原始请求档位与本次实际生效档位
 // （requested 与 effective 的区别见 prepareBodyOpt 注释；issue #43）。
-func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) ([]byte, string, string) {
+func (c *Client) prepareBody(body []byte, realm, uid, conversationID, convReqID string) ([]byte, string, string) {
 	body = prepareKimiTools(body, realm)
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	maxOut := c.modelMaxOutSnapshot(realm)
@@ -1158,7 +1158,7 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) ([]
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。与 body 归一化共用
 	// prepareBodyOpt 的同一次 map 解析，不再二次 Unmarshal/Marshal。
-	return prepareBodyOpt(body, c.SanitizeFingerprints.Load(), c.brandScopeGlobal(), efforts, defs, maxOut, realm, c.EffortPolicy(), uid, conversationID, true, int(c.KeepRecentRounds.Load()))
+	return prepareBodyOpt(body, c.SanitizeFingerprints.Load(), c.brandScopeGlobal(), efforts, defs, maxOut, realm, c.EffortPolicy(), uid, conversationID, true, int(c.KeepRecentRounds.Load()), convReqID)
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
@@ -1643,10 +1643,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		ctx = context.Background()
 	}
 	prepStart := time.Now()
-	prepared, requested, effort := c.prepareBody(body, a.Realm(), a.UID, cacheKeySource(meta))
-	// body 侧会话字段（issue #51）：把本轮 ID 同时写进消息体，与出站头保持头体一致
-	// （官方桌面端头与体都带 conversationRequestId）。见 conv_fields.go。
-	prepared = injectConversationFields(prepared, meta.ConversationRequestID)
+	prepared, requested, effort := c.prepareBody(body, a.Realm(), a.UID, cacheKeySource(meta), meta.ConversationRequestID)
 	if timing != nil {
 		// Zero means unmeasured; coarse clocks can report zero for completed work.
 		timing.Prep += max(time.Since(prepStart), time.Nanosecond)

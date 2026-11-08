@@ -18,13 +18,13 @@ func TestClientKeepRecentRoundsReachesPipeline(t *testing.T) {
 		{"role":"user","content":"三"}]}`)
 
 	// 关闭时全量透传（默认行为，与没有这个功能一致）。
-	out, _, _ := c.prepareBody(body, "cn", "uid", "conv")
+	out, _, _ := c.prepareBody(body, "cn", "uid", "conv", "")
 	if n := countMessages(t, out); n != 6 {
 		t.Fatalf("keep_recent_rounds=0 不该裁历史，实际 %d 条", n)
 	}
 
 	c.KeepRecentRounds.Store(2)
-	out, _, _ = c.prepareBody(body, "cn", "uid", "conv")
+	out, _, _ = c.prepareBody(body, "cn", "uid", "conv", "")
 	roles := messageRoles(t, out)
 	if got := len(roles); got != 4 {
 		t.Fatalf("保留 2 轮应为 system+user+assistant+user 共 4 条，实际 %d 条: %v", got, roles)

@@ -16,8 +16,10 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/misakano7545/workbuddy2api-panel/internal/jsonscan"
 	"github.com/misakano7545/workbuddy2api-panel/internal/redisstore"
 )
 
@@ -346,6 +348,19 @@ func ExtractKey(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
+	// 快路径：单遍扫描读显式会话键（线上这条占 chat 请求 CPU 的 ~10%——此前
+	// 为了读 1~2 个短字符串，要把整个 100~500KB body 解析成 map）。
+	// 未命中时只有派生键一条路，那需要读消息内容，回落整树解析。
+	if key, hasUser, ok := explicitSessionKey(body); ok {
+		if key != "" {
+			return key
+		}
+		if hasUser {
+			// user 维度标识存在 → 不派生（anti-monopoly 契约），不必再看消息内容。
+			return ""
+		}
+	}
+	bodyParses.Add(1)
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return ""
@@ -376,6 +391,35 @@ func ExtractKey(body []byte) string {
 	return deriveKey(obj)
 }
 
+// explicitSessionKey 单遍扫描读 5 个显式会话键（顺序与 ExtractKey 一致：
+// metadata 优先、snake 优先于 camel，prompt_cache_key 最后）。
+// ok=false 表示扫描器走不通，调用方必须回落整树解析。
+// 顺带读出 user_id 是否存在——派生回退闸要它，省掉一次整树解析。
+func explicitSessionKey(body []byte) (key string, hasUser bool, ok bool) {
+	res := jsonscan.Lookup(body, jsonscan.Query{
+		Top:        []string{"conversation_id", "conversationId", "prompt_cache_key", "user_id"},
+		Nested:     "metadata",
+		NestedKeys: []string{"conversation_id", "conversationId", "user_id"},
+	})
+	if !res.Ok {
+		return "", false, false
+	}
+	hasUser = res.Get("user_id") != "" || res.GetNested("user_id") != ""
+	switch {
+	case res.GetNested("conversation_id") != "":
+		return res.GetNested("conversation_id"), hasUser, true
+	case res.GetNested("conversationId") != "":
+		return res.GetNested("conversationId"), hasUser, true
+	case res.Get("conversation_id") != "":
+		return res.Get("conversation_id"), hasUser, true
+	case res.Get("conversationId") != "":
+		return res.Get("conversationId"), hasUser, true
+	case res.Get("prompt_cache_key") != "":
+		return res.Get("prompt_cache_key"), hasUser, true
+	}
+	return "", hasUser, true
+}
+
 // hasUserIDKey 报告已解析 body 是否携带 user 维度标识（metadata.user_id 或顶层
 // user_id，非空字符串才算）。只用于派生回退闸（ExtractKey）；解析失败按无处理。
 func hasUserIDKey(obj map[string]any) bool {
@@ -403,6 +447,7 @@ func DeriveCacheKey(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
+	bodyParses.Add(1)
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return ""
@@ -532,3 +577,14 @@ func strOrEmpty(v any) string {
 	s, _ := v.(string)
 	return s
 }
+
+// bodyParses 本包对请求体做整树 JSON 解析的次数（观测/回归用）。
+// ExtractKey / ResolveConversationID 在有显式会话键时必须 0 次——那时它们只需
+// 读一两个短字符串，整树解析 100~500KB 的 body 是纯浪费（线上占 chat CPU ~19%）。
+var bodyParses atomic.Int64
+
+// ParseCount 返回本包累计的整树解析次数（供测试与面板观测）。
+func ParseCount() int64 { return bodyParses.Load() }
+
+// ResetParseCount 归零计数（供测试）。
+func ResetParseCount() { bodyParses.Store(0) }

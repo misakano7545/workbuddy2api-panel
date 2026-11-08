@@ -34,7 +34,7 @@ func TestToolSchemaEnumTypeInflated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, _, _ := prepareBodyOpt(in, false, true, nil, nil, nil, "", nil, "", "", false, 0)
+	out, _, _ := prepareBodyOpt(in, false, true, nil, nil, nil, "", nil, "", "", false, 0, "")
 
 	var got map[string]any
 	if err := json.Unmarshal(out, &got); err != nil {
@@ -67,7 +67,7 @@ func TestToolSchemaEnumTypeInflated(t *testing.T) {
 // 嵌套位置同样要覆盖（items / anyOf / $defs / 数组形态的 properties）。
 func TestToolSchemaEnumTypeNested(t *testing.T) {
 	in := `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"list":{"type":"array","items":{"enum":["a"]}},"one":{"anyOf":[{"enum":["z"]}]}}}}}]}`
-	out, _, _ := prepareBodyOpt([]byte(in), false, true, nil, nil, nil, "", nil, "", "", false, 0)
+	out, _, _ := prepareBodyOpt([]byte(in), false, true, nil, nil, nil, "", nil, "", "", false, 0, "")
 
 	var got map[string]any
 	if err := json.Unmarshal(out, &got); err != nil {
@@ -86,7 +86,7 @@ func TestToolSchemaEnumTypeNested(t *testing.T) {
 // 补错类型会改变约束语义（上游按原样校验）。
 func TestToolSchemaEnumTypeLeavesResponseFormat(t *testing.T) {
 	in := `{"model":"m","messages":[],"response_format":{"type":"json_schema","json_schema":{"schema":{"properties":{"k":{"enum":["a"]}}}}}}`
-	out, _, _ := prepareBodyOpt([]byte(in), false, true, nil, nil, nil, "", nil, "", "", false, 0)
+	out, _, _ := prepareBodyOpt([]byte(in), false, true, nil, nil, nil, "", nil, "", "", false, 0, "")
 	if !strings.Contains(string(out), `"enum":["a"]`) {
 		t.Fatalf("response_format 被改动: %s", out)
 	}

@@ -34,11 +34,10 @@ import (
 // agentCLI 官方 chat 出站每条消息都带的 agent 段（两版实测均为 `cli`）。
 const agentCLI = "cli"
 
-// injectConversationFields 在已改写的出站 body 上补会话轮级字段。
+// injectConversationFields 在已改写的出站 body 上补会话轮级字段（字节入口）。
 //
-// convReqID 为本次出站的 X-Conversation-Request-ID（handler 在轮转循环外生成、
-// 循环内复用），空串时原样返回（不写空值）。body 不可解析时原样返回——
-// 与 prepareBody 的语义一致：坏 body 不做二次错误化。
+// 热路径不走这里：prepareBodyOpt 已经持有解析好的 obj，注入与它的序列化合并成
+// 一次（见 injectConversationFieldsObj）。本函数保留给测试与独立调用方。
 func injectConversationFields(body []byte, convReqID string) []byte {
 	if len(body) == 0 || convReqID == "" {
 		return body
@@ -47,9 +46,25 @@ func injectConversationFields(body []byte, convReqID string) []byte {
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
+	if !injectConversationFieldsObj(obj, convReqID) {
+		return body
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// injectConversationFieldsObj 在已解析的 obj 上补会话轮级字段，返回是否改动。
+// convReqID 为空或没有可写的当前轮时不改动（不写空值、不凭空造消息）。
+func injectConversationFieldsObj(obj map[string]any, convReqID string) bool {
+	if obj == nil || convReqID == "" {
+		return false
+	}
 	msgs, ok := obj["messages"].([]any)
 	if !ok || len(msgs) == 0 {
-		return body
+		return false
 	}
 	// 找最后一条 user 消息：它就是「当前轮」的起点（官方 startsNewUserRequest 语义）。
 	idx := -1
@@ -64,15 +79,15 @@ func injectConversationFields(body []byte, convReqID string) []byte {
 		}
 	}
 	if idx < 0 {
-		return body
+		return false
 	}
 	cur, ok := msgs[idx].(map[string]any)
 	if !ok {
-		return body
+		return false
 	}
 	// 客户端若已自带（OpenAI 兼容网关转发官方 body 的场景）→ 原值优先，不覆盖。
 	if v, _ := cur["conversationRequestId"].(string); v != "" {
-		return body
+		return false
 	}
 	cur["conversationRequestId"] = convReqID
 	cur["startsNewUserRequest"] = true
@@ -81,9 +96,5 @@ func injectConversationFields(body []byte, convReqID string) []byte {
 	}
 	msgs[idx] = cur
 	obj["messages"] = msgs
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
+	return true
 }

@@ -3,7 +3,20 @@ package upstream
 import (
 	"encoding/json"
 	"strings"
+	"sync/atomic"
+
+	"github.com/misakano7545/workbuddy2api-panel/internal/jsonscan"
 )
+
+// kimiToolsParses prepareKimiTools 做整树解析的次数（观测/回归用）。
+// 非 kimi 模型必须 0 次：那一路只需读一个 model 字段。
+var kimiToolsParses atomic.Int64
+
+// KimiToolsParseCount 返回 prepareKimiTools 累计的整树解析次数（供测试）。
+func KimiToolsParseCount() int64 { return kimiToolsParses.Load() }
+
+// ResetKimiToolsParseCount 归零计数（供测试）。
+func ResetKimiToolsParseCount() { kimiToolsParses.Store(0) }
 
 // prepareKimiTools 把 CN Kimi 出站请求里工具 schema 的本地 $ref 展开成内联定义
 // （Kimi 不接受 parameters 里的 $ref/#/$defs），其余模型、其余域原样返回字节。
@@ -14,13 +27,16 @@ func prepareKimiTools(body []byte, realm string) []byte {
 	if realmKey(realm) != "cn" {
 		return body
 	}
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(body, &obj) != nil {
+	// 快路径：先用零分配的扫描读 model；非 kimi 直接返回，不做整树解析。
+	// 线上绝大多数请求走这里——此前每个 CN 请求都要为了一句前缀判断把整个
+	// body 解析成 map[string]json.RawMessage（100~500KB，全部值都复制一遍）。
+	model, ok := jsonscan.TopLevelString(body, "model")
+	if !ok || !strings.HasPrefix(strings.TrimPrefix(model, "cn:"), "kimi") {
 		return body
 	}
-	var model string
-	_ = json.Unmarshal(obj["model"], &model)
-	if !strings.HasPrefix(strings.TrimPrefix(model, "cn:"), "kimi") {
+	kimiToolsParses.Add(1)
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(body, &obj) != nil {
 		return body
 	}
 	var tools []map[string]any

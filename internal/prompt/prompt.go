@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
+
+	"github.com/misakano7545/workbuddy2api-panel/internal/jsonscan"
 )
 
 //go:embed defaultprompt.md
@@ -53,6 +56,7 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 	if len(body) == 0 || systemPrompt == "" {
 		return body
 	}
+	bodyParses.Add(1)
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
@@ -263,6 +267,13 @@ func EnsureSystemFirst(body []byte, fallback string) []byte {
 	if len(body) == 0 {
 		return body
 	}
+	// 快路径：首条已是 system（代理类客户端几乎恒如此）→ 逐字不动，一次整树解析都不做。
+	// 这一条在线上值 30~60ms/请求：此前的实现为了读一个 role 就把整个 100~500KB body
+	// 解析成 map（含全部历史消息的解转义）。
+	if role, ok := jsonscan.FirstMessageRole(body); ok && role == "system" {
+		return body
+	}
+	bodyParses.Add(1)
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
@@ -367,3 +378,14 @@ func Append(body []byte, systemPrompt string) []byte {
 	}
 	return out
 }
+
+// bodyParses 本包对请求体做整树 JSON 解析的次数（观测/回归用）。
+// 每多一次 Unmarshal 就是一次 100~500KB 的解转义与对象分配——线上「并发一高
+// 就降速」的主因就是这类重复解析；测试用 ParseCount 把它钉住。
+var bodyParses atomic.Int64
+
+// ParseCount 返回本包累计的整树解析次数（供测试与面板观测）。
+func ParseCount() int64 { return bodyParses.Load() }
+
+// ResetParseCount 归零计数（供测试）。
+func ResetParseCount() { bodyParses.Store(0) }
