@@ -52,6 +52,31 @@ var minBudgetByEffort = map[string]int64{
 // minStarvedBudget 同口径。
 const minOutputBudgetProbe = 16
 
+// MinOutputBudget 该思考档位下「正文还能写得出来」的最小输出预算；档位未知返回 0。
+//
+// 供续写/救援段复用：那些段是从**客户端原始 body** 重建的（不含首段被抬过的
+// max_tokens），而它们往往关掉思考，prepareBody 的下限逻辑会跳过（没有思考就不
+// 存在「思考吃光预算」）。若不显式带上，救援段会继续用客户端那个装不下正文的小额度
+// ——线上实测正是这样：首段 8192 全被思考吃掉 → 救援段只拿到 1024 → 正文 1946 字
+// 就断。所以续写层必须自己把下限写进去。
+func MinOutputBudget(effort string) int64 {
+	return minBudgetByEffort[strings.ToLower(strings.TrimSpace(effort))]
+}
+
+// EnsureMinBudget 把 obj 的 max_tokens 抬到不低于 floor（floor<=0 或当前额度是探活级
+// 时不动）。返回是否改动。
+func EnsureMinBudget(obj map[string]any, floor int64) bool {
+	if floor <= 0 {
+		return false
+	}
+	v, ok := explicitOutputBudget(obj)
+	if !ok || v <= 0 || v < minOutputBudgetProbe || v >= floor {
+		return false
+	}
+	obj["max_tokens"] = floor
+	return true
+}
+
 // ensureMinOutputBudget 在「客户端显式给了 max_tokens」且「低于该档下限」时抬到下限。
 //
 // 不动的四种情形（都不猜）：

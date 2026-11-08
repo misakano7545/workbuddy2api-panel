@@ -110,11 +110,24 @@ type continueReader struct {
 	segCompletion float64
 	segThink      float64
 
+	// budgetFloor 本轮生效档位对应的输出预算下限（upstream.MinOutputBudget）。
+	// 续写/救援段的 max_tokens 至少是它：那些段从原始 body 重建、又常关掉思考，
+	// 拿不到首段被抬过的额度，否则会继续用客户端那个装不下正文的小额度。
+	budgetFloor int64
+
 	done bool
 }
 
 func newContinueReader(ctx context.Context, up *upstream.Client, acct *auth.Auth, body []byte, clientIP string, meta upstream.ChatMeta, rc io.ReadCloser) *continueReader {
-	r := &continueReader{ctx: ctx, up: up, acct: acct, body: body, clientIP: clientIP, meta: meta, cur: rc, lastClientAt: time.Now()}
+	return newContinueReaderWithFloor(ctx, up, acct, body, clientIP, meta, rc, 0)
+}
+
+// newContinueReaderWithFloor 同上，另外带上「本轮生效档位对应的输出预算下限」。
+// 续写/救援段用它补 max_tokens：那些段是从原始 body 重建的，不会继承首段被抬过的额度
+// （见 upstream.MinOutputBudget 的说明，线上实测救援段只拿到客户端原本的小额度）。
+func newContinueReaderWithFloor(ctx context.Context, up *upstream.Client, acct *auth.Auth, body []byte, clientIP string, meta upstream.ChatMeta, rc io.ReadCloser, budgetFloor int64) *continueReader {
+	r := &continueReader{ctx: ctx, up: up, acct: acct, body: body, clientIP: clientIP, meta: meta, cur: rc,
+		lastClientAt: time.Now(), budgetFloor: budgetFloor}
 	r.br = bufio.NewReaderSize(rc, 64*1024)
 	r.limitSet = bodyHasOutputLimit(body)
 	return r
@@ -524,6 +537,9 @@ func (r *continueReader) continuationBody() ([]byte, error) {
 	}
 	msgs = append(msgs, asst, map[string]any{"role": "user", "content": continueNudge})
 	obj["messages"] = msgs
+	// 续写段至少带上本轮档位的输出预算下限：这一层是从原始 body 重建的，拿不到首段
+	// 被 upstream 抬过的 max_tokens（见 newContinueReaderWithFloor 的说明）。
+	upstream.EnsureMinBudget(obj, r.budgetFloor)
 	// 思考吃光预算的续写段：把思考关掉再续。否则续写段拿同一份 max_tokens、
 	// 以同一思路再烧一遍思考，三个段合计还是只写出半句（实测每段正文 ~580 token）。
 	// 关思考后整份额度留给正文，一次续写就能收尾（与 starved.go 的救援同一手法：

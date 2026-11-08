@@ -42,6 +42,16 @@ const minStarvedBudget = 16
 // 返回 false 的情形都是「不猜」：没有 thinking 开关的模型（不知道拿什么关思考）、
 // 已经关着思考的、额度小到不值得重发的、body 不可解析。
 func starvedRetryBody(body []byte) ([]byte, bool) {
+	return starvedRetryBodyWithFloor(body, 0)
+}
+
+// starvedRetryBodyWithFloor 同 starvedRetryBody，另外把输出预算抬到 floor。
+//
+// 救援段会关掉思考（预算全留给正文），但它是从**客户端原始 body** 重建的，拿不到
+// 首段被抬过的 max_tokens；如果客户端原本只给了 1024，救援段正文就只有 1024 空间
+// ——线上实测就是「首段 8192 全被思考吃掉 → 救援段只写 1024 个 token 就断」。
+// floor 由调用方按本轮生效档位给（见 upstream.MinOutputBudget）。
+func starvedRetryBodyWithFloor(body []byte, floor int64) ([]byte, bool) {
 	var obj map[string]any
 	if json.Unmarshal(body, &obj) != nil {
 		return nil, false
@@ -68,6 +78,9 @@ func starvedRetryBody(body []byte) ([]byte, bool) {
 	// 而思考管线的 disabled 分支本来就要求两者不共存（见 upstream/thinking.go）。
 	delete(obj, "reasoning_effort")
 	delete(obj, "reasoningEffort")
+	// 预算下限：救援段关思考、额度全给正文，但不能还是客户端那个小额度
+	// （见 starvedRetryBodyWithFloor 的说明）。放在删档位之后：EnsureMinBudget 只看额度。
+	upstream.EnsureMinBudget(obj, floor)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return nil, false
@@ -137,7 +150,7 @@ func (r *continueReader) tryStarvedRetry() bool {
 	case r.seg >= maxContinueSegments-1:
 		return false
 	}
-	body, ok := starvedRetryBody(r.body)
+	body, ok := starvedRetryBodyWithFloor(r.body, r.budgetFloor)
 	if !ok {
 		return false
 	}
