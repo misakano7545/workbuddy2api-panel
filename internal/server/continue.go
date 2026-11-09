@@ -111,6 +111,9 @@ type continueReader struct {
 
 	starvedTried bool // 空截断救援已用（每请求一次；见 tryStarvedRetry）
 
+	// narrationTried 预告式收尾的救援续写已用（每请求一次；见 tryNarrationRetry）。
+	narrationTried bool
+
 	lastClientAt time.Time // 上次客户端可见输出/keepalive 的时刻（静默节流）
 
 	// readErr 本段结束时的读错误（nil = 上游 [DONE] 正常收尾）。用于区分「上游
@@ -432,6 +435,11 @@ func (r *continueReader) endSegment(sawDone bool) {
 	if r.tryStarvedRetry() {
 		return
 	}
+	// 预告式收尾（finish=stop + 正文停在「……：」上 + 工具类请求）：续写剩余内容。
+	// 这条必须排在 canContinue 之前判断，但两者互斥（后者要求 finish=length 或断流）。
+	if r.tryNarrationRetry() {
+		return
+	}
 	if r.canContinue(sawDone) {
 		// 必须是「断流盲重试」还是「length 截断续写」（r.finish 在续写成功后被重置）。
 		blind := !sawDone && r.finish == ""
@@ -625,6 +633,12 @@ func (r *continueReader) canContinue(sawDone bool) bool {
 // 复用原请求其余全部字段（model/tools/采样参数等）；max_tokens 类字段已在
 // canContinue 阶段排除。prepareBody/thinking/缓存键等由 ChatStreamContext 内部统一套用。
 func (r *continueReader) continuationBody() ([]byte, error) {
+	return r.continuationBodyWithNudge(continueNudge)
+}
+
+// continuationBodyWithNudge 同上，续写指令可替换（预告式收尾的救援用另一条指令，
+// 见 narrationNudge：那条要说明「你停在一句预告上」，否则模型会以为已经说完）。
+func (r *continueReader) continuationBodyWithNudge(nudge string) ([]byte, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(r.body, &obj); err != nil {
 		return nil, err
@@ -639,7 +653,7 @@ func (r *continueReader) continuationBody() ([]byte, error) {
 	if rc := r.reason.String(); rc != "" {
 		asst["reasoning_content"] = rc
 	}
-	msgs = append(msgs, asst, map[string]any{"role": "user", "content": continueNudge})
+	msgs = append(msgs, asst, map[string]any{"role": "user", "content": nudge})
 	obj["messages"] = msgs
 	// 续写段至少带上本轮档位的输出预算下限：这一层是从原始 body 重建的，拿不到首段
 	// 被 upstream 抬过的 max_tokens（见 newContinueReaderWithFloor 的说明）。
