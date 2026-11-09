@@ -163,5 +163,17 @@ func trimForLog(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return s[len(s)-n:] + "…" // 取尾部：收尾形态才是判据关心的
+}
+
+// tailOf 取字符串尾部 n 字节（按 rune 边界回退，避免截断半个汉字）。
+func tailOf(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && (s[i]&0xC0) == 0x80 {
+		i++
+	}
+	return s[i:]
 }
