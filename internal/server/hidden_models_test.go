@@ -21,10 +21,10 @@ import (
 // hiddenCatalog 一份含对话模型 + 出图模型的 CN 目录答复。
 func hiddenCatalog() (int, string, bool) {
 	return 200, `{"code":0,"data":{"models":[` +
-			`{"id":"glm-5.2","maxInputTokens":200000,"maxOutputTokens":32000},` +
-			`{"id":"kimi-k3-1","maxInputTokens":100000,"maxOutputTokens":8192},` +
-			`{"id":"hunyuan-image-alpha","name":"Hunyuan Image Alpha","tags":["text-to-image"]}],` +
-			`"agents":[{"name":"cli","models":["glm-5.2","kimi-k3-1"]}]}}`, false
+		`{"id":"glm-5.2","maxInputTokens":200000,"maxOutputTokens":32000},` +
+		`{"id":"kimi-k3-1","maxInputTokens":100000,"maxOutputTokens":8192},` +
+		`{"id":"hunyuan-image-alpha","name":"Hunyuan Image Alpha","tags":["text-to-image"]}],` +
+		`"agents":[{"name":"cli","models":["glm-5.2","kimi-k3-1"]}]}}`, false
 }
 
 func resetDynamicModelsCache() {
