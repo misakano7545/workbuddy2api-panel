@@ -114,6 +114,14 @@ type continueReader struct {
 	// narrationTried 预告式收尾的救援续写已用（每请求一次；见 tryNarrationRetry）。
 	narrationTried bool
 
+	// toolOnlyTried 安全续写（只采纳工具调用）已用（每请求一次；见 tryToolOnlyRescue）。
+	toolOnlyTried bool
+	// toolOnly 当前段处于「只采纳工具调用」模式：正文/思考增量全部丢弃。
+	toolOnly bool
+	// origFinish/origTail 首段的终态帧：续写段没给工具调用时原样回放。
+	origFinish string
+	origTail   []string
+
 	lastClientAt time.Time // 上次客户端可见输出/keepalive 的时刻（静默节流）
 
 	// readErr 本段结束时的读错误（nil = 上游 [DONE] 正常收尾）。用于区分「上游
@@ -279,6 +287,9 @@ func (r *continueReader) frame(payload string) {
 	if chs, ok := obj["choices"].([]any); ok && len(chs) > 0 {
 		if c, ok := chs[0].(map[string]any); ok {
 			if d, ok := c["delta"].(map[string]any); ok {
+				if r.toolOnly && !r.toolSeen && discardToolOnlyDelta(d) {
+					rebuilt = true
+				}
 				if s, ok := d["reasoning_content"].(string); ok && s != "" {
 					r.reason.WriteString(s)
 					// 续写段思考的接缝策略（两个子情形）：
@@ -432,7 +443,13 @@ func (r *continueReader) endSegment(sawDone bool) {
 	if r.cur != nil {
 		r.cur.Close()
 	}
+	// 安全续写段的裁决：拿到工具调用就采纳（继续正常收尾），否则回滚到首段终态。
+	r.settleToolOnly()
 	if r.tryStarvedRetry() {
+		return
+	}
+	// 安全续写（只采纳工具调用）：模型刚看完工具结果却只写一句就收尾。
+	if r.tryToolOnlyRescue() {
 		return
 	}
 	// 预告式收尾（finish=stop + 正文停在「……：」上 + 工具类请求）：续写剩余内容。
