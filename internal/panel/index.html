@@ -1989,8 +1989,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式。</div>
-        <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
+        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件（可多选），批量导入账号。文件需为账号数组格式。多文件会先整体校验，全部通过后再统一预览、确认写入。</div>
+        <input type="file" id="importFile" accept=".json" multiple style="margin-bottom:8px">
+        <div id="importPreview" style="margin-bottom:8px" hidden></div>
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>
@@ -1999,6 +2000,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <span class="grow"></span>
       <button id="btnStartLogin" class="primary">获取授权链接</button>
       <button id="btnAddApiKey" hidden class="primary">添加 API Key</button>
+      <button id="btnImportCommit" hidden class="primary">确认导入</button>
       <button id="btnCopyUrl" hidden>复制链接</button>
       <button id="btnOpenUrl" class="primary" hidden>在浏览器打开</button>
       <button id="btnCloseAdd">关闭</button>

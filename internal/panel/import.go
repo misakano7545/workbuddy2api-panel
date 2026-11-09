@@ -48,35 +48,55 @@ type cockpitAccount struct {
 //
 //	POST /panel/api/import/cockpit
 //	Content-Type: multipart/form-data
-//	Body: file=<json>
+//	Body: file=<json>（可重复，按表单顺序逐个解码）
+//	      dryRun=true|1 → 只做校验与预览，不落盘、不上游校验、不签到
 //
-// 返回 {ok, total, imported, skipped, errors}。
+// 多个文件是「整体事务」：任一文件不是合法 JSON 或没有任何账号就整体 400，不做
+// 「先把前面导进去」（导入不可逆，半成功最难收拾）。
+//
+// 返回 {ok, total, imported, skipped, errors, creates, overwrites, dry_run}。
 func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeErr(w, http.StatusBadRequest, "parse form: "+err.Error())
 		return
 	}
-	file, _, err := r.FormFile("file")
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "missing file field: "+err.Error())
-		return
-	}
-	defer file.Close()
+	dryRun := strings.EqualFold(strings.TrimSpace(r.FormValue("dryRun")), "true") ||
+		strings.TrimSpace(r.FormValue("dryRun")) == "1"
 
-	raw, err := io.ReadAll(file)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read file: "+err.Error())
+	headers := r.MultipartForm.File["file"]
+	if len(headers) == 0 {
+		writeErr(w, http.StatusBadRequest, "missing file field")
 		return
 	}
 
-	accounts, err := decodeCockpitAccounts(raw)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
-		return
-	}
-	if len(accounts) == 0 {
-		writeErr(w, http.StatusBadRequest, "empty accounts array")
-		return
+	var accounts []cockpitAccount
+	var sources []string // 与 accounts 平行：每个条目来自哪个文件，出错时能说清
+	for _, fh := range headers {
+		f, err := fh.Open()
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "open "+fh.Filename+": "+err.Error())
+			return
+		}
+		raw, err := io.ReadAll(f)
+		f.Close()
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fh.Filename+": read file: "+err.Error())
+			return
+		}
+
+		list, err := decodeCockpitAccounts(raw)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fh.Filename+": invalid json: "+err.Error())
+			return
+		}
+		if len(list) == 0 {
+			writeErr(w, http.StatusBadRequest, fh.Filename+": empty accounts array")
+			return
+		}
+		for _, acc := range list {
+			accounts = append(accounts, acc)
+			sources = append(sources, fh.Filename)
+		}
 	}
 
 	// 凭证目录必须在第一次落盘前就位。login.go / apikey.go 各自在写盘前建了目录，
@@ -85,29 +105,45 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	// ——LoadDir 用 filepath.Glob，目录不存在时返回空列表且不报错，所以启动日志
 	// 一切正常（loaded 0 account(s)），问题只在导入时暴露。
 	// 放在循环外建一次：目录是进程级前置条件，逐个账号重复 MkdirAll 既无意义，
-	// 也会在部分账号失败时给出误导性错误。
-	if err := os.MkdirAll(p.cfg.AuthDir, 0o755); err != nil {
-		writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
-		return
+	// 也会在部分账号失败时给出误导性错误。预览不建任何东西。
+	if !dryRun {
+		if err := os.MkdirAll(p.cfg.AuthDir, 0o755); err != nil {
+			writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
+			return
+		}
 	}
 
-	var total, imported, skipped int
+	var total, imported, skipped, creates, overwrites int
 	var errs []string
+	seenUID := map[string]string{} // uid -> 首次出现的文件，用于批内去重
 
-	for _, acc := range accounts {
+	for i, acc := range accounts {
+		src := sources[i]
 		uid := strings.TrimSpace(acc.UID)
 		at := strings.TrimSpace(acc.AccessToken)
 		rt := strings.TrimSpace(acc.RefreshToken)
 		if uid == "" || at == "" || rt == "" {
 			skipped++
-			errs = append(errs, fmt.Sprintf("missing required fields (id=%s)", acc.ID))
+			errs = append(errs, fmt.Sprintf("%s: missing required fields (id=%s)", src, acc.ID))
 			continue
 		}
 		if !validImportUID(uid) {
 			skipped++
-			errs = append(errs, fmt.Sprintf("invalid uid (id=%s)", acc.ID))
+			errs = append(errs, fmt.Sprintf("%s: invalid uid (id=%s)", src, acc.ID))
 			continue
 		}
+		// 批内去重：多个文件可能有重叠账号。保留第一次出现的那条（选择顺序即
+		// 提交顺序，先选的优先），后面的记跳过并说明来源，不静默丢弃。
+		if first, ok := seenUID[uid]; ok {
+			skipped++
+			if first == src {
+				errs = append(errs, fmt.Sprintf("%s: duplicate uid=%s in the same file", src, uid))
+			} else {
+				errs = append(errs, fmt.Sprintf("%s: duplicate uid=%s (already provided by %s)", src, uid, first))
+			}
+			continue
+		}
+		seenUID[uid] = src
 
 		// 按 domain 推断 realm：workbuddy.ai 家族 → global，否则 cn。
 		realm := auth.ResolveRealm("", acc.Domain)
@@ -157,18 +193,30 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		// （网络/5xx/429），后者同样不覆盖——主动销毁时没有判词就不能动手。
 		// 顺带一提：alive 分支里 a 已被 refresh 轮换过 RT，下面的落盘存的是新值。
 		existing := p.cfg.Pool.AuthByUID(uid)
+		if existing == nil {
+			creates++
+		} else {
+			overwrites++
+		}
+		if dryRun {
+			// 预览到此为止，**绝不**往上游发请求：VerifySessionByRefresh 会真的
+			// 轮换一次 refresh token（单次有效），只为看一眼就烧掉一个 RT 不行，
+			// 更别说它还会顺手改掉内存里的凭据。真实导入时这份校验照旧执行。
+			imported++
+			continue
+		}
 		if existing != nil {
 			verdict := p.cfg.Upstream.VerifySessionByRefresh(a)
 			if verdict != upstream.VerifyAlive {
 				skipped++
-				errs = append(errs, fmt.Sprintf("uid=%s: 新凭据校验未通过（%s），保留原有凭据", uid, verdict))
+				errs = append(errs, fmt.Sprintf("%s: 新凭据校验未通过（%s），保留原有凭据", src, verdict))
 				continue
 			}
 		}
 
 		if err := a.SaveAtomic(); err != nil {
 			skipped++
-			errs = append(errs, fmt.Sprintf("uid=%s: save auth failed: %v", uid, err))
+			errs = append(errs, fmt.Sprintf("%s: save auth failed: %v", src, err))
 			continue
 		}
 
@@ -209,13 +257,22 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	total = len(accounts)
-	log.Printf("panel: cockpit import finished total=%d imported=%d skipped=%d", total, imported, skipped)
+	if dryRun {
+		log.Printf("panel: cockpit import preview total=%d would_import=%d skipped=%d creates=%d overwrites=%d",
+			total, imported, skipped, creates, overwrites)
+	} else {
+		log.Printf("panel: cockpit import finished total=%d imported=%d skipped=%d creates=%d overwrites=%d",
+			total, imported, skipped, creates, overwrites)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"total":    total,
-		"imported": imported,
-		"skipped":  skipped,
-		"errors":   errs,
+		"ok":         true,
+		"dry_run":    dryRun,
+		"total":      total,
+		"imported":   imported, // dryRun 时是「将会导入」的条数
+		"skipped":    skipped,
+		"creates":    creates,
+		"overwrites": overwrites,
+		"errors":     errs,
 	})
 }
 
