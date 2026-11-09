@@ -1425,7 +1425,14 @@ func (w *responsesWriter) closeOpenItems() error {
 	for _, idx := range w.x.toolOrder {
 		acc := w.x.tools[idx]
 		if acc == nil || acc.closed || acc.name == "" {
-			continue // 无名调用不是合法 item，丢弃
+			// 无名调用不是合法 item，丢弃。但**不能静默**：上游给了工具调用、
+			// 客户端一个都没收到，表现就是「模型说完一句就停」，而网关这层
+			// 一条日志都没有——排障时完全看不见（17:29 那种截图就是这么来的）。
+			if acc != nil && acc.args.Len() > 0 {
+				log.Printf("WARN: [responses] 上游给了工具调用但缺函数名（idx=%d args=%dB）→ 丢弃，客户端只会看到正文",
+					idx, acc.args.Len())
+			}
+			continue
 		}
 		if !acc.opened {
 			if err := w.openTool(acc); err != nil {
