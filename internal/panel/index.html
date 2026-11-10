@@ -1720,6 +1720,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="hint">开启后，「请求事件日志」点任意一行可展开当轮发出去的提示词与消息。这是<strong>用户数据</strong>：
               会以明文写进归档文件（保留 7 天），仅在排查「上游为什么拒这条请求」时临时打开。</div>
             <div class="hint" style="margin-top:8px">归档开关、保留天数与容量上限（<code>logging.request_archive_*</code>）需手工编辑配置文件。</div>
+            <div class="hint" style="margin-top:8px">「运行日志」按天落盘（<code>logging.panel_log_enabled</code> /
+              <code>panel_log_retention_days</code> / <code>panel_log_max_mb</code>，缺省开、保留 7 天、上限 50 MiB）：
+              重启后自动回填最近日志，页面右上「导出 ZIP」可按今日 / 3 天 / 7 天打包下载。</div>
           </div>
         </div>
 
@@ -1881,7 +1884,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <button class="xs chip" data-ch="chat">对话</button>
             <button class="xs chip" data-ch="sys">系统</button>
           </span>
-          <span class="note" id="logNote">每频道最近 500 行；任务日志可跨重启查询</span>
+          <span class="note" id="logNote">每频道最近 500 行；已按天落盘，重启后自动回填，可按区间导出</span>
+          <select id="logExportDays" aria-label="导出区间">
+            <option value="1">今天</option>
+            <option value="3" selected>最近 3 天</option>
+            <option value="7">最近 7 天</option>
+          </select>
+          <button class="xs" id="btnLogExport">导出 ZIP</button>
           <button class="xs" id="btnLogPin">自动滚动：开</button>
         </header>
         <pre id="logBox"></pre>

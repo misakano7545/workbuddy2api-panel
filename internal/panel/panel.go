@@ -237,6 +237,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/overview", p.overview)
 	p.proxyRoutes()
 	p.mux.HandleFunc("GET /panel/api/logs", p.logsHandler)
+	// 落盘日志按区间导出（zip）：事故复盘「把最近三天发我」不必 SSH 上去翻文件。
+	p.mux.HandleFunc("GET /panel/api/logs/export", p.logsExportHandler)
 	p.mux.HandleFunc("GET /panel/api/error_summary", p.errorSummary)
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.requestMetrics)
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.requestLogs)

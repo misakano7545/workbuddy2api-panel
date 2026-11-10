@@ -78,6 +78,32 @@ type Ring struct {
 	cap          int
 	taskArchive  string
 	archiveError string
+	// store 全频道按天落盘（见 logstore.go）。nil = 未启用（纯内存）。
+	store *LogStore
+}
+
+// SetLogStore 挂上按天落盘存储，并用它回填最近日志。
+//
+// 回填来源特意取 store 而不是 taskArchive：那份 JSON 只有任务频道、只留 500 条、
+// 跨天即丢，重启后「昨天的 chat 行」它给不了。store 可用即由它接管，taskArchive
+// 退化为落盘目录建不出来时的兜底（见 main 的装配）。
+func (r *Ring) SetLogStore(store *LogStore) error {
+	r.mu.Lock()
+	r.store = store
+	// 回填期间不能持锁调用 store 的读（store 内部也有锁，且要 Flush），先取数据。
+	r.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+	back := store.Backfill(0)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, entry := range back {
+		entry.Text = boundedLogText(entry.Text)
+		r.appendLocked(entry)
+	}
+	sort.SliceStable(r.entries, func(i, j int) bool { return r.entries[i].TS.Before(r.entries[j].TS) })
+	return nil
 }
 
 // NewRing 构建每频道容量为 capacity 的日志环（非正值回退 500）。
@@ -212,7 +238,14 @@ func (r *Ring) Write(p []byte) (int, error) {
 		}
 		text := boundedLogText(tsPrefixRe.ReplaceAllString(line, ""))
 		channel := classifyLine(text)
-		r.appendLocked(LogEntry{TS: now, Ch: channel, Text: text})
+		entry := LogEntry{TS: now, Ch: channel, Text: text}
+		r.appendLocked(entry)
+		// 落盘在**锁内**做：与既有 persistTasksLocked 同款取舍——同一把锁保证
+		// 「入环顺序 = 文件顺序」，swap 出去写会让两条并发日志在文件里倒序，
+		// 事故复盘时按时间读就错位了。
+		if r.store != nil {
+			r.store.Append(entry)
+		}
 		taskChanged = taskChanged || channel == ChTask
 	}
 	if taskChanged {

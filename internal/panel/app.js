@@ -1792,6 +1792,30 @@ function fmtBytes(bytes) {
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1024 / 1024).toFixed(1) + ' MB';
 }
+/* 运行日志导出：落盘文件按区间打包成 ZIP。
+ * 用 location.href 直接触发下载而不是 fetch+blob——落盘包可能几十 MB，
+ * blob 会把整包读进内存再复制一份；href 让浏览器原生流式落盘。
+ * 失败（落盘未启用 / 区间无数据）时后端回 JSON 错误，浏览器会把它当文件下载，
+ * 所以先 HEAD 一次拿状态码，非 2xx 就读回错误文案弹出来。 */
+$('btnLogExport').onclick = async () => {
+  const days = $('logExportDays').value || '3';
+  const url = '/panel/api/logs/export?days=' + encodeURIComponent(days);
+  try {
+    const resp = await fetch(url, {method: 'HEAD'});
+    if (!resp.ok) {
+      // HEAD 不带 body，再 GET 一次拿文案（数据量很小：只有一个错误 JSON）。
+      const detail = await fetch(url).then(r => r.text()).catch(() => '');
+      let msg = 'HTTP ' + resp.status;
+      try { msg = JSON.parse(detail).error || msg; } catch (e) { }
+      alert('导出失败：' + msg);
+      return;
+    }
+    location.href = url;
+  } catch (e) {
+    alert('导出失败：' + e);
+  }
+};
+
 $('btnLogPin').onclick = () => {
   logPin = !logPin;
   $('btnLogPin').textContent = '自动滚动：' + (logPin ? '开' : '关');

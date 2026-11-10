@@ -22,7 +22,10 @@
     "request_retention_days": 7,
     "request_archive_max_mb": 100,
     "request_client_info": true,
-    "request_archive_context": false
+    "request_archive_context": false,
+    "panel_log_enabled": true,
+    "panel_log_retention_days": 7,
+    "panel_log_max_mb": 50
   },
   "cooldown": {
     "soft_rate": "600s",
@@ -113,6 +116,7 @@
     "degrade_threshold": 5,
     "degrade_cooldown": "10m",
     "degrade_cooldown_max": "2h",
+    "selection_strategy": "weighted",
     "idle_weight_per_hour": 0.5,
     "idle_weight_max": 5.0,
     "prefer_expiring": true,

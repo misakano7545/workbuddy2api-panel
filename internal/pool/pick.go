@@ -225,6 +225,14 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// 本函数（写锁），每个进入者都把 lastUsed 置为 now —— 于是同一瞬间的第 2..N 个
 	// 进入者看到前一个账号 lastUsed==now（距今 0 < minPickGap），被自然挤向其他账号。
 	// 关键：lastUsed 在锁内赋值，使时间窗口判定在并发下可重入。
+	// 选号策略（见 strategy.go）：weighted 返回 nil 继续走下面的既有加权随机路径；
+	// 轮询/顺序耗尽在 **candsAll**（不受 top5 截断）上选，否则环只有 5 个号，
+	// 「用完一个再用下一个」对第 6 个号永远不成立。
+	if e == nil {
+		if picked := p.pickByStrategyLocked(candsAll, reqModel, realm, now); picked != nil {
+			e = picked
+		}
+	}
 	if e == nil {
 		eligible := make([]*entry, 0, len(cands))
 		for _, c := range cands {
