@@ -41,6 +41,13 @@ type Pool struct {
 	// egress 出口级瞬时失败计数（egress.go，键 = 出口身份）。运行态，不持久化：
 	// 链路状态易失，重启后从零开始是正确的。
 	egress map[string]egressStat
+	// windows 额度窗口登记表（window.go）：429 带重置时刻时登记，到点主动发探针
+	// 让新一轮窗口从重置那一刻起算。**持久化**——进程内冷却表是易失的，窗口记录
+	// 跟着丢就等于每次重启都错过重置时刻，正是本机制要治的那段空转。
+	windows map[string]*ModelWindow
+	// scopeEnforced 号池分区是否强制（scope.go，pool.separate_text_media）。关闭时
+	// pick 不做池过滤、CheckScope 恒放行——分区前的行为逐字不变。
+	scopeEnforced bool
 	// degradeThreshold / degradeCooldown / degradeCooldownMax 连败降权参数
 	// （SetDegrade 注入；默认值见 defaultDegrade*，issue #114）。
 	degradeThreshold   int
@@ -471,6 +478,25 @@ func (p *Pool) Add(a *auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.upsertLocked(a)
+}
+
+// AuthFor 返回账号凭证指针（只读用途：发起内部请求，如额度窗口探针）。
+//
+// 为什么需要它：池对外只给 Status（纯展示数据），而「用某个具体账号发一个最小请求」
+// 需要 *auth.Auth 本体。返回指针而非拷贝是刻意的——refresh 会就地改写 token，拷贝
+// 会让调用方拿着过期凭证打上游。
+//
+// 调用方**不得**修改返回值的可导出字段（除 auth 自带的加锁方法外）；uid 不存在返回 nil。
+func (p *Pool) AuthFor(uid string) *auth.Auth {
+	if uid == "" {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if e, ok := p.byUID[uid]; ok {
+		return e.a
+	}
+	return nil
 }
 
 // SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。

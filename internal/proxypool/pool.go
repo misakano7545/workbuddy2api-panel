@@ -140,6 +140,9 @@ type ImportResult struct {
 	Status string `json:"status"`
 	ID     string `json:"id,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// Name 订阅里给这个节点的名字（Clash 的 name / URI 的 #fragment）。仅作展示：
+	// 面板据此告诉用户「这条被跳过的是哪个节点」，比只报行号有用得多。
+	Name string `json:"name,omitempty"`
 }
 
 type Manager struct {
@@ -323,13 +326,29 @@ func (m *Manager) Import(text string) ([]ImportResult, error) {
 	}
 	results := []ImportResult{}
 	var added []string
-	for i, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	// 订阅归一化（subscription.go）：明文 URI / 整段 base64 / Clash YAML 三种形态
+	// 都在这里变成「一行一个受支持的 URL」。认不出的条目带 Reason 回来，按
+	// unsupported / invalid 逐条报账——**不静默丢弃**，否则用户粘了 200 个节点
+	// 只进来 3 个却不知道为什么。
+	entries, err := ParseSubscription(text)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		r := ImportResult{Line: entry.Line, Name: entry.Name}
+		if entry.URL == "" {
+			// 认得出来但协议不支持 → unsupported（面板不计入「无效」，也不把整段
+			// 订阅原样回填到输入框：那对用户没有意义）。真认不出的 → invalid。
+			r.Status = "invalid"
+			if entry.Unsupported {
+				r.Status = "unsupported"
+			}
+			r.Error = entry.Reason
+			results = append(results, r)
 			continue
 		}
-		r := ImportResult{Line: i + 1, Status: "invalid"}
-		u, err := parseURL(line)
+		r.Status = "invalid"
+		u, err := parseURL(entry.URL)
 		if err != nil {
 			r.Error = err.Error()
 		} else if id := seen[u.String()]; id != "" {
@@ -340,7 +359,7 @@ func (m *Manager) Import(text string) ([]ImportResult, error) {
 				return nil, err
 			}
 			id := hex.EncodeToString(b[:])
-			d.Nodes = append(d.Nodes, node{ID: id, Name: u.Host, URL: u.String(), Enabled: true})
+			d.Nodes = append(d.Nodes, node{ID: id, Name: nodeName(u.Host, entry.Name), URL: u.String(), Enabled: true})
 			seen[u.String()] = id
 			added = append(added, id)
 			r.Status, r.ID = "added", id
@@ -356,6 +375,20 @@ func (m *Manager) Import(text string) ([]ImportResult, error) {
 		}
 	}
 	return results, nil
+}
+
+// nodeName 节点显示名：订阅给了名字就用它（最多 128 字节，与 Update 的长度上限
+// 一致），否则沿用 host。截断按字节做而不是按 rune——上限本来就是字节语义
+// （Update 里 len(in.Name) > 128），两个入口必须同一把尺子。
+func nodeName(host, want string) string {
+	name := strings.TrimSpace(want)
+	if name == "" {
+		return host
+	}
+	if len(name) > 128 {
+		name = name[:128]
+	}
+	return name
 }
 
 func (m *Manager) Update(id string, in Input) error {

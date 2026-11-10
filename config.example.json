@@ -53,7 +53,8 @@
     "include_disabled_in_tasks": false,
     "balance_refresh_jitter_permill": 0,
     "task_sweep_jitter_permill": 0,
-    "makeup_cards_per_round": 0
+    "makeup_cards_per_round": 0,
+    "window_probe_enabled": true
   },
   "global": {
     "enabled": true,
@@ -117,6 +118,7 @@
     "degrade_cooldown": "10m",
     "degrade_cooldown_max": "2h",
     "selection_strategy": "weighted",
+    "separate_text_media": false,
     "idle_weight_per_hour": 0.5,
     "idle_weight_max": 5.0,
     "prefer_expiring": true,

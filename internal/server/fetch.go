@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
+	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
@@ -124,7 +125,7 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, realm string, tried map[string]bool) (error, bool) {
 	var lastErr error
 	for attempt := 0; attempt < searchAttempts; attempt++ {
-		a := h.cfg.Pool.PickExcludingForRealm(tried, "", realm)
+		a := h.cfg.Pool.PickExcludingForRealmScope(tried, "", realm, pool.ScopeText)
 		if a == nil {
 			break
 		}

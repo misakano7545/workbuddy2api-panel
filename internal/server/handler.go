@@ -1333,7 +1333,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
-			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, curModel)
+			acct = h.cfg.Pool.PickByUIDForModelScope(stickyUID, curModel, pool.ScopeText)
 			if acct == nil || (realm != "" && acct.Realm() != realm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑，
 				// 本次回落普通轮换。
@@ -1344,7 +1344,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, curModel, realm)
+			// ScopeText：对话属于文本号池。分区关闭时该参数被忽略（零回归），
+			// 打开后媒体号不会再被选来跑对话——那正是分区要防的连坐。
+			acct = h.cfg.Pool.PickExcludingForRealmScope(tried, curModel, realm, pool.ScopeText)
 		}
 		if acct == nil {
 			// ⭐ 模型降级兜底（20261021 补的真实缺口）：全池该模型都处于 6004 冷却时，
@@ -2456,6 +2458,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			modelReason = s
 		}
 		if resetAt, ok := upstream.ParseRateReset(body); ok {
+			// 额度窗口登记（pool/window.go）：上游按**首次请求**起算新一轮配额窗口，
+			// 到点没有请求进来窗口就不开始——额度一直空转，下一条真实请求来的时候
+			// 起点才被动落到那一刻。冷却只做到「允许请求进来」，不做「让窗口开始」。
+			// 登记后由 scheduler 的窗口探针在重置时刻发一个最小请求把起点钉住。
+			//
+			// 只在 model != "" 时登记：没有模型名（账号级 429）时窗口键无从构造，而
+			// 账号级冷却的语义本来就与配额窗口无关。
+			if modelRateLimited && model != "" {
+				h.cfg.Pool.ScheduleModelWindow(uid, model, resetAt, !upstream.IsModelBusy(body), time.Now())
+			}
 			if modelRateLimited {
 				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, modelReason)
 				return

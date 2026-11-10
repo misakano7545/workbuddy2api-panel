@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
+	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
@@ -177,7 +178,7 @@ func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	var lastErr error
 	for attempt := 0; attempt < embeddingsAttempts; attempt++ {
-		a := h.cfg.Pool.PickExcludingForRealm(tried, "", realm)
+		a := h.cfg.Pool.PickExcludingForRealmScope(tried, "", realm, pool.ScopeText)
 		if a == nil {
 			break
 		}
