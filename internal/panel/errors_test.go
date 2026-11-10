@@ -259,3 +259,23 @@ func TestAggregateErrorsSampleIsRuneSafe(t *testing.T) {
 		}
 	}
 }
+
+// 续写救援要能在面板里数出来：`[narration]` / `[toolonly]` 是「模型自己收尾」时
+// 网关补了一次续写的痕迹，属于 info（链路成功、客户端内容正常），不能混进「其他」，
+// 否则永远说不清到底救了多少、还剩多少没救。
+func TestAggregateErrorsRescueKinds(t *testing.T) {
+	got := AggregateErrors([]LogLine{
+		{Text: `2026/11/10 20:31:27 [toolonly] acct=示例号(11f49997) model=deepseek-v4.1-flash seg=1 正文只有 1400B 就收尾（末条是工具结果）→ 试续一次，只采纳工具调用`, TS: time.Now()},
+		{Text: `2026/11/10 20:31:28 [toolonly] acct=示例号(11f49997) model=deepseek-v4.1-flash seg=1 续写段拿到工具调用 → 采纳`, TS: time.Now()},
+		{Text: `2026/11/10 20:31:29 [narration] acct=示例号(11f49997) model=deepseek-v4.1-flash 结果：共 2 段，工具调用=true，正文合计=343B`, TS: time.Now()},
+	})
+	if len(got) != 1 {
+		t.Fatalf("三类救援行应归成一个统计项，实际 %d 项：%+v", len(got), got)
+	}
+	if got[0].Kind != "续写救援（说一句就停）" || got[0].Sev != sevInfo {
+		t.Fatalf("救援行应归类为 info 的「续写救援」：%+v", got[0])
+	}
+	if got[0].Count != 3 {
+		t.Fatalf("救援计数应为 3，实际 %d", got[0].Count)
+	}
+}

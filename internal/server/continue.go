@@ -538,8 +538,8 @@ func (r *continueReader) endSegment(sawDone bool) {
 	// 没有这行就分不清「救回来是工具调用（回合继续）」和「只是多打了一段正文」——
 	// 线上实测命中率能到请求量的三成，必须能算清楚收益再决定判据要不要收。
 	if r.narrationTried {
-		log.Printf("[narration] acct=%s 结果：共 %d 段，工具调用=%v，正文合计=%dB",
-			logfmt.Label(r.acct.UID, r.acct.Nickname), r.seg+1, r.toolSeen, r.text.Len())
+		log.Printf("[narration] acct=%s model=%s 结果：共 %d 段，工具调用=%v，正文合计=%dB",
+			logfmt.Label(r.acct.UID, r.acct.Nickname), bareModelOf(r.body), r.seg+1, r.toolSeen, r.text.Len())
 	}
 	r.done = true
 }

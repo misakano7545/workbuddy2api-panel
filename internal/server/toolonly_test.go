@@ -151,7 +151,7 @@ func TestToolOnlyLeavesColonToNarration(t *testing.T) {
 
 // TestToolOnlyLongTextNotRescued 成篇正文（远超一次提前收尾的长度）不救。
 func TestToolOnlyLongTextNotRescued(t *testing.T) {
-	long := strings.Repeat("这是一段完整的分析结论。", 400) // ~4800 字节，> toolOnlyMaxBytes
+	long := strings.Repeat("这是一段完整的分析结论。", 1000) // ~12000 字节，> toolOnlyMaxBytes(7500)
 	seg := `data: {"id":"t1","choices":[{"index":0,"delta":{"content":"` + long + `"}}]}` + "\n\n" +
 		`data: {"id":"t1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":400,"total_tokens":106907}}` + "\n\n" +
 		"data: [DONE]\n\n"
@@ -227,3 +227,19 @@ func TestToolOnlyE2EResponses(t *testing.T) {
 }
 
 var _ = json.Marshal
+
+// 放宽后的覆盖：3000 字节正文（超过旧上限 2000B、但远不到成篇终答）+ 12k prompt
+// 的小会话，都必须能命中。这两档正是线上「没被救到」的那批（completion 700~1000
+// token、prompt 4k~10k）。
+func TestToolOnlyCoversWidenedWindow(t *testing.T) {
+	mid := strings.Repeat("这里是一段排查过程的叙述。", 150) // ~5850 字节（在 7500B 内）
+	seg := `data: {"id":"t1","choices":[{"index":0,"delta":{"content":"` + mid + `"}}]}` + "\n\n" +
+		`data: {"id":"t1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12000,"completion_tokens":900,"total_tokens":12900}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	_, _ = io.ReadAll(r)
+	if len(*reqs) != 1 {
+		t.Fatalf("3000B 正文 + 12k prompt 应命中安全续写，实际续写 %d 次", len(*reqs))
+	}
+}
