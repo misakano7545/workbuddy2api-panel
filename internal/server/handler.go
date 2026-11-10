@@ -1490,10 +1490,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				fail(acct.UID)
 				break
 			}
-			h.cfg.Pool.NoteFailures(acct.UID)
+			// 出口级归因（egress.go）：走到这里的传输层失败**只可能**是直连路径
+			// （经代理的失败是 proxypool.Error，上面已终止轮转），而直连出口由本域
+			// 全部账号共用。拨号/TLS 失败发生在上游看到这个号之前，不携带「这个号
+			// 坏了」的任何证据；记到账号头上时，一次链路抖动会顺着轮转逐个给被选中
+			// 的号记连败——hub 现场实测 4 小时 196 次 URLError 陆续降权 13 个号，
+			// 而链路只断了几秒。改记出口，退避降到秒级。
+			streak := h.cfg.Pool.NoteEgressFailure(egressKey(acct), time.Now())
 			fail(acct.UID)
-			if !rotateBackoff(i, r.Context()) {
-				break // ctx 取消：终止轮转（传输层错误换号退避）
+			if streak >= egressGiveUpStreak {
+				// 链路连续失败：换号只是把同样的等待与失败重复一遍（换不到别的
+				// 链路），快速失败让客户端按自己的节奏重试。
+				break
+			}
+			if !sleepCtx(r.Context(), egressBackoff(streak, egressBackoffBase)) {
+				break // ctx 取消：终止轮转（传输层错误换路退避）
 			}
 			continue
 		}
@@ -2368,6 +2379,20 @@ func rotateBackoff(i int, ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+// egressKey 这次传输层失败该记到哪个出口上。
+//
+// 键 = "direct:" + 域：cn 与 global 是不同的上游域名与网络环境，共用一条阶梯会让
+// 一个域的抖动压住另一个域刚恢复的那几秒。经代理的失败走不到这里（proxypool.Error
+// 在上游分支已终止轮转），所以不需要节点身份；真要按节点分级，应取
+// proxypool.Error.ProxyID，而不是在账号上猜。
+func egressKey(a *auth.Auth) string {
+	realm := "cn"
+	if a != nil && a.Realm() != "" {
+		realm = a.Realm()
+	}
+	return "direct:" + realm
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。

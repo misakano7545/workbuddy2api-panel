@@ -34,6 +34,9 @@ func TestMain(m *testing.M) {
 	// 模型繁忙的等待路径默认关闭：否则命中它的测试要真睡满 10s（判据由
 	// busywait_test.go 单独钉住）。
 	busyWaitCap = 0
+	// 出口级退避同样置 0：否则传输层失败的用例要真睡 1s/2s/4s（阶梯本身由
+	// egress_backoff_test.go 用显式 base 单独钉住）。
+	egressBackoffBase = 0
 	os.Exit(m.Run())
 }
 
