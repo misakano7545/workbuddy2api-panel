@@ -45,15 +45,16 @@ import (
 //     （≈1400B / 950B），句号收尾、零工具调用；
 //   - 按 25 分钟样本放宽到 N token 的覆盖率（prompt≥8k 那批 46 条）：
 //     ≤650(2000B) 41% / ≤1000 76% / ≤2500 87% / 不设限 100%。
-// 上限给到 7500B（≈2500 token）：把覆盖从 41% 拉到 87%，仍然放不进成篇终答
-// （那批 3000~8000 token）。误命中的代价只是多一次上游调用——续写段只采纳工具调用，
-// 纯正文整段丢弃，客户端看到的内容不变。
-const toolOnlyMaxBytes = 7500
+// 上限取 2000B。曾试过放到 7500B（覆盖 41%→77%），但上线后出现反向副作用：
+// 已经写完的任务被推着再调一次工具（用户反馈「任务该结束了却一直在工具调用」），
+// 因为「模型肯再调一次」并不等于「它还没做完」。在没有可靠判据区分「提前收尾」与
+// 「已经答完」之前，宁可少救：救援只在正文明显短（一句预告）时才触发。
+const toolOnlyMaxBytes = 2000
 
 // toolOnlyMinPrompt 长会话门槛：几百 token 的短问答里，模型给一句就收尾是正常的。
 // 实测「被门槛挡掉」的那批都是 4k~10k prompt（AsyncOpenAI / Go-http-client 的小会话），
 // 给到 8000 能覆盖它们，又不会把一句话问答也算进来。
-const toolOnlyMinPrompt = 8000
+const toolOnlyMinPrompt = 20000
 
 // toolOnlyNudge 安全续写的指令。必须点明「别再用文字解释」——否则模型会再写一段
 // 总结，那段正文会被丢弃，等于白发一次请求；也必须点明「不要重复上一个工具调用」，
@@ -89,6 +90,10 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 	case r.text.Len() == 0 || r.text.Len() > toolOnlyMaxBytes:
 		return false
 	case r.seg >= maxContinueSegments-1:
+		return false
+	}
+	// 正文里含工具调用标记（DSML / XML 形态）：客户端会自己解析执行，这不是「提前收尾」。
+	if hasToolCallMarkup(r.text.String()) {
 		return false
 	}
 	// 尾部落在预告符上：交给 narration（那条会把正文接上去，比这里更合适）。
