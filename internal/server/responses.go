@@ -1427,10 +1427,14 @@ func (w *responsesWriter) closeOpenItems() error {
 		if acc == nil || acc.closed || acc.name == "" {
 			// 无名调用不是合法 item，丢弃。但**不能静默**：上游给了工具调用、
 			// 客户端一个都没收到，表现就是「模型说完一句就停」，而网关这层
-			// 一条日志都没有——排障时完全看不见（17:29 那种截图就是这么来的）。
-			if acc != nil && acc.args.Len() > 0 {
-				log.Printf("WARN: [responses] 上游给了工具调用但缺函数名（idx=%d args=%dB）→ 丢弃，客户端只会看到正文",
-					idx, acc.args.Len())
+			// 一条日志都没有——排障时完全看不见。
+			//
+			// 注意只有 acc.closed 的**不算**：收尾会被调用多次（finish_reason 与
+			// [DONE] 各一次），已发出去的工具调用第二次扫描必然命中这里，把它报成
+			// 「缺函数名」会让整条排障线跑偏（实测每条请求都打一行，全是误报）。
+			if acc != nil && !acc.closed && acc.args.Len() > 0 {
+				log.Printf("WARN: [responses] 上游给了工具调用但缺函数名（idx=%d id=%s args=%dB）→ 丢弃，客户端只会看到正文",
+					idx, acc.id, acc.args.Len())
 			}
 			continue
 		}
