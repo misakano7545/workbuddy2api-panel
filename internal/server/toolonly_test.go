@@ -149,9 +149,9 @@ func TestToolOnlyLeavesColonToNarration(t *testing.T) {
 	}
 }
 
-// TestToolOnlyLongTextNotRescued 成段正文（超过一句话）不收尾就不救。
+// TestToolOnlyLongTextNotRescued 成篇正文（远超一次提前收尾的长度）不救。
 func TestToolOnlyLongTextNotRescued(t *testing.T) {
-	long := strings.Repeat("这是一段完整的分析结论。", 40) // ~480 字节
+	long := strings.Repeat("这是一段完整的分析结论。", 400) // ~4800 字节，> toolOnlyMaxBytes
 	seg := `data: {"id":"t1","choices":[{"index":0,"delta":{"content":"` + long + `"}}]}` + "\n\n" +
 		`data: {"id":"t1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":400,"total_tokens":106907}}` + "\n\n" +
 		"data: [DONE]\n\n"

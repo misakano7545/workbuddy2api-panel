@@ -37,10 +37,17 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
 
-// toolOnlyMaxBytes 首段正文超过这个长度就不算「只说了一句」。
-// 取证：正常短答多在 <60 字，而真正「预告完就停」的样本在 40~200 字之间；
-// 上限给到 240 字节仍能覆盖它们，又不会把成段的总结当成一句话。
-const toolOnlyMaxBytes = 240
+// toolOnlyMaxBytes 首段正文超过这个长度就不算「一句预告/一次提前收尾」。
+//
+// 取值依据（两台机器实测）：
+//   - 预告句收尾那批（"…："/无标点）正文多集中在 40~200B；
+//   - 但「写完一段就收尾」的形态要长得多——线上中断投诉对得上的两条是
+//     completion 461 / 316 token（≈1400B / 950B），end 于句号、零工具调用；
+//     该机今日 120 条同类请求的 completion 中位数是 825 token。
+// 上限给到 2000B：能覆盖「提前收尾」这一带，又不至于把成篇的最终答复
+// （p50≈2600B 以上）全拉进来。误命中的代价只是多一次上游调用——续写段只采纳
+// 工具调用，纯正文整段丢弃，客户端看到的内容不变。
+const toolOnlyMaxBytes = 2000
 
 // toolOnlyMinPrompt 长会话门槛：短会话里模型给一句就收尾是正常的（问答、寒暄）。
 const toolOnlyMinPrompt = 20000
