@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
@@ -143,7 +144,27 @@ func (p *Pool) load() {
 		return
 	}
 	p.applyAccountsLocked(sf.Accounts)
+	p.applyRulesLocked(sf.ModelRules)
 	p.loadWindowsLocked(sf.Windows, time.Now())
+}
+
+// applyRulesLocked 装载规则表并重算每个账号的运行态集合。调用方必须已持有 p.mu。
+// 顺序上必须在 applyAccountsLocked 之后（账号引用先落地，再展开），但展开时不改写
+// e.ruleIDs——否则「规则还没装载」会被当成「规则已被删除」，重启一次就丢引用。
+func (p *Pool) applyRulesLocked(rules []ModelRule) {
+	if p.rules == nil {
+		p.rules = map[string]ModelRule{}
+	}
+	for _, r := range rules {
+		if r.ID == "" || len(r.Models) == 0 {
+			continue
+		}
+		if r.Mode != RuleModeAllow {
+			r.Mode = RuleModeDeny
+		}
+		p.rules[r.ID] = r
+	}
+	p.recomputeRulesLocked()
 }
 
 // applyAccountsLocked 用持久化账号状态覆盖/插入 byUID（placeholder 凭证，Add 时换全）。
@@ -169,6 +190,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			disabled:                 s.Disabled,
 			paused:                   s.Paused,
 			group:                    s.Group,
+			ruleIDs:                  append([]string(nil), s.ModelRules...),
 			reason:                   s.Reason,
 			disabledAt:               s.DisabledAt,
 			until:                    s.Until,
@@ -260,6 +282,8 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		}
 		p.byUID[uid] = e
 	}
+	// 账号引用先落地，再按规则本体展开（顺序反了会把引用当成脏数据）。
+	p.recomputeRulesLocked()
 	if migratedState {
 		p.dirty.Store(true)
 	}
@@ -278,6 +302,7 @@ func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.byUID = map[string]*entry{}
 	p.windows = nil
 	p.applyAccountsLocked(s.Accounts)
+	p.applyRulesLocked(s.ModelRules)
 	p.loadWindowsLocked(s.Windows, time.Now())
 }
 
@@ -357,6 +382,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 			CreditsEarliestRemaining: e.creditsEarliestRemaining,
 			CreditsExpiryBuckets:     append([]ExpiryBucket(nil), e.expiryBuckets...),
+			ModelRules:               append([]string(nil), e.ruleIDs...),
 		}
 		// 账号级冷却字段：仅禁用或仍在冷却时限内落盘（与熔断/降权同款惰性清洗）。
 		// 软冷却按墙钟到期、字段本身不清理，无条件落盘会让过期 reason 在 state.json 里
@@ -410,5 +436,18 @@ func (p *Pool) stateOverviewLocked() stateFile {
 		sf.Accounts[uid] = s
 	}
 	sf.Windows = p.windowsStateLocked(now)
+	// 规则表整体写出：规则本体 + 每个账号的引用都在一张 state.json 里，
+	// 单文件快照才不会出现「账号指向了不存在的规则」。
+	if len(p.rules) > 0 {
+		ids := make([]string, 0, len(p.rules))
+		for id := range p.rules {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		sf.ModelRules = make([]ModelRule, 0, len(ids))
+		for _, id := range ids {
+			sf.ModelRules = append(sf.ModelRules, p.rules[id])
+		}
+	}
 	return sf
 }

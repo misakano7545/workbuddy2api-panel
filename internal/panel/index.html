@@ -876,6 +876,70 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .ev-ctx-msg pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.55; color: var(--ink); }
 .ev-ctx-empty { padding: 10px 12px; font-size: 12px; color: var(--ink-3); }
 
+/* >>> modelrules-css（本地功能：模型规则页样式，脚本按标记替换） */
+/* ── 模型规则：左栏规则卡、右栏账号 ──────────────────────────────────
+   列表不自己在框内滚：和其它标签页一样，内容多了让整页滚（面板本来就整页滚）。 */
+.mrx { display: flex; gap: 16px; align-items: flex-start; }
+/* 表头只留标题 + 计数 + 按钮（说明文字挤在 header 里会把按钮顶到第二行）。 */
+.mrx .box > header .note { white-space: nowrap; }
+/* 左栏定宽（规则卡内容窄，给多了只是空白）；右栏吃掉剩余宽度，太窄就整体上下堆叠。 */
+.mrx-pane { margin-bottom: 0; min-width: 0; }
+.mrx > .mrx-pane:first-child { flex: 0 0 320px; }
+.mrx > .mrx-pane:last-child { flex: 1 1 auto; }
+.mrx-body { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.rule { border: 1px solid var(--line-soft); border-radius: 9px; padding: 9px 11px 10px; background: var(--surface-2); }
+.rule-hd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rule-nm { font-size: 13px; font-weight: 600; flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 计数单独占第二行：挤在同一行时按钮会被顶下去，读起来像两段式卡片。 */
+.rule-hd .note { color: var(--ink-3); font-size: 11.5px; order: 3; flex: 1 1 100%; margin-top: 1px; }
+.rule-hd .grow { display: none; } /* 名字自己撑开，占位元素不再推开按钮 */
+.rule-hd .btn { flex: none; }
+.rule-models { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.rule-models .chip {
+  display: inline-block; padding: 1px 8px; border-radius: 999px; font: 11px var(--mono);
+  background: var(--surface); border: 1px solid var(--line); color: var(--ink-2);
+}
+.rule-note { margin-top: 6px; font-size: 11.5px; color: var(--ink-3); }
+
+/* 这个页的账号表只有三列，不该继承主账号表的 640px 下限：
+   右栏一窄就多出一条根本摇不动的横向滚动条。 */
+#view-modelrules .tbl-wrap { overflow-x: clip; }
+#view-modelrules table.acc { min-width: 0; table-layout: fixed; }
+#view-modelrules table.acc th:nth-child(1) { width: 42%; }
+#view-modelrules table.acc th:nth-child(2) { width: 40%; }
+#view-modelrules table.acc th:nth-child(3) { width: 18%; }
+#view-modelrules table.acc .who { min-width: 0; max-width: none; }
+#view-modelrules table.acc .who .nm,
+#view-modelrules table.acc .who .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 没挂规则就是一横杠，不用写一整句解释。 */
+.mr-dash { color: var(--ink-3); }
+
+/* 弹窗里的表单行：沿用 .fbar 的排布，但不要它那圈筛选栏的底色与分隔线。 */
+.rbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.rbar > input, .rbar > select { width: auto; padding: 5px 10px; font-size: 12.5px; border-radius: 6px; }
+.rbar > #ruleName { flex: 1 1 220px; min-width: 0; }
+.rbar > #ruleQ { flex: 0 1 170px; min-width: 0; }
+
+/* 勾选面板：两列，长列表自己在框内滚（弹窗高度受 max-height 约束） */
+.rule-pick { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 6px;
+  max-height: 46vh; overflow: auto; margin-top: 6px; }
+/* 全选 / 取消选择 / 反选：紧贴勾选面板上方一行小按钮 */
+.pick-bar { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+.pick { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 7px; cursor: pointer; }
+.pick:hover { background: var(--surface-2); }
+.pick.on { background: var(--accent-soft); }
+.pick input { margin: 0; accent-color: var(--accent); }
+.pk-nm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 12.5px var(--mono); }
+.pk-rm { flex: none; font-size: 11px; color: var(--ink-3); }
+
+@media (max-width: 980px) {
+  .mrx { flex-direction: column; }
+  .mrx > .mrx-pane:first-child, .mrx > .mrx-pane:last-child { flex: 0 0 auto; width: 100%; }
+  .rule-pick { grid-template-columns: 1fr; max-height: 40vh; }
+}
+/* <<< modelrules-css */
 </style>
 </head>
 <body>
@@ -909,6 +973,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
+      <li><a href="#modelrules" data-view="modelrules">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.9 13 4v4.3c0 3-2 5.6-5 6.4-3-.8-5-3.4-5-6.4V4z"/><path d="M5.7 8.1 7.3 9.7l3-3.2"/></svg>
+        模型规则</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
@@ -1380,6 +1447,37 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     </section>
 
     <!-- 配置 -->
+    <!-- >>> modelrules-view -->
+    <!-- 模型规则：左栏规则（一批模型的黑/白名单），右栏账号（给账号挂规则） -->
+    <section class="view" id="view-modelrules" hidden>
+      <div class="mrx">
+        <div class="box mrx-pane">
+          <header>
+            <h3>规则</h3>
+            <span class="grow"></span>
+            <span class="note" id="mrRuleNote"></span>
+            <button class="xs primary" id="btnRuleNew">新建规则</button>
+          </header>
+          <div class="mrx-body" id="mrRuleList"></div>
+        </div>
+        <div class="box mrx-pane">
+          <header>
+            <h3>账号</h3>
+            <span class="grow"></span>
+            <span class="note" id="mrAccNote"></span>
+          </header>
+          <div class="tbl-wrap">
+            <table class="acc">
+              <thead><tr>
+                <th>账号</th><th>已挂规则</th><th class="num">操作</th>
+              </tr></thead>
+              <tbody id="mrAccBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+    <!-- <<< modelrules-view -->
     <section class="view" id="view-config" hidden>
       <form id="cfgForm">
         <span class="vtabs" id="cfgRealmTabs">
@@ -2106,6 +2204,93 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   </div>
 </div>
 
+<!-- >>> modelrules-dlg -->
+<!-- 模型规则编辑：一批模型的黑/白名单，挂到账号上生效。 -->
+<div class="veil" id="ruleVeil">
+  <div class="dlg" style="width:820px">
+    <header>
+      <h3 id="ruleTitle">新建规则</h3>
+    </header>
+    <div class="body">
+      <div class="rbar">
+        <input id="ruleName" placeholder="规则名，例如「便宜模型」" maxlength="40">
+        <select id="ruleMode">
+          <option value="deny">黑名单（禁用勾选的）</option>
+          <option value="allow">白名单（只允许勾选的）</option>
+        </select>
+        <input id="ruleQ" type="search" placeholder="搜索模型" aria-label="搜索模型">
+      </div>
+      <div class="pick-bar">
+        <button type="button" class="xs" data-pick="all">全选</button>
+        <button type="button" class="xs" data-pick="none">取消选择</button>
+        <button type="button" class="xs" data-pick="invert">反选</button>
+        <span class="hint" id="pickScopeNote"></span>
+      </div>
+      <div class="rule-pick" id="rulePick"></div>
+    </div>
+    <footer>
+      <span class="hint" id="ruleCount"></span>
+      <span class="grow"></span>
+      <button id="btnRuleCancel">取消</button>
+      <button class="primary" id="btnRuleSave">保存</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 账号挂规则：勾选要应用的规则集合，整体替换 -->
+<div class="veil" id="accRuleVeil">
+  <div class="dlg" style="width:520px">
+    <header>
+      <h3 id="accRuleTitle">配置规则</h3>
+      <div class="hint">可挂多条，黑名单优先；全不勾 = 不受限制。</div>
+    </header>
+    <div class="body"><div class="rule-pick" id="accRuleList"></div></div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnAccRuleCancel">取消</button>
+      <button class="primary" id="btnAccRuleSave">保存</button>
+    </footer>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<!-- 账号备注：只写本机 localStorage，不写回服务器；账号池与用量两个视图同步显示 -->
+<div class="veil" id="remarkVeil">
+  <div class="dlg" style="width:560px">
+    <header>
+      <h3>账号备注</h3>
+      <div class="hint">备注只存在本机浏览器（localStorage: wb2api.remarks.v1），不写回后端；账号池与用量页会同时显示「备注 + 原昵称」。留空即清除该账号备注。</div>
+    </header>
+    <div class="body">
+      <div class="rm-list" id="remarkBody"></div>
+    </div>
+    <footer>
+      <button class="danger" id="btnRemarkClear">清空全部</button>
+      <span class="grow"></span>
+      <button id="btnRemarkClose">关闭</button>
+      <button class="primary" id="btnRemarkSave">保存</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 开学季券码 -->
+<div class="veil" id="vcVeil">
+  <div class="dlg">
+    <header>
+      <h3>开学季 · 我的券码</h3>
+      <div class="hint">抽奖抽中的第三方券（KFC / 瑞幸 / 酷狗等），券码到店到对应app/小程序兑换。</div>
+    </header>
+    <div class="body" id="vcBody"></div>
+    <footer>
+      <span class="hint" id="vcNote"></span>
+      <span class="grow"></span>
+      <button class="xs" id="btnVcRefresh">刷新</button>
+      <button class="xs primary" id="btnVcClose">关闭</button>
+    </footer>
+  </div>
+</div>
+<!-- <<< modelrules-dlg -->
 <script src="app.js"></script>
 </body>
 </html>
