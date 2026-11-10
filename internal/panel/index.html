@@ -866,6 +866,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .exp-first .exp-week { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .exp-first .exp-week { margin-left: 4px; }
 .exp-first .exp-week b { color: var(--ink-2); font-weight: 600; }
+/* 到期日是「按计量周期推算」而非上游真实扣费截止时的标注（issue #200）：弱化成
+   虚线小字，让运维知道这个日期是推算值，但不要盖过「明天到期」这条主信息。 */
+.exp-first .exp-est { margin-left: 6px; font-size: 11px; color: var(--ink-3); border-bottom: 1px dashed var(--line); cursor: help; }
 /* 后续批次：块级换行 + 自动换行，列距 16px（比字内全角空格稳定）。 */
 .exp-batches { display: flex; flex-wrap: wrap; gap: 3px 16px; margin-top: 3px;
   font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }

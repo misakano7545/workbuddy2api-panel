@@ -4038,7 +4038,7 @@ function expBucketList(a) {
   for (const b of raw) {
     const date = String((b && b.date) || '').slice(0, 10);
     const remain = Number((b && b.remain) || 0);
-    if (date && remain > 0) out.push({ date, remain });
+    if (date && remain > 0) out.push({ date, remain, estimated: !!(b && b.estimated) });
   }
   if (out.length) {
     out.sort((x, y) => (x.date < y.date ? -1 : x.date > y.date ? 1 : 0));
@@ -4097,6 +4097,7 @@ function renderExpirySnapshot(d) {
       '<span class="exp-date">' + esc(first.date) + '</span>' +
       '<span class="exp-days">（' + when + '）</span>' +
       (week > first.remain ? '<span class="exp-week">7 天内合计 <b>' + fmtTok(week) + '</b></span>' : '') +
+      (first.estimated ? '<span class="exp-est" title="该日期是按计量周期（CycleEndTime）推算的，不是上游给出的真实扣费截止">按计量周期推算</span>' : '') +
       '</div>';
     const rest = bs.slice(1, 4).map(b => '<span>随后 ' + esc(b.date.slice(5)) + ' · ' +
       fmtTok(b.remain) + '</span>').join('');

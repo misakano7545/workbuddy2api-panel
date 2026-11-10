@@ -22,6 +22,7 @@ package upstream
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/cst"
+	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
 
 const (
@@ -144,34 +146,74 @@ func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, t
 		}
 	}
 	details := c.globalPackageDetails(a, codes)
-	// 同一 PackageCode 在明细里会出现**多条**（每个计量周期一条：ResourceCycleId 不同、
-	// CycleEndTime 逐月递推）。按码归并——每个包只该贡献一次余额，且只认该码**最早
-	// 的未来到期**那条（真正会先扣完的那一期）。不归并会把同一笔余额重复计入 N 次，
-	// 面板「到期提醒」于是显示一堆同额批次。
+	// 归并的最小单位是**（PackageCode, 计量周期）**，不是 PackageCode 本身。
+	//
+	// 错在哪（issue #200，2026-11-10 线上取证）：国际版 Bonus Pack 每天发一个包，
+	// **所有包共用同一个 PackageCode**，明细里因此同码多条、CycleEndTime 逐日递推
+	// （实测某号 32 条同码，11-11 起每天一批、每批 30 分）。此前只按码归并、取该码
+	// 「最早的未来到期」那条，再把 summary 里**当前周期**的剩余配到这个旧 end 上：
+	//
+	//	旧周期（已用完）的 end + 新周期的 remain → 面板显示「927 分明天到期」，
+	//	而真实情况是「明天 27 分、后天 30 分……逐日到期」。
+	//
+	// 更坏的是 expiring（7 天内快过期额度）也被整笔算进去，池子会把这号当成
+	// 「积分马上作废」优先消耗——这不只是显示问题。
+	//
+	// 现在：每行明细用它**自己的** end 与**自己的** balanceRemain()，同一 (码, end)
+	// 只留剩余最大的一条（付费/免费两条端点可能给同一批）。
 	type pick struct {
-		d   packageDetail
-		end time.Time
+		d        packageDetail
+		end      time.Time
+		estimate bool // end 是按计量周期推算的
 	}
-	best := make(map[string]pick, len(details))
+	type cycleKey struct {
+		code string
+		end  int64 // Unix 秒：同一周期同码的 end 必然相同，用它当周期标识
+	}
+	merged := make(map[cycleKey]pick, len(details))
+	cycleFallback := 0
 	for _, d := range details {
-		end, ok := packageEndAt(d.DeductionEndTime, d.ExpiredTime, d.CycleEndTime)
+		end, fromCycle, ok := packageEndAtEx(d.DeductionEndTime, d.ExpiredTime, d.CycleEndTime)
 		if !ok || !end.After(now) {
 			continue
 		}
-		cur, seen := best[d.PackageCode]
-		if !seen || end.Before(cur.end) {
-			best[d.PackageCode] = pick{d: d, end: end}
+		if fromCycle {
+			cycleFallback++
 		}
+		k := cycleKey{d.PackageCode, end.Unix()}
+		if cur, seen := merged[k]; seen {
+			// 已有一条：留剩余更大的（同一批可能同时出现在 paid / free 两条端点）。
+			if d.balanceRemain() > cur.d.balanceRemain() {
+				merged[k] = pick{d: d, end: end, estimate: fromCycle}
+			}
+			continue
+		}
+		merged[k] = pick{d: d, end: end, estimate: fromCycle}
+	}
+	if cycleFallback > 0 {
+		// 日期是按计量周期末日推算的（缺 DeductionEndTime / ExpiredTime）。仍然计入，
+		// 但留一行 WARN：这个口径不对等于真实扣费截止，排障时别被它带偏。
+		log.Printf("WARN: [billing] %d 个积分类的到期日只能按计量周期（CycleEndTime）推算，非真实扣费截止（acct=%s）",
+			cycleFallback, logfmt.Label(a.UID, a.Nickname))
+	}
+	// 每个码有多少个未来周期：只有一个时，「借用 summary 余额」不会跨周期串味，
+	// 保留给「明细自报 0 而 summary 有数」的套餐型包（历史行为）；多个时一律不借，
+	// 否则又回到把新周期余额挂到所有周期上的老问题。
+	futurePerCode := make(map[string]int, len(merged))
+	for k := range merged {
+		futurePerCode[k.code]++
 	}
 	byDate := make(map[string]*ExpiryBucket)
-	for code, p := range best {
+	for k, p := range merged {
 		d := p.d
-		r, ok := remainByCode[code]
-		if !ok {
-			// summary 没列这个包（已用完/过期/不同周期）→ 明细自报剩余，但仅在为正时计。
-			r = int64(d.balanceRemain())
+		r := int64(d.balanceRemain())
+		if r <= 0 && futurePerCode[k.code] == 1 {
+			if sr, ok := remainByCode[k.code]; ok {
+				r = sr
+			}
 		}
 		if r <= 0 {
+			// 该周期已用完 / 明细没给剩余：不贡献额度，也不该拉早 earliestAt。
 			continue
 		}
 		end := p.end
@@ -185,6 +227,11 @@ func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, t
 			byDate[day] = b
 		} else if end.Before(b.ExpireAt) {
 			b.ExpireAt = end
+		}
+		if p.estimate {
+			// 同日多批里只要有一批是推算的，整行就标注——不能只标最早那批：
+			// 面板一行只展示「该日」，混了两种口径时保守地显示为推算。
+			b.Estimated = true
 		}
 		b.Remain += r
 		if soon > 0 && !end.After(now.Add(soon)) {

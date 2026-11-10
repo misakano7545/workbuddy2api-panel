@@ -2798,13 +2798,26 @@ func parsePackageEndTime(raw string) (time.Time, bool) {
 // deduction=2034-12-24，余额 500 分）。回退 ExpiredTime（仅在包失效后才回填）
 // → CycleEndTime。都缺 → 无到期（保守：不参与「先烧快到期的」排序）。
 func packageEndAt(deductionMS int64, expired, cycleEnd string) (time.Time, bool) {
+	t, _, ok := packageEndAtEx(deductionMS, expired, cycleEnd)
+	return t, ok
+}
+
+// packageEndAtEx 同 packageEndAt，另外回报「是否只能靠 CycleEndTime 推算」。
+//
+// fromCycle=true 表示前两个权威字段都没有，日期是按计量周期末日推的。上游 Bonus
+// Pack 的实测形态里 DeductionEndTime 与 CycleEndTime **完全相同**（2026-11-10 线上
+// 逐行核对，差 0 秒），所以正常情况不会走到这一步；但 CN 侧与历史包可能缺
+// DeductionEndTime，那时日期只是推算——调用方据此打 WARN 并在面板标注，别让运维
+// 把「推算值」当成真实扣费截止。
+func packageEndAtEx(deductionMS int64, expired, cycleEnd string) (time.Time, bool, bool) {
 	if deductionMS > 0 {
-		return time.UnixMilli(deductionMS).In(softRateResetLoc), true
+		return time.UnixMilli(deductionMS).In(softRateResetLoc), false, true
 	}
 	if t, ok := parsePackageEndTime(expired); ok {
-		return t, true
+		return t, false, true
 	}
-	return parsePackageEndTime(cycleEnd)
+	t, ok := parsePackageEndTime(cycleEnd)
+	return t, ok, ok
 }
 
 // ExpiryBucket 单个自然日到期的积分合计（按真实失效时刻 DeductionEndTime 聚合）。
@@ -2816,6 +2829,10 @@ type ExpiryBucket struct {
 	Date     string    `json:"date"`
 	ExpireAt time.Time `json:"expires_at,omitempty"`
 	Remain   int64     `json:"remain"`
+	// Estimated 该日额度里至少有一批的到期日是**按计量周期（CycleEndTime）推算**的，
+	// 不是上游给出的真实扣费截止（缺 DeductionEndTime / ExpiredTime 时的回退）。
+	// 面板据此标注「按计量周期推算」，避免运维把推算值当权威日期（issue #200）。
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 // UserResourceDetailed 在 UserResource 基础上额外返回「快过期」积分子集：
