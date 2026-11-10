@@ -319,3 +319,58 @@ func TestReloadConcurrentSafe(t *testing.T) {
 		t.Fatalf("并发重载后 pool=%d want 1", n)
 	}
 }
+
+// 面板增删与热重载并发时不互相拆台、也不死锁（issue #199 风险 3）。
+//
+// 覆盖三条会同时动池的路径：目录重载、账号移除、API Key 新增账号。断言只要求
+// 「跑完不炸、池子与目录一致」；配 -race 跑能抓数据竞争，死锁则会让测试超时。
+func TestReloadSerialisesWithPanelMutations(t *testing.T) {
+	e := newReloadEnv(t)
+	now := time.Now().Add(24 * time.Hour).Unix()
+	e.writeAuth("u1", "at1", now)
+	e.writeAuth("u2", "at2", now)
+	if res := e.reload(); res.Added != 2 {
+		t.Fatalf("准备阶段 added=%d want 2", res.Added)
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	// 持续重载
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = e.panel.ReloadAccountsReason("test")
+			}
+		}
+	}()
+	// 并发增删
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/panel/api/accounts/u1/remove", nil)
+			e.panel.ServeHTTP(rec, req)
+			e.writeAuth("u1", "at1-"+time.Now().Format("150405.000000000"), now)
+			_, _ = e.panel.ReloadAccountsReason("test")
+		}
+	}()
+	time.Sleep(150 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// 收尾：目录里两份文件都在，池里也应当有两号（最后一轮重载以目录为准）。
+	for _, uid := range []string{"u1", "u2"} {
+		e.writeAuth(uid, "at-final-"+uid, now)
+	}
+	e.reload()
+	got := e.poolUIDs()
+	if !got["u1"] || !got["u2"] {
+		t.Fatalf("并发结束后池应与目录一致，实际 %v", got)
+	}
+}

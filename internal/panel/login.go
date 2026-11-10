@@ -491,12 +491,20 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		// CN 也显式补 realm 键（幂等），让 auth 文件形态统一（与 LoadDir 存量迁移对齐）。
 		_, _ = a.BackfillRealm()
 	}
-	if err := a.SaveAtomic(); err != nil {
-		writeErr(w, http.StatusInternalServerError, "save auth: "+err.Error())
+	// 落盘 + 入池与目录热重载串行化（issue #199 风险 3）：登录刚写出半份文件时
+	// 若正好被重载扫到，该账号会被判成「解析失败」进而在本轮拒绝删除——不会丢，
+	// 但这一轮的 upsert 顺序可能反过来把旧凭证盖回来。持同一把锁就没有这个窗口。
+	p.reloadMu.Lock()
+	saveErr := a.SaveAtomic()
+	if saveErr == nil {
+		p.cfg.Pool.Add(a)
+	}
+	p.reloadMu.Unlock()
+	if saveErr != nil {
+		writeErr(w, http.StatusInternalServerError, "save auth: "+saveErr.Error())
 		return
 	}
 	isNewAccount := p.cfg.Pool.AuthByUID(acct.UID) == nil
-	p.cfg.Pool.Add(a)
 	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
 
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
