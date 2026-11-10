@@ -565,6 +565,18 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 	if mi.IsDefault {
 		entry["is_default"] = true
 	}
+	// 限时优惠（上游 modelPromotions）：credits 是**牌价**，promo_* 是当前生效折扣。
+	// 这两个字段原先只在 /panel/api/models 里透出，OpenAI 兼容端点看不到——而第三方
+	// 启动器/客户端恰恰只读 /v1/models 来判断「这个模型现在是不是免费」（issue #203）。
+	// 口径与面板一致：PromoFactor 为 nil 表示上游没给可计算的折扣（例如「错峰使用」
+	// 只有标签没有系数），此时不写 promo_factor，但仍写标签。
+	if mi.PromoFactor != nil {
+		entry["promo_factor"] = *mi.PromoFactor
+		entry["promo_credits"] = mi.PromoCredits
+	}
+	if mi.PromoLabel != "" {
+		entry["promo_label"] = mi.PromoLabel
+	}
 	if mi.SupportsImages {
 		entry["supports_images"] = true // 多模态能力透出
 	}

@@ -408,6 +408,17 @@ Start-ScheduledTask -TaskName 'wb2api-panel'
 
 > 内置服务模式（`wb2api.exe install-service` 走 SCM）没有做：更新重启要连带重写服务控制逻辑，且 CI 只有 Linux 构建机，Windows 服务生命周期没法做回归。用上面两种效果等价。
 
+## 🍎 macOS 菜单栏启动器（第三方，不在本仓库）
+
+macOS 上不用自己拼常驻方案：社区维护了一个菜单栏启动器，常驻图标里能启停 `wb2api`、看账号池健康度、一键更新（下载 → sha256 校验 → 停服 → 原子替换 → 重启，失败回滚），模型清单里能直接复制免费模型的 ID。
+
+- 源码与 Release：[`hardwin2023/workbuddy2api-panel`](https://github.com/hardwin2023/workbuddy2api-panel)（`macapp/` 目录，`swiftc` 直接编译，不需要 Xcode 工程）
+- 更新源已指向本仓库的 Release，资产按 `darwin-<arch>.zip` 选取，`checksums` 走 GitHub 每个资产自带的 sha256 `digest`（拿不到就中止，不降级）
+
+**这属于第三方项目，本仓库不构建、不验证它**：我们的 CI 只有 Linux 构建机（`binaries.yml` / `docker-ghcr.yml`），Swift 应用在这里没有回归手段。把它单独放一个仓库 + 这里给个入口，是刻意选择——避免往本仓库塞一份没人能在 CI 上验过的代码。它读的 `/v1/models` 字段（含 `credits` / `promo_*`）由本仓库保证向后兼容：新增字段只增不改，旧客户端读到多少还是多少。
+
+DMG 未公证，首次打开需要右键 →「打开」。
+
 ## 🆚 与上游的差异
 
 本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（均已在真实多账号环境验证）：
