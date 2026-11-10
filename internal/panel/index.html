@@ -1443,11 +1443,27 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input name="update_auto_time" type="time" step="60" value="04:00">
                 <span class="hint">仅原生 Linux / Windows 二进制支持一键安装</span></label>
             </div>
+            <!-- 更新出口（issue #198）：api.github.com 通而 release-assets 被拦时，
+                 不动启动脚本/编排也能改走代理或镜像。热生效，保存即用。 -->
+            <div class="grid2" style="margin-top:8px">
+              <label class="fld"><span class="lb">更新代理</span>
+                <input name="update_proxy" placeholder="socks5://127.0.0.1:1080">
+                <span class="hint">空 = 不显式设置。支持 http / https / socks5。</span></label>
+              <label class="fld"><span class="lb">资产下载镜像前缀</span>
+                <input name="update_mirror" placeholder="https://ghfast.top/">
+                <span class="hint">只代理资产下载；版本元数据与 sha256 校验仍直连 GitHub。</span></label>
+            </div>
+            <label class="switch" style="margin-top:2px"><span class="lb">沿用环境变量代理</span>
+              <input type="checkbox" name="update_proxy_from_env"></label>
+            <span class="hint">关闭后完全不读 HTTP_PROXY / HTTPS_PROXY，只认上面的「更新代理」。</span>
+            <div class="hint" id="updateChannel" style="margin-top:6px">通道：—</div>
             <div class="update-actions">
               <button type="button" id="btnUpdateCheck">检查更新</button>
+              <button type="button" id="btnUpdateProbe">测试连通性</button>
               <button type="button" id="btnUpdateRelease" hidden>打开 Release</button>
               <button type="button" class="primary" id="btnUpdateInstall" hidden>立即更新</button>
             </div>
+            <div id="updateProbeOut" class="hint" style="margin-top:6px" hidden></div>
           </div>
         </div>
 

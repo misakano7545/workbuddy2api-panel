@@ -2076,11 +2076,12 @@ func TestAppJSAllCalledFunctionsDefined(t *testing.T) {
 	js := string(src)
 
 	// 去掉注释与字符串字面量，避免把注释里的 `foo(` 或字符串里的 `'a(b'` 当调用。
-	// 顺序敏感：先块注释、再行注释、最后字符串（与真实词法顺序一致）。
-	js = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(js, "")
-	js = regexp.MustCompile(`//[^\n]*`).ReplaceAllString(js, "")
-	js = regexp.MustCompile(`(?s)'[^'\\\n]*(?:\\.[^'\\\n]*)*'`).ReplaceAllString(js, "''")
-	js = regexp.MustCompile("(?s)`[^`]*`").ReplaceAllString(js, "``")
+	//
+	// 必须是**单遍扫描**，不能用「先删注释、再删字符串」的正则序列：那样字符串里的
+	// `://`（例如一句「支持 http:// 与 socks5://」的提示文案）会被当成行注释起点，
+	// 一路吃到行尾把后面的字符串开头引号也吞掉，此后整份源码的词法全错位——
+	// 表现是一堆毫不相关的用例同时报「某函数未定义」。这里按真实词法顺序走一遍。
+	js = stripJSCommentsAndStrings(js)
 
 	// JS 关键字 / 运算符形态，不是函数调用。
 	keywords := map[string]bool{
@@ -2233,4 +2234,67 @@ process.exit(0);
 	if !bytes.Contains(out, []byte("OK")) {
 		t.Fatalf("余额趋势控件接线测试未通过:\n%s", out)
 	}
+}
+
+// stripJSCommentsAndStrings 单遍去掉 JS 注释与字符串字面量（保留换行，其余字符
+// 用空格占位，避免把相邻标识符粘成一个）。
+//
+// 为什么不能用正则序列：字符串里的 `://` 会被「删行注释」那条规则当成注释起点，
+// 吃掉行尾——连后面的引号一起没了，之后整份源码的引号配对全部错位，一堆无关用例
+// 同时报「函数未定义」。这里按真实词法顺序扫：见到引号就进字符串态、见到 `/` 才判
+// 注释，两者互不吃掉对方。
+func stripJSCommentsAndStrings(src string) string {
+	var b strings.Builder
+	b.Grow(len(src))
+	n := len(src)
+	for i := 0; i < n; {
+		c := src[i]
+		switch {
+		case c == '/' && i+1 < n && src[i+1] == '/':
+			for i < n && src[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < n && src[i+1] == '*':
+			i += 2
+			for i+1 < n && !(src[i] == '*' && src[i+1] == '/') {
+				if src[i] == '\n' {
+					b.WriteByte('\n')
+				}
+				i++
+			}
+			i += 2
+		case c == '\'' || c == '"' || c == '`':
+			quote := c
+			i++
+			for i < n {
+				if src[i] == '\\' && quote != '`' {
+					i += 2
+					continue
+				}
+				if src[i] == quote {
+					i++
+					break
+				}
+				// 普通引号不允许跨行：遇到换行就认为字符串被截断，回退成代码继续扫，
+				// 免得一个坏引号把后面整份文件都吞成字符串。
+				if quote != '`' && src[i] == '\n' {
+					b.WriteByte('\n')
+					i++
+					break
+				}
+				if src[i] == '\n' {
+					b.WriteByte('\n')
+				}
+				i++
+			}
+			b.WriteByte(' ')
+		case c == '\n':
+			b.WriteByte('\n')
+			i++
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
 }

@@ -15,7 +15,20 @@
   },
   "update": {
     "auto_enabled": false,
-    "auto_time": "04:00"
+    "auto_time": "04:00",
+    "_proxy_comment": "更新走哪个出口（issue #198）。空 = 不显式设置。支持 http:// https:// socks5://。典型场景：api.github.com 通、但 release-assets.githubusercontent.com 被出站拦住（群晖/NAS/内网），此时填 socks5://127.0.0.1:1080 之类即可。可热生效，不用重启。",
+    "proxy": "",
+    "_proxy_from_env_comment": "是否沿用进程环境变量里的 HTTP_PROXY/HTTPS_PROXY（缺省 true，保持历史行为）。显式 false 则完全不读环境，只认上面的 proxy。",
+    "proxy_from_env": true,
+    "_mirror_comment": "资产下载镜像前缀（issue #198），如 https://ghfast.top/ 。只作用于资产下载：Release 元数据（tag/digest/size）永远直连 api.github.com，落盘后照旧校验 sha256——镜像只能搬字节，改不了「应该是什么」。空 = 直连。",
+    "mirror": ""
+  },
+  "accounts": {
+    "_comment": "账号目录热重载（issue #199）：外部脚本/另一台机器往 auths/ 同步文件，不必重启进程即可入池；删文件在连续 N 次扫描确认后出池。",
+    "reload_interval": "10s",
+    "_reload_interval_comment": "轮询间隔；\"0s\" = 关闭轮询（手动接口 POST /panel/api/accounts/reload 仍可用）。",
+    "reload_delete_confirm": 2,
+    "_reload_delete_confirm_comment": "文件消失后要连续几轮扫描确认才移出账号池。半写文件、临时移走文件都只让账号「这一轮看不见」；剔除会写进 state.json 且下次启动不复活，所以要连续确认。1 = 立即删（不建议）。"
   },
   "logging": {
     "request_archive_enabled": true,

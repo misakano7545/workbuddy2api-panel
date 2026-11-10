@@ -44,7 +44,33 @@ type Config struct {
 		AutoEnabled bool `json:"auto_enabled"`
 		// AutoTime 自动更新时间，格式 HH:MM（Asia/Shanghai）。
 		AutoTime string `json:"auto_time"`
+		// Proxy 更新走哪个出口（issue #198，可热生效）：空 = 不显式设置；
+		// 支持 http:// / https:// / socks5://。出站被墙、api.github.com 通而
+		// release-assets 不通时填这里（或 mirror）。
+		Proxy string `json:"proxy"`
+		// ProxyFromEnv 是否沿用进程环境变量里的 HTTP(S)_PROXY（默认 true）。
+		// 设为 false 时只看 proxy 字段——容器里环境变量被别处塞了值、但更新
+		// 需要走另一条通道时用。
+		ProxyFromEnv *bool `json:"proxy_from_env"`
+		// Mirror 资产下载镜像前缀（issue #198），例如 https://ghfast.top/。
+		// 只作用于**资产下载**：Release 元数据（tag/digest/size）永远直连
+		// api.github.com，校验口径不变，镜像无法投毒。空 = 直连。
+		Mirror string `json:"mirror"`
 	} `json:"update"`
+
+	Accounts struct {
+		// ReloadInterval 账号目录热重载轮询间隔（issue #199）。空 = 默认 10s；
+		// "0s" = 关闭轮询（手动接口 POST /panel/api/accounts/reload 仍然可用）。
+		//
+		// 为什么默认开启：外部脚本/另一台机器往 auths/ 同步文件是最常见用法，
+		// 而重启进程会丢在途请求。轮询只读 ReadDir + 少量解析，几十个号的目录
+		// 是微秒级开销。
+		ReloadInterval string `json:"reload_interval"`
+		// ReloadDeleteConfirm 文件消失后要连续几轮扫描确认才把账号移出池（默认 2）。
+		// 半写文件、临时移走文件都可能让账号「这一轮看不见」；剔除会写进 state.json，
+		// 下次启动也不复活，所以要连续确认。1 = 立即删（不建议）。
+		ReloadDeleteConfirm int `json:"reload_delete_confirm"`
+	} `json:"accounts"`
 
 	Logging struct {
 		// RequestArchiveEnabled 请求元数据 JSONL 归档开关，缺省 true。
@@ -531,6 +557,8 @@ type Config struct {
 	ServerReadTimeoutDur time.Duration `json:"-"`
 	// ShutdownTimeoutDur 解析后的优雅关停窗口；0 = 不等待在途请求直接退。
 	ShutdownTimeoutDur time.Duration `json:"-"`
+	// ReloadIntervalDur 解析后的账号目录轮询间隔（issue #199）；0 = 关闭轮询。
+	ReloadIntervalDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -551,6 +579,9 @@ func Default() *Config {
 	c.Upstream.RestrictionHoldSeconds = 1800
 	c.Panel.PackageDetailLimit = 5
 	c.Update.AutoTime = "04:00"
+	// 账号目录热重载（issue #199）：默认 10s 轮询、连续 2 次确认才删。
+	c.Accounts.ReloadInterval = "10s"
+	c.Accounts.ReloadDeleteConfirm = 2
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7
 	c.Logging.RequestArchiveMaxMB = 100
@@ -1057,6 +1088,20 @@ func (c *Config) normalize() error {
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
+	}
+	// 账号目录热重载轮询（issue #199）。空值回落默认 10s；"0s" 是合法值（关闭），
+	// 负值钳 0 同关闭（"-5s" 无合理语义）。
+	if c.Accounts.ReloadInterval == "" {
+		c.Accounts.ReloadInterval = "10s"
+	}
+	if c.ReloadIntervalDur, err = time.ParseDuration(c.Accounts.ReloadInterval); err != nil {
+		return fmt.Errorf("accounts.reload_interval: %w", err)
+	}
+	if c.ReloadIntervalDur < 0 {
+		c.ReloadIntervalDur = 0
+	}
+	if c.Accounts.ReloadDeleteConfirm <= 0 {
+		c.Accounts.ReloadDeleteConfirm = 2
 	}
 	// 窗口用量调度窗口（issue #112）：空值回落默认 1h；"0" 合法（关停）；负值钳 0。
 	if c.Pool.BalanceWindow == "" {

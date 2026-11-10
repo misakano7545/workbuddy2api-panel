@@ -538,15 +538,36 @@ func (a *Auth) SaveAtomicRetry() error {
 	return err
 }
 
+// LoadReport 一次账号目录扫描的结果。
+//
+// Errors 非空表示「本次有文件读不动/解析不了」：账号可能**还在**，只是这一轮看不见。
+// 热重载必须据此放弃删除（见 panel/reload.go）——半写文件被当成「文件已删」会把
+// 在池账号踢掉，而且剔除结果会持久化，下次启动也不复活。
+type LoadReport struct {
+	Auths      []*Auth
+	Files      int
+	ParseError []string // "文件名: 原因"，已按文件粒度去重
+}
+
 // LoadDir 扫描并解析 dir 下 workbuddy*.json；解析失败的文件静默跳过（启动日志由调用方统计）。
 // 顺带做 realm 标识存量迁移：对空 realm 的 auth 自动 backfill（原始 domain 推断）并 SaveAtomic
 // 落盘，一次性把旧文件补上 realm 键。单个文件写失败不阻断启动（log WARN 继续），
 // 避免历史 auth 目录个别文件不可写时整个服务起不来。
 func LoadDir(dir string) ([]*Auth, error) {
-	files, err := filepath.Glob(filepath.Join(dir, "workbuddy*.json"))
+	r, err := LoadDirReport(dir)
 	if err != nil {
 		return nil, err
 	}
+	return r.Auths, nil
+}
+
+// LoadDirReport 同 LoadDir，另外回报文件数与解析失败的条目（热重载用来判断能否删号）。
+func LoadDirReport(dir string) (LoadReport, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "workbuddy*.json"))
+	if err != nil {
+		return LoadReport{}, err
+	}
+	report := LoadReport{Files: len(files)}
 	// 按 mtime 升序：同一个号的轮转备份并存时（客户端会写 <name>.<ts>.<pid>.<uuid>.info），
 	// 池里「后载入者胜出」才等于「最新凭证胜出」。不排序的话 glob 顺序（字典序）可能让
 	// 陈旧备份胜出——那账号在面板上表现为 token 失效。取不到 mtime 的文件排最前（先被覆盖）。
@@ -575,11 +596,13 @@ func LoadDir(dir string) ([]*Auth, error) {
 		})
 		if err != nil {
 			log.Printf("ERROR: auth 文件 %s 无法读取: %v —— 该账号本次不在池里，修好文件或重新登录", f, err)
+			report.ParseError = append(report.ParseError, filepath.Base(f)+": "+err.Error())
 			continue
 		}
 		a, err := Parse(raw)
 		if err != nil {
 			log.Printf("ERROR: auth 文件 %s 解析失败: %v —— 该账号本次不在池里", f, err)
+			report.ParseError = append(report.ParseError, filepath.Base(f)+": "+err.Error())
 			continue
 		}
 		a.FilePath = f
@@ -600,5 +623,6 @@ func LoadDir(dir string) ([]*Auth, error) {
 		}
 		out = append(out, a)
 	}
-	return out, nil
+	report.Auths = out
+	return report, nil
 }

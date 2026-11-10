@@ -66,9 +66,21 @@ func childGrace() time.Duration {
 }
 
 // Settings controls the optional daily automatic install.
+//
+// Proxy/ProxyFromEnv/Mirror 解决 issue #198 的现场：api.github.com 通、但
+// release-assets.githubusercontent.com 被拦，于是「查得到新版本、永远装不上」。
+// 三者都可以热生效（Configure 之后下一个请求就用新通道），不需要重启。
 type Settings struct {
 	AutoEnabled bool
 	AutoTime    string
+	// Proxy 显式出口（http:// / https:// / socks5://）。空 = 不显式设置。
+	Proxy string
+	// ProxyFromEnv 是否沿用环境变量里的 HTTP(S)_PROXY。false = 只认 Proxy 字段。
+	// 默认 true（保持既有行为：不配任何东西时仍然走 ProxyFromEnvironment）。
+	ProxyFromEnv bool
+	// Mirror 资产下载镜像前缀（如 https://ghfast.top/）。空 = 直连。
+	// **只作用于资产下载**：Release 元数据永远直连 api.github.com，摘要校验不变。
+	Mirror string
 }
 
 // Status is safe to expose through the authenticated panel API.
@@ -85,6 +97,15 @@ type Status struct {
 	Installing      bool   `json:"installing"`
 	AutoEnabled     bool   `json:"auto_enabled"`
 	AutoTime        string `json:"auto_time"`
+	// 当前生效的下载通道（面板展示 + 排障第一眼）：direct / proxy / mirror+proxy。
+	Channel string `json:"channel"`
+	// ProxyHost 生效代理的主机:端口（不含凭据）；空 = 未用代理。
+	ProxyHost string `json:"proxy_host,omitempty"`
+	// Mirror 生效的镜像前缀；空 = 直连 GitHub。
+	Mirror string `json:"mirror,omitempty"`
+	// LastErrorKind 上次失败的网络类目（dns/connect/tls/header-timeout/body-stall/
+	// checksum/http/unknown），供面板给出对应建议动作。
+	LastErrorKind string `json:"last_error_kind,omitempty"`
 }
 
 type release struct {
@@ -142,6 +163,20 @@ func New(version, repository, configPath string, settings Settings) *Manager {
 	if settings.AutoTime == "" {
 		settings.AutoTime = "04:00"
 	}
+	// 缺省沿用环境变量代理（issue #198 记录的既有行为）；显式 false 才关闭。
+	if !settings.ProxyFromEnv && strings.TrimSpace(settings.Proxy) == "" {
+		// 调用方没表态时 Settings.ProxyFromEnv 是零值 false，但历史行为是「读环境
+		// 变量」——由 main 侧显式传值区分（见 cmd/server）。这里只在两者都为空时
+		// 保守地当作「未配置」，不改变 transport() 的判定（它读的是最终 Settings）。
+	}
+	if err := validateProxy(settings.Proxy); err != nil {
+		log.Printf("WARN: [updater] update.proxy 配置不合法，已忽略：%v", err)
+		settings.Proxy = ""
+	}
+	if err := validateMirror(settings.Mirror); err != nil {
+		log.Printf("WARN: [updater] update.mirror 配置不合法，已忽略：%v", err)
+		settings.Mirror = ""
+	}
 	m := &Manager{
 		version:    strings.TrimPrefix(version, "v"),
 		repository: repository,
@@ -157,6 +192,7 @@ func New(version, repository, configPath string, settings Settings) *Manager {
 			AutoTime:       settings.AutoTime,
 		},
 	}
+	m.applyChannelStatusLocked()
 	_, m.status.CurrentKnown = parseVersion(m.version)
 	m.status.CanInstall = m.canInstallLocked()
 	if executable != "" {
@@ -208,11 +244,57 @@ func (m *Manager) Configure(settings Settings) {
 	if settings.AutoTime == "" {
 		settings.AutoTime = "04:00"
 	}
+	if err := validateProxy(settings.Proxy); err != nil {
+		log.Printf("WARN: [updater] update.proxy 配置不合法，沿用上一份：%v", err)
+		m.mu.RLock()
+		settings.Proxy = m.settings.Proxy
+		m.mu.RUnlock()
+	}
+	if err := validateMirror(settings.Mirror); err != nil {
+		log.Printf("WARN: [updater] update.mirror 配置不合法，沿用上一份：%v", err)
+		m.mu.RLock()
+		settings.Mirror = m.settings.Mirror
+		m.mu.RUnlock()
+	}
 	m.mu.Lock()
+	prevChannel := m.status.Channel
 	m.settings = settings
 	m.status.AutoEnabled = settings.AutoEnabled
 	m.status.AutoTime = settings.AutoTime
+	m.applyChannelStatusLocked()
+	newChannel := m.status.Channel
 	m.mu.Unlock()
+	// 通道变了要留一行：下次自动安装失败时，先确认是不是刚换了出口。
+	if prevChannel != newChannel {
+		log.Printf("[updater] 下载通道切换：%s → %s", prevChannel, newChannel)
+	}
+}
+
+// applyChannelStatusLocked 把当前生效通道写进 status（调用方须持 m.mu）。
+func (m *Manager) applyChannelStatusLocked() {
+	s := m.settings
+	proxy := strings.TrimSpace(s.Proxy)
+	mirror := mirrorPrefix(s.Mirror)
+	proxyHost := ""
+	if proxy != "" {
+		if u, err := url.Parse(proxy); err == nil {
+			proxyHost = u.Host
+		}
+	}
+	switch {
+	case mirror != "" && proxyHost != "":
+		m.status.Channel = "mirror+proxy"
+	case mirror != "":
+		m.status.Channel = "mirror"
+	case proxyHost != "":
+		m.status.Channel = "proxy"
+	case !s.ProxyFromEnv:
+		m.status.Channel = "direct"
+	default:
+		m.status.Channel = "direct(env)"
+	}
+	m.status.ProxyHost = proxyHost
+	m.status.Mirror = mirror
 }
 
 // Status returns a consistent snapshot for the panel.
@@ -289,9 +371,10 @@ func (m *Manager) fetchReleases(ctx context.Context) ([]release, error) {
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 		req.Header.Set("User-Agent", "workbuddy2api-panel-updater")
-		resp, err := m.client.Do(req)
+		// 按当前设置构造客户端（代理可热生效，见 channel.go）。
+		resp, err := m.httpClient(30 * time.Second).Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("查询 GitHub Release 失败: %w", err)
+			return nil, fmt.Errorf("查询 GitHub Release 失败: %w", m.classifyInto(err))
 		}
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -363,43 +446,20 @@ func (m *Manager) Install(ctx context.Context) (err error) {
 	if asset == nil {
 		return fmt.Errorf("Release 缺少当前平台文件 %s", assetName)
 	}
-	assetURL, err := url.Parse(asset.BrowserDownloadURL)
-	if err != nil || !isTrustedGitHubURL(assetURL, true) {
-		return errors.New("Release 下载地址不是受信任的 GitHub HTTPS 地址")
-	}
-	if asset.Size <= 0 || asset.Size > maxArchiveSize {
-		return fmt.Errorf("Release 文件大小异常: %d", asset.Size)
-	}
-	if !hasSHA256Digest(asset.Digest) {
-		return errors.New("Release 未提供有效 SHA-256 摘要，已取消安装")
-	}
-
-	dir := filepath.Dir(m.executable)
-	archiveFile, err := os.CreateTemp(dir, ".wb2api-release-*.zip")
+	// 配了镜像就把前缀套在原始 browser_download_url 之前；信任判据相应放宽一条
+	// 「镜像主机」，且**只放宽初始 URL**（重定向仍只认 GitHub 或该镜像）。
+	// 下载 + 摘要校验整体在 fetchAsset 里（测试可以直接调它，不必真的替换二进制）。
+	archivePath, cleanupArchive, err := m.fetchAsset(ctx, asset)
 	if err != nil {
-		return fmt.Errorf("创建下载临时文件: %w", err)
-	}
-	archivePath := archiveFile.Name()
-	defer os.Remove(archivePath)
-	if err := m.downloadAsset(ctx, asset, archiveFile); err != nil {
-		archiveFile.Close()
 		return err
 	}
-	if err := archiveFile.Sync(); err != nil {
-		archiveFile.Close()
-		return fmt.Errorf("同步下载文件: %w", err)
-	}
-	if err := archiveFile.Close(); err != nil {
-		return fmt.Errorf("关闭下载文件: %w", err)
-	}
-	if err := verifySHA256(archivePath, strings.TrimPrefix(asset.Digest, "sha256:")); err != nil {
-		return err
-	}
+	defer cleanupArchive()
 
 	expectedBinary := "wb2api"
 	if runtime.GOOS == "windows" {
 		expectedBinary += ".exe"
 	}
+	dir := filepath.Dir(m.executable)
 	stageFile, err := os.CreateTemp(dir, ".wb2api-stage-*"+filepath.Ext(expectedBinary))
 	if err != nil {
 		return fmt.Errorf("创建更新暂存文件: %w", err)
@@ -483,38 +543,81 @@ func (m *Manager) armInstallWatchdog() {
 	})
 }
 
+// fetchAsset 校验 Release 资产的下载地址、大小与摘要，并把文件下到程序目录旁的
+// 临时文件；成功返回临时文件路径与清理函数。
+//
+// 单独成方法有两个理由：
+//  1. 测试可以直接覆盖「镜像地址拼接 + 摘要校验」这两件最容易出错的事，而不必让
+//     Install 走到替换二进制/重启（那一步会 exec 自己，在测试里既慢又危险）；
+//  2. 摘要是**唯一**阻止「镜像投毒」的闸门，把它和安装流程分开写，读代码时更容易
+//     确认它没被绕过。
+func (m *Manager) fetchAsset(ctx context.Context, asset *releaseAsset) (string, func(), error) {
+	fetchURL := assetFetchURL(asset.BrowserDownloadURL, m.settingsSnapshot().Mirror)
+	assetURL, err := url.Parse(fetchURL)
+	if err != nil || !m.hostTrusted(assetURL, true) {
+		return "", func() {}, fmt.Errorf("Release 下载地址不受信任：%s（镜像需在 https://host/ 前缀且主机与 update.mirror 一致）", fetchURL)
+	}
+	if asset.Size <= 0 || asset.Size > maxArchiveSize {
+		return "", func() {}, fmt.Errorf("Release 文件大小异常: %d", asset.Size)
+	}
+	if !hasSHA256Digest(asset.Digest) {
+		return "", func() {}, errors.New("Release 未提供有效 SHA-256 摘要，已取消安装")
+	}
+
+	dir := filepath.Dir(m.executable)
+	archiveFile, err := os.CreateTemp(dir, ".wb2api-release-*.zip")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("创建下载临时文件: %w", err)
+	}
+	archivePath := archiveFile.Name()
+	cleanup := func() { os.Remove(archivePath) }
+	if err := m.downloadAsset(ctx, asset, archiveFile); err != nil {
+		archiveFile.Close()
+		return "", func() {}, err
+	}
+	if err := archiveFile.Sync(); err != nil {
+		archiveFile.Close()
+		return "", func() {}, fmt.Errorf("同步下载文件: %w", err)
+	}
+	if err := archiveFile.Close(); err != nil {
+		return "", func() {}, fmt.Errorf("关闭下载文件: %w", err)
+	}
+	if err := verifySHA256(archivePath, strings.TrimPrefix(asset.Digest, "sha256:")); err != nil {
+		m.mu.Lock()
+		m.status.LastErrorKind = kindChecksum
+		m.mu.Unlock()
+		return "", func() {}, fmt.Errorf("%w（[%s] %s）", err, kindChecksum, adviceFor(kindChecksum))
+	}
+	return archivePath, cleanup, nil
+}
+
 func (m *Manager) downloadAsset(ctx context.Context, asset *releaseAsset, dst io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.BrowserDownloadURL, nil)
+	fetchURL := assetFetchURL(asset.BrowserDownloadURL, m.settingsSnapshot().Mirror)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", "workbuddy2api-panel-updater")
-	baseClient := m.client
-	if baseClient == nil {
-		baseClient = &http.Client{Timeout: 30 * time.Second}
-	}
-	client := *baseClient
-	// 整体 Client.Timeout 覆盖「连接到读完响应体」全程：更新包上限 300MB，慢网下
-	// 30s 必超时。下载改为无整体超时 + 两级守卫：响应头限时（Transport）与「N 秒
-	// 无新字节」卡死守卫（stallGuard）——只要数据在推进就允许慢慢下。
-	client.Timeout = 0
+	client := m.httpClient(0)
 	client.Transport = withHeaderTimeout(client.Transport)
+	// 镜像模式下重定向只允许回 GitHub 官方域或该镜像自身主机。
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return errors.New("下载更新文件重定向次数过多")
 		}
-		if !isTrustedGitHubURL(req.URL, false) {
-			return errors.New("下载更新文件重定向到非 GitHub 官方地址")
+		if !m.redirectTrusted(req.URL) {
+			return errors.New("下载更新文件重定向到非官方/非镜像地址")
 		}
 		return nil
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("下载更新文件失败: %w", err)
+		return fmt.Errorf("下载更新文件失败: %w", m.classifyInto(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载更新文件失败: HTTP %d", resp.StatusCode)
+		err := fmt.Errorf("下载更新文件失败: HTTP %d（镜像：%s）", resp.StatusCode, fetchURL)
+		return err
 	}
 	if resp.ContentLength > maxArchiveSize {
 		return errors.New("下载文件超过大小限制")
@@ -524,7 +627,15 @@ func (m *Manager) downloadAsset(ctx context.Context, asset *releaseAsset, dst io
 	defer guard.timer.Stop()
 	n, err := io.Copy(dst, io.LimitReader(guard, maxArchiveSize+1))
 	if err != nil {
-		return fmt.Errorf("下载更新文件失败（中断或 %.0fs 无进展）: %w", downloadStallWindow.Seconds(), err)
+		kind := kindBodyStall
+		if k := kindOf(err); k != "" && k != kindUnknown {
+			kind = k
+		}
+		m.mu.Lock()
+		m.status.LastErrorKind = kind
+		m.mu.Unlock()
+		return fmt.Errorf("下载更新文件失败（中断或 %.0fs 无进展）: %w（[%s] %s）",
+			downloadStallWindow.Seconds(), err, kind, adviceFor(kind))
 	}
 	if n > maxArchiveSize {
 		return errors.New("下载文件超过大小限制")

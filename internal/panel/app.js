@@ -760,6 +760,74 @@ function renderUpdateStatus(update) {
   $('btnUpdateInstall').disabled = updateBusy || !!update.installing;
   $('btnUpdateRelease').hidden = (!update.update_available && !unknown) || !!update.can_install || !update.release_url;
   $('btnUpdateCheck').disabled = updateBusy || !!update.installing;
+  renderUpdateChannel(update);
+}
+
+// renderUpdateChannel 展示「更新走哪条通道」与上次失败的归因（issue #198）。
+//
+// 现场痛点：api.github.com 通、release-assets 被拦时，面板只显示一句原始超时文本，
+// 用户既不知道自己有没有走代理，也不知道下一步该配什么。这里把通道名与类目直接
+// 摆出来，并把类目翻成一句人话建议。
+const UPDATE_CHANNEL_LABEL = {
+  'direct': '直连（已关闭环境变量代理）',
+  'direct(env)': '直连（跟随环境变量）',
+  'proxy': '代理',
+  'mirror': '镜像',
+  'mirror+proxy': '镜像 + 代理',
+};
+const UPDATE_ERROR_ADVICE = {
+  'dns': '域名解析失败：检查容器 DNS（可用 dns_servers）与出站策略。',
+  'connect': 'TCP 连不上：出站被拦或网络不可达；可配「更新代理」或「镜像前缀」绕行。',
+  'tls': 'TLS 握手/证书失败：常见于中间设备劫持或系统 CA 过期；先试镜像。',
+  'header-timeout': '等响应头超时：出站到 release-assets 很可能被拦（api.github.com 往往仍通）；配代理或镜像即可。',
+  'body-stall': '下载中途停滞：链路抖动或镜像限速；换镜像或配代理。',
+  'checksum': '摘要/尺寸不符：下载内容被中间层改写；换回直连或换可信镜像（不要放宽校验）。',
+  'http': '对方返回非 200：镜像不可用或前缀路径不对；检查镜像前缀。',
+  'proxy-config': '代理地址不合法；只支持 http、https、socks5 三种协议。',
+  'mirror-config': '镜像前缀不合法；需要 http 或 https 加主机名加斜杠的形式。',
+};
+function renderUpdateChannel(update) {
+  const el = $('updateChannel');
+  if (!el) return;
+  const bits = ['通道：' + (UPDATE_CHANNEL_LABEL[update.channel] || update.channel || '未知')];
+  if (update.proxy_host) bits.push('代理 ' + update.proxy_host);
+  if (update.mirror) bits.push('镜像 ' + update.mirror);
+  el.textContent = bits.join(' · ');
+  const advice = UPDATE_ERROR_ADVICE[update.last_error_kind];
+  if (advice) {
+    el.textContent += ' ｜ 上次失败[' + update.last_error_kind + ']：' + advice;
+    el.style.color = 'var(--warn)';
+  } else {
+    el.style.color = '';
+  }
+}
+
+// 测试连通性：分别探「版本元数据」与「资产下载」两条路，把结果逐行摆出来。
+// 检查更新只回答「有没有新版本」，通道坏的时候它给不出「坏在哪一段」。
+async function probeUpdateChannel() {
+  const button = $('btnUpdateProbe');
+  const out = $('updateProbeOut');
+  button.disabled = true;
+  button.textContent = '探测中…';
+  out.hidden = false;
+  out.textContent = '正在探测…';
+  try {
+    const r = await api('update/probe', { method: 'POST' });
+    const rows = [r.meta, r.asset].filter(Boolean).map(p => {
+      const state = p.ok ? '通' : ('失败[' + (p.kind || 'unknown') + ']');
+      const extra = p.ok ? ('HTTP ' + p.status) : (p.error || '');
+      return p.target + '：' + state + ' · ' + p.elapsed_ms + 'ms · ' + extra;
+    });
+    out.innerHTML = rows.map(t => '<div>' + esc(t) + '</div>').join('');
+    const advice = UPDATE_ERROR_ADVICE[(r.meta && r.meta.kind) || (r.asset && r.asset.kind)];
+    if (advice) out.innerHTML += '<div style="color:var(--warn)">' + esc(advice) + '</div>';
+    if (r.update) renderUpdateStatus(r.update);
+  } catch (e) {
+    out.textContent = '探测失败：' + e.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = '测试连通性';
+  }
 }
 
 async function checkForUpdates() {
@@ -810,6 +878,7 @@ function openLatestRelease() {
 }
 
 if ($('btnUpdateCheck')) $('btnUpdateCheck').onclick = checkForUpdates;
+if ($('btnUpdateProbe')) $('btnUpdateProbe').onclick = probeUpdateChannel;
 if ($('btnUpdateInstall')) $('btnUpdateInstall').onclick = installUpdate;
 if ($('btnUpdateRelease')) $('btnUpdateRelease').onclick = openLatestRelease;
 if ($('navUpdate')) $('navUpdate').onclick = () => {
@@ -1826,6 +1895,8 @@ const CFG_MAP = {
   listen: ['listen'], api_key: ['api_key'],
   package_detail_limit: ['panel', 'package_detail_limit'],
   update_auto_enabled: ['update', 'auto_enabled'], update_auto_time: ['update', 'auto_time'],
+  update_proxy: ['update', 'proxy'], update_mirror: ['update', 'mirror'],
+  update_proxy_from_env: ['update', 'proxy_from_env'],
   poll_interval_sec: ['panel', 'poll_interval_sec'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'], growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
