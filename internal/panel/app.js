@@ -4426,10 +4426,10 @@ function remarkFormRows() {
   // key = uid 前 8 位（备注映射的键）；uid 保留全值，分组要打真接口按完整 uid 走；
   // inPool=false 的行是「账号已不在池里、但本机还留着备注」的孤儿，只能改备注。
   const rows = ((overviewData && overviewData.accounts) || [])
-    .map(s => ({ key: remarkKey(s.uid), uid: s.uid, who: s.nickname || remarkKey(s.uid), group: s.group || '', scope: s.pool_scope || 'text', inPool: true }))
+    .map(s => ({ key: remarkKey(s.uid), uid: s.uid, who: s.nickname || remarkKey(s.uid), group: s.group || '', inPool: true }))
     .filter(r => r.key);
   for (const k of Object.keys(remarksAll())) {
-    if (!rows.some(r => r.key === k)) rows.push({ key: k, uid: '', who: k, group: '', scope: 'text', inPool: false });
+    if (!rows.some(r => r.key === k)) rows.push({ key: k, uid: '', who: k, group: '', inPool: false });
   }
   return rows;
 }
@@ -4437,9 +4437,6 @@ function remarkFormRows() {
 /* 分组编辑的原始值（保存时只提交真正改动过的行，避免「保存备注」顺手把几十个账号
    的分组各打一次接口）。 */
 let remarkGroupOrig = {};
-/* 号池标注的原始值。与 group 分开记：两者是不同接口、不同语义（scope 参与选号，
-   group 纯管理），改动互不影响，混在一个 map 里会让「只改了号池」也去提交分组。 */
-let remarkScopeOrig = {};
 /* onlyUID 非空时只渲染该账号一行（账号池行内「备注」按钮走这条），避免为改一个号
    在几十行里翻找。 */
 function renderRemarkBody(onlyUID) {
@@ -4451,16 +4448,12 @@ function renderRemarkBody(onlyUID) {
     rows = rows.filter(r => r.key === k);
   }
   remarkGroupOrig = {};
-  remarkScopeOrig = {};
-  rows.forEach(r => { if (r.inPool) { remarkGroupOrig[r.uid] = r.group; remarkScopeOrig[r.uid] = r.scope; } });
+  rows.forEach(r => { if (r.inPool) remarkGroupOrig[r.uid] = r.group; });
   box.innerHTML = rows.length
     ? rows.map(r => '<div class="rm-row"><span class="rm-who" title="' + esc(r.who) + '">' + esc(r.who) + '</span>' +
         '<input type="text" data-uid="' + esc(r.key) + '" value="' + esc(remarksAll()[r.key] || '') + '" placeholder="备注（留空即清除）" maxlength="24">' +
         (r.inPool
-          ? '<input type="text" data-guid="' + esc(r.uid) + '" value="' + esc(r.group) + '" placeholder="分组（留空即未分组）" maxlength="24">' +
-            '<select data-suid="' + esc(r.uid) + '" title="号池分区：开启 pool.separate_text_media 后文本对话只选 text 号、图片/视频只选 media 号">' +
-            ['text', 'media'].map(v => '<option value="' + v + '"' + (r.scope === v ? ' selected' : '') + '>' +
-              (v === 'media' ? '媒体号池' : '文本号池') + '</option>').join('') + '</select>'
+          ? '<input type="text" data-guid="' + esc(r.uid) + '" value="' + esc(r.group) + '" placeholder="分组（留空即未分组）" maxlength="24">'
           : '<input type="text" value="（账号已不在池里）" disabled>') +
         '</div>').join('')
     : '<div class="empty">暂无账号：先在「账号池」加载一次账号列表。</div>';
@@ -4485,12 +4478,6 @@ async function saveRemarkForm() {
     const uid = inp.getAttribute('data-guid'), v = inp.value.trim();
     if ((remarkGroupOrig[uid] || '') !== v) changed.push([uid, v]);
   });
-  // 号池标注（服务端字段，参与选号）：同样只提交改动过的行。
-  const scopeChanged = [];
-  document.querySelectorAll('#remarkBody select[data-suid]').forEach(sel => {
-    const uid = sel.getAttribute('data-suid'), v = sel.value;
-    if ((remarkScopeOrig[uid] || 'text') !== v) scopeChanged.push([uid, v]);
-  });
   closeRemarks();
   let ok = 0;
   const bad = [];
@@ -4498,20 +4485,12 @@ async function saveRemarkForm() {
     try { await api('accounts/' + encodeURIComponent(uid) + '/group', { method: 'POST', body: JSON.stringify({ group }) }); ok++; }
     catch (e) { bad.push(uid.slice(0, 8) + '：' + e.message); }
   }
-  let scopeOk = 0;
-  for (const [uid, scope] of scopeChanged) {
-    try { await api('accounts/' + encodeURIComponent(uid) + '/scope', { method: 'POST', body: JSON.stringify({ scope }) }); scopeOk++; }
-    catch (e) { bad.push(uid.slice(0, 8) + '：' + e.message); }
-  }
   if (view === 'accounts') loadOverview(true);
   else if (view === 'usage' && usageData) renderUsage(usageData);
-  if (changed.length || scopeChanged.length) {
-    const parts = [];
-    if (changed.length) parts.push('分组已更新 ' + ok + ' 个');
-    if (scopeChanged.length) parts.push('号池已更新 ' + scopeOk + ' 个');
+  if (changed.length) {
     const head = bad.length
-      ? parts.join('、') + '，失败 ' + bad.length + ' 个（' + bad[0] + '）'
-      : parts.join('、');
+      ? '分组已更新 ' + ok + ' 个，失败 ' + bad.length + ' 个（' + bad[0] + '）'
+      : '分组已更新 ' + ok + ' 个';
     toast(head + (saved ? '' : '；备注未能写入浏览器存储（隐私模式或空间已满），刷新后会丢失'), bad.length || !saved ? 'err' : 'ok');
   } else {
     toast(saved ? '备注已保存（仅本机浏览器）' : '备注未能写入浏览器存储（隐私模式或空间已满），刷新后会丢失', saved ? '' : 'err');
@@ -5682,16 +5661,10 @@ $('proxyImport').onclick = async () => {
   try {
     const data = await api('proxies', { method: 'POST', body: JSON.stringify({ lines }) });
     const rows = data.results || [];
-    // unsupported 单列：那些是「认得出来、但本网关传输层不解析」的协议（ss/vmess/
-    // trojan…）。既不该算作无效（用户没写错），也不该回填输入框（整段订阅回填没
-    // 意义），只把原因说清楚。
-    const skipped = rows.filter(r => r.status === 'unsupported');
-    $('proxyImportResults').textContent = '添加 ' + rows.filter(r => r.status === 'added').length + ' 个 · 重复 ' + rows.filter(r => r.status === 'duplicate').length +
-      ' 个 · 不支持 ' + skipped.length + ' 个 · 无效 ' + rows.filter(r => r.status === 'invalid').length + ' 个' +
-      skipped.map(r => '\n' + (r.name || ('第 ' + r.line + ' 行')) + '：' + r.error).join('') +
+    $('proxyImportResults').textContent = '添加 ' + rows.filter(r => r.status === 'added').length + ' 个 · 重复 ' + rows.filter(r => r.status === 'duplicate').length + ' 个 · 无效 ' + rows.filter(r => r.status === 'invalid').length + ' 个' +
       rows.filter(r => r.status === 'invalid').map(r => '\n第 ' + r.line + ' 行：' + r.error).join('');
     const inputLines = lines.split('\n');
-    $('proxyLines').value = rows.filter(r => r.status === 'invalid').map(r => inputLines[r.line - 1] || '').join('\n');
+    $('proxyLines').value = rows.filter(r => r.status === 'invalid').map(r => inputLines[r.line - 1]).join('\n');
     await loadProxies();
   } catch (e) { toast('添加失败：' + e.message, 'err'); }
   finally { button.disabled = false; }

@@ -13,59 +13,44 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
 
-// Pick 单一选号入口（无请求级轮换、无 realm 过滤、不限定号池，模型感知缺省账号级）。
-// 需要请求级轮换（tried）/ 分池（realm）/ 号池分区（scope）时用
-// PickExcludingForRealmScope。
+// Pick 单一选号入口（无请求级轮换、无 realm 过滤，模型感知缺省账号级）。
+// 需要请求级轮换（tried）或分池（realm）时用 PickExcludingForRealm。
 func (p *Pool) Pick() *auth.Auth {
-	return p.pick(nil, "", "", "")
+	return p.pick(nil, "", "")
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
 // 挑选策略：healthy 账号中按权重取前 5 名，再在 Top5 内按同一权重加权随机抽签，
 // 意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
-	return p.pick(tried, "", "", "")
+	return p.pick(tried, "", "")
 }
 
 // PickExcludingForModel 模型感知选号：等同 PickExcluding，但对「6004 模型级冷却中的
 // 账号」进行模型豁免——请求模型与其 trigger 模型不同时视为可用（issue #31）。
 // reqModel 为空时即普通 PickExcluding（不影响既有调用语义）。
 func (p *Pool) PickExcludingForModel(tried map[string]bool, reqModel string) *auth.Auth {
-	return p.pick(tried, reqModel, "", "")
+	return p.pick(tried, reqModel, "")
 }
 
 // PickExcludingForRealm 模型感知 + 分池选号：候选集先按 Realm()==realm 过滤
 // （realm 空 = 不过滤，退化为 PickExcludingForModel），再按模型健康口径判定。
 // 供 handler 在 global/cn 双域下分流（global 模型请求只路由 global 账号）。
 func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm string) *auth.Auth {
-	return p.pick(tried, reqModel, realm, "")
-}
-
-// PickExcludingForRealmScope 在 PickExcludingForRealm 之上叠加**号池分区**过滤
-// （scope.go）：scope 为空则完全等价于 PickExcludingForRealm（零回归），非空且分区
-// 开启时候选必须属于该号池。
-//
-// 调用方按请求性质传池：文本类（对话 / Responses / embeddings）传 ScopeText，
-// 图片 / 视频传 ScopeMedia。分区关闭时这个参数被忽略——这是「默认不改变任何行为」
-// 的实现方式，也是所有既有调用点不必改签名就能继续工作的原因。
-func (p *Pool) PickExcludingForRealmScope(tried map[string]bool, reqModel, realm, scope string) *auth.Auth {
-	return p.pick(tried, reqModel, realm, scope)
+	return p.pick(tried, reqModel, realm)
 }
 
 // pick 在 healthy 候选集中按权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
 // realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。
-// scope 非空且分区开启时再叠加号池谓词（scope.go）——**在所有可用性判定之后**，
-// 与选号策略同层：分区决定「谁能接」，不改变「谁健康」的判据。
-func (p *Pool) pick(tried map[string]bool, reqModel, realm, scope string) *auth.Auth {
+func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
 	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }
 	// 不健康 / 在途占满 / 保留积分停牌：都不接单（判据统一在 Pool.selectable；
 	// reqModel 非空时用 healthyForModel 口径）。
-	scopeOK := func(e *entry) bool { return p.allowsScopeLocked(e, scope) }
-	selectableOf := func(e *entry) bool { return realmOK(e) && scopeOK(e) && p.selectable(e, now, reqModel) }
+	selectableOf := func(e *entry) bool { return realmOK(e) && p.selectable(e, now, reqModel) }
 	// floorBlocked 积分保底拦截判定（实现在 floorBlockedForRealmModel，与粘性路径共用）：
 	// 触底 + 收费（本地实测台账 或 上游目录倍率）即拦；免费/未知倍率不受限。
 	floorBlocked := func(e *entry) bool { return p.floorBlockedForRealmModel(e, reqModel, realm, now) }
@@ -89,7 +74,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm, scope string) *auth.
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel, scope)
+		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
 	}
 	// 账号优先级（issue #62）：配了优先级的号构成「先烧层」，层内有号可用时其余号一律
 	// 不接单——「优先消耗某个账号的余额」是一条硬语义，加权排序做不到（排序只改抽签
@@ -348,7 +333,7 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 // 这里，若兜底不看保底，触底号会被「捞回来」继续接收费模型——表现为同一条
 // floor WARN 反复刷同一个号（实测：credits=1 < floor=150 仍持续中选）。
 // 兜底是**最后一道**选号路径，保底在它之前挡不住就等于没挡。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model, scope string) *auth.Auth {
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -356,9 +341,6 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		}
 		if realm != "" && e.a.Realm() != realm {
 			continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底
-		}
-		if !p.allowsScopeLocked(e, scope) {
-			continue // 号池分区：兜底是最后一道选号路径，越界号同样不能进来
 		}
 		if e.disabled || e.paused {
 			continue // 禁用/暂停选号的账号永不参与兜底

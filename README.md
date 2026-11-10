@@ -273,7 +273,6 @@ HTTP/HTTPS 使用标准代理传输；`socks5` 在本机解析目标域名，`so
 | PUT | `/panel/api/proxies/health` | 保存 `url`、`interval_seconds`、`timeout_seconds`、`failure_threshold`、`success_threshold` |
 | PUT | `/panel/api/accounts/{uid}/proxy` | 保存 `{"mode":"random"}`、`{"mode":"direct"}` 或 `{"mode":"fixed","proxy_id":"..."}` |
 | PUT | `/panel/api/proxies/realm/{realm}` | 同上格式，保存 `cn` / `global` 的分区默认出口 |
-| POST | `/panel/api/accounts/{uid}/scope` | 保存 `{"scope":"text"}` 或 `{"scope":"media"}`，号池分区标注（见「号池分区」） |
 
 ### 订阅内容直接导入
 
@@ -286,19 +285,6 @@ HTTP/HTTPS 使用标准代理传输；`socks5` 在本机解析目标域名，`so
 `ss` / `vmess` / `vless` / `trojan` / `hysteria2` / `tuic` 等协议**不由本网关解析**——传输层只支持 `http`/`https`/`socks5`。这些节点不会被静默丢弃：导入结果里单列「不支持 N 个」并逐条给出协议名，可操作的做法是在本机另起一个 mihomo 导出 socks5 端口，再把那个 `socks5://` 地址导入。
 
 网关**不抓取订阅 URL**：面板进程去 GET 任意外部地址是 SSRF 面（内网探测、云元数据端点），需要有独立的域名白名单与出站审计才安全。把订阅内容（或订阅返回的正文）粘进输入框即可。
-
-## 号池分区（文本 / 媒体）
-
-`pool.separate_text_media`（默认 `false`）开启后，文本对话与图片/视频生成各自只从自己的号池里选号。账号的号池标注在面板「账号池 → 备注」对话框里逐号选择，接口是 `POST /panel/api/accounts/{uid}/scope`。
-
-为什么要分：两类请求在上游是两套风控口径，同一个号既对话又画图时，画图侧被判异常会**连坐文本侧**——而文本侧是日常主力。分区后互不污染。
-
-边界说清楚：
-
-- 标注缺省是 **text**（未标注一律按文本号处理）。刻意保守：老部署升级当天不会因为分区打开而让画图全部 403。
-- 分区只在**已过全部可用性判定**的候选里过滤——健康、冷却、在途上限、积分保底、成本分层、账号优先级全部先于它生效，与选号策略同层。
-- 绕过选号的几条路径（会话粘性绑定号、面板钉号、重试链沿用的账号）也逐个再校验一次。只在选号处过滤等于给媒体号留后门。
-- 代价：两边的可用号都变少。号不多时开了反而更容易 503，所以默认关。
 
 ## 额度窗口探针
 

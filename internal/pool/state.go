@@ -517,24 +517,10 @@ func (p *Pool) CapacityForModel(model, realm string) (modelAvailable, poolAvaila
 // 这是粘性能"换得动"的关键：绑定只记 uid，若只按账号级 healthy 校验，
 // 被模型级限额的号（账号整体仍健康）会被持续选中直到轮换次数耗尽。
 func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
-	return p.PickByUIDForModelScope(uid, model, "")
-}
-
-// PickByUIDForModelScope 同 PickByUIDForModel，再叠加号池分区校验（scope.go）。
-//
-// 号池不匹配时返回 nil（而不是报错）：对 handler 来说「这个绑定号现在不能接这单」
-// 与「这个绑定号被 6004 限流」是同一类处置——解绑 + 回落普通轮换，路径完全复用。
-// 分区关闭 / scope 为空时行为与 PickByUIDForModel 逐字一致。
-//
-// 这是 scope.go 注释里说的「后门」之一：会话粘性直接把 uid 塞进请求，不过 pick()。
-func (p *Pool) PickByUIDForModelScope(uid, model, scope string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
-		return nil
-	}
-	if !p.allowsScopeLocked(e, scope) {
 		return nil
 	}
 	now := time.Now()
@@ -561,18 +547,10 @@ func (p *Pool) PickByUIDForModelScope(uid, model, scope string) *auth.Auth {
 // PickByUID 若 uid 当前 healthy 且未占满在途名额，返回其凭证（记录 lastUsed 防撞号）；
 // 否则返回 nil。供会话粘性路由命中校验与直取使用。
 func (p *Pool) PickByUID(uid string) *auth.Auth {
-	return p.PickByUIDScope(uid, "")
-}
-
-// PickByUIDScope 同 PickByUID，再叠加号池分区校验（不匹配返回 nil）。
-func (p *Pool) PickByUIDScope(uid, scope string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
-		return nil
-	}
-	if !p.allowsScopeLocked(e, scope) {
 		return nil
 	}
 	now := time.Now()
@@ -894,7 +872,6 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		DisabledAt:           disabledAtRFC3339(e),
 		Paused:               e.paused,
 		Group:                e.group,
-		Scope:                NormalizeScope(e.scope),
 		SuccessCount:         e.successCount,
 		ErrTotal:             e.errTotal,
 		CheckinDone:          e.lastCheckinDay == cst.Day(now),

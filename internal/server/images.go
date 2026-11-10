@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
-	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
@@ -134,7 +133,7 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	tried := map[string]bool{}
 	var lastErr error
 	for attempt := 0; attempt < imageAttempts; attempt++ {
-		a := h.cfg.Pool.PickExcludingForRealmScope(tried, bare, realm, pool.ScopeMedia)
+		a := h.cfg.Pool.PickExcludingForRealm(tried, bare, realm)
 		if a == nil {
 			break
 		}
@@ -266,7 +265,7 @@ func (h *Handler) imageGenerate(ctx context.Context, req map[string]any) ([]byte
 			lastErr = err
 			break
 		}
-		a := h.cfg.Pool.PickExcludingForRealmScope(tried, bare, realm, pool.ScopeMedia)
+		a := h.cfg.Pool.PickExcludingForRealm(tried, bare, realm)
 		if a == nil {
 			break
 		}

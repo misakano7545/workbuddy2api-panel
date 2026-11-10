@@ -162,8 +162,6 @@ func main() {
 	p.SetAccountShare(cfg.Pool.AccountShare)
 	// 选号策略（pool.selection_strategy）：weighted 缺省 / round_robin / sequential。
 	p.SetStrategy(cfg.Pool.SelectionStrategy)
-	// 号池分区（pool.scope.go）：文本 / 媒体各自选号。缺省关，开了才过滤。
-	p.SetScopeEnforced(cfg.Pool.SeparateTextMedia)
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -368,9 +366,6 @@ func main() {
 		log.Printf("补领清扫已禁用（schedule.task_sweep_enabled=false）")
 	case cfg.TaskSweepInterval > 0:
 		log.Printf("补领清扫：每 %s（只 accept 待接受的、只 claim 已达标未领的）", cfg.TaskSweepInterval)
-	}
-	if cfg.Pool.SeparateTextMedia {
-		log.Printf("号池分区已开启：文本对话只选 text 号、图片/视频只选 media 号（pool.separate_text_media）")
 	}
 	if !cfg.Schedule.WindowProbeEnabled {
 		log.Printf("额度窗口探针已禁用（schedule.window_probe_enabled=false）")
@@ -952,8 +947,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetReserveCreditsByRealm(newCfg.Pool.ReserveCreditsByRealm) // 按域覆盖热生效（issue #147）
 	p.SetAccountPriority(newCfg.Pool.AccountPriority)             // 账号优先级/占比热生效（issue #62）
 	p.SetAccountShare(newCfg.Pool.AccountShare)
-	p.SetStrategy(newCfg.Pool.SelectionStrategy)      // 选号策略热生效
-	p.SetScopeEnforced(newCfg.Pool.SeparateTextMedia) // 号池分区热生效
+	p.SetStrategy(newCfg.Pool.SelectionStrategy) // 选号策略热生效
 	sch.Reconfigure(scheduler.ScheduleParams{
 		CheckinHours:   newCfg.Schedule.CheckinHours,
 		TravelHours:    newCfg.Schedule.TravelHours,

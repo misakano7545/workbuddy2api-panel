@@ -31,7 +31,6 @@ import (
 	"strings"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
-	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/session"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
@@ -299,7 +298,7 @@ func (h *Handler) probeOnce(ctx context.Context, realm, model string, body []byt
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < webSearchPickTries; i++ {
-		a := h.cfg.Pool.PickExcludingForRealmScope(tried, model, realm, pool.ScopeText)
+		a := h.cfg.Pool.PickExcludingForRealm(tried, model, realm)
 		if a == nil {
 			break
 		}
@@ -345,7 +344,7 @@ func firstChoiceMessage(obj map[string]any) map[string]any {
 func (h *Handler) searchText(ctx context.Context, realm, model, query string) (string, []upstream.SearchResult, bool) {
 	tried := map[string]bool{}
 	for i := 0; i < webSearchPickTries; i++ {
-		a := h.cfg.Pool.PickExcludingForRealmScope(tried, model, realm, pool.ScopeText)
+		a := h.cfg.Pool.PickExcludingForRealm(tried, model, realm)
 		if a == nil {
 			break
 		}

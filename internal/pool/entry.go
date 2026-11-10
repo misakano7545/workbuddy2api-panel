@@ -132,11 +132,8 @@ type Status struct {
 	// 签到 / 活跃上报 / 保活 / 余额刷新四类保号任务。与 disabled 正交——disabled 是
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），
 	// 账号本身健康，只是暂不接流量。（吸收上游 fd835df）
-	Paused bool   `json:"paused,omitempty"`
-	Group  string `json:"group,omitempty"` // 运维分组标签（空 = 未分组），见 entry.group
-	// Scope 号池分区（text / media，见 scope.go）。恒非空（未标注归一成 text）：
-	// 面板据此显示当前落在哪个池，也据此回答「为什么这个号没被选中」。
-	Scope           string    `json:"pool_scope"`
+	Paused          bool      `json:"paused,omitempty"`
+	Group           string    `json:"group,omitempty"` // 运维分组标签（空 = 未分组），见 entry.group
 	SuccessCount    int64     `json:"success_count,omitempty"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
@@ -270,11 +267,7 @@ type entry struct {
 	paused bool
 	// group 运维自定义分组标签（面板手填，纯管理维度：不参与选号 / 计费 / 鉴权，
 	// 只用于面板按组筛选与组内批量操作）。空 = 未分组。持久化（state.json）。
-	group string
-	// scope 号池分区标签（scope.go：""/text = 文本号池，media = 媒体号池）。
-	// 与 group 的区别：group 纯管理维度，scope **参与选号**——分区强制时它决定这个号
-	// 能不能承接某类请求。缺省空串按 text 归一（保守：新导入的号默认跑文本）。
-	scope  string
+	group  string
 	reason string
 	// disabledAt 禁用时刻（零值 = 未禁用）。与 reason 配对：运维需要知道
 	// 「什么时候被禁的」——同样一句 401，是刚刚发生还是挂了一周，处置完全不同。
@@ -607,9 +600,6 @@ type stateAccount struct {
 	// CreditsExpiryBuckets 全部未来到期批次按自然日聚合。持久化后重启即可用完整
 	// 快照渲染首页卡片；恢复时惰性剔除已过期/零剩余条目。
 	CreditsExpiryBuckets []ExpiryBucket `json:"credits_expiry_buckets,omitempty"`
-	// Scope 号池分区标签（"" / text / media，见 scope.go）。与 Group 同层：本地
-	// 路由配置，不是上游事实；缺省不写（读侧归一成 text）。
-	Scope string `json:"pool_scope,omitempty"`
 	// ModelCooldowns 模型级独立冷却表（model → 冷却记录：6004 重置墙钟 / 11102
 	// 负缓存退避）。持久化：6004 对齐上游重置墙钟后单模型冷却可长达数小时，
 	// 跨重启是常态；不持久化会导致 healthyForModel 重启失忆、重新踩雷区。

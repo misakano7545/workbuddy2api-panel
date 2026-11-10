@@ -45,9 +45,6 @@ type Pool struct {
 	// 让新一轮窗口从重置那一刻起算。**持久化**——进程内冷却表是易失的，窗口记录
 	// 跟着丢就等于每次重启都错过重置时刻，正是本机制要治的那段空转。
 	windows map[string]*ModelWindow
-	// scopeEnforced 号池分区是否强制（scope.go，pool.separate_text_media）。关闭时
-	// pick 不做池过滤、CheckScope 恒放行——分区前的行为逐字不变。
-	scopeEnforced bool
 	// degradeThreshold / degradeCooldown / degradeCooldownMax 连败降权参数
 	// （SetDegrade 注入；默认值见 defaultDegrade*，issue #114）。
 	degradeThreshold   int

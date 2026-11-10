@@ -262,7 +262,6 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.accountResume)
 	// 账号分组标签（issue #159）：纯管理维度，落 state.json，供面板按组筛选与组内批量。
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/group", p.accountGroup)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/scope", p.accountScope)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.accountCheckin)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.accountBalance)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.accountRemove)
@@ -1104,39 +1103,6 @@ func (p *Panel) accountGroup(w http.ResponseWriter, r *http.Request) {
 		group = st.Group
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group": group})
-}
-
-// accountScope 设置账号的号池分区标签（body: {"scope":"text"|"media"}，空串 = 清除）。
-//
-// 与 group 的差别：group 纯管理维度，scope **参与选号**——pool.separate_text_media
-// 开启时它决定这个号能不能承接某类请求。所以这里校验取值而不是照单全收：
-// 写进一个不认识的字符串会被 NormalizeScope 悄悄归一成 text，运维以为标了媒体号、
-// 实际还是文本号，那是最难查的一类错配置。
-func (p *Panel) accountScope(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	var req struct {
-		Scope string `json:"scope"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-	switch req.Scope {
-	case "", pool.ScopeText, pool.ScopeMedia:
-	default:
-		writeErr(w, http.StatusBadRequest, "scope 只能是 \"text\" / \"media\" / 空")
-		return
-	}
-	if !p.cfg.Pool.SetScope(uid, req.Scope) {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	scope := pool.ScopeText
-	if st, ok := p.cfg.Pool.Status(uid); ok {
-		scope = st.Scope
-	}
-	log.Printf("panel: account scope uid=%s -> %s", uid, scope)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "scope": scope})
 }
 
 // accountCheckin 单号签到：DailyCheckin + 余额查询解冻（已签到等业务错误不阻塞余额刷新），
