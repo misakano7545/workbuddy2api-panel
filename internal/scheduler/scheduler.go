@@ -659,6 +659,10 @@ func (s *Scheduler) runCheckin(ctx context.Context, spread bool) {
 	plan := s.spreadPlan(taskCheckin, spread, cst.Now())
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
+	// retryUIDs 本轮「瞬时失败」的账号：本批跑完后按 checkinRetryDelays 后台补签。
+	// 上游对签到偶发返回 500 + code 10001「签到失败，请稍后重试」，而 DailyCheckin 的
+	// 内联重试只有 2s/4s——覆盖不了分钟级沉降，之前只能等 21:00 那一轮（12 小时后）。
+	var retryUIDs []string
 	for _, st := range plan.order(s.cfg.Pool.List()) {
 		if st.Disabled && !includeDisabled {
 			continue
@@ -690,36 +694,11 @@ func (s *Scheduler) runCheckin(ctx context.Context, spread bool) {
 		// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
 		// credit_floor 判定与面板额度展示的唯一数据源）。
 		if a.SupportsPersonalEndpoints() {
-			// 先查活动状态（只读）：本机 checkin_done 只记录我们自己发起的签到，用户从手机 /
-			// 官方客户端签过就看不到；上游 today_checked_in 才是权威事实。已签则直接记账跳过
-			// （省掉 21:00 那一轮注定被幂等拒绝的写调用），顺带把连登与活动截止落进日志；
-			// active=false 说明活动已结束/未开始，提前显形。**查询失败 fail-open**——照常签到
-			// （签到自身的幂等错误标记仍是兜底判据）。
-			label := logfmt.Label(st.UID, st.Nickname)
-			act, actErr := s.cfg.Upstream.GetCheckinActivityStatus(a)
-			switch {
-			case actErr != nil:
-				log.Printf("WARN: checkin %s: 活动状态查询失败（照常签到）: %v", label, actErr)
-			case !act.Active:
-				log.Printf("WARN: checkin %s: 上游签到活动当前不生效（截止 %s），仍尝试签到", label, act.EndTime)
-			}
-			if actErr == nil && act.TodayCheckedIn {
-				s.cfg.Pool.NoteCheckinDone(st.UID)
-				log.Printf("checkin %s: 上游显示今天已签到（连登 %d 天，活动至 %s）", label, act.StreakDays, act.EndTime)
-			} else if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
-				// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
-				if upstream.IsAlreadyCheckin(err) {
-					s.cfg.Pool.NoteCheckinDone(st.UID)
-					log.Printf("checkin %s: 今天已签到（幂等）", label)
-				} else {
-					log.Printf("WARN: checkin %s: %v", label, err)
-				}
-				// 其余业务错误也继续走余额查询
-			} else {
-				// 首次签到成功此前静默——排查「签到到底跑没跑」时无迹可循（幂等行只在
-				// 重复触发时出现），成功也落一行。
-				s.cfg.Pool.NoteCheckinDone(st.UID)
-				log.Printf("checkin %s: 签到成功", label)
+			done, cerr := s.checkinOne(a, st.UID)
+			if !done && cerr != nil && upstream.IsTransientBilling(cerr) {
+				// 只有「过一会儿再试可能好」的失败才值得排补签。业务拒绝（企业号、
+				// 参数错）重试必然同样失败，排进去只会每天多打几轮无效请求。
+				retryUIDs = append(retryUIDs, st.UID)
 			}
 		}
 		// 分桶查余额：配置窗口内的积分单独标记，同时记录最早未来到期批次与
@@ -740,6 +719,8 @@ func (s *Scheduler) runCheckin(ctx context.Context, spread bool) {
 		})
 	}
 	s.RunStreakBonusNow()
+	// 补签放在本批收尾之后：不阻塞主排程（后台 goroutine），且只在真有瞬时失败时启动。
+	s.startCheckinRetry(ctx, retryUIDs)
 }
 
 // RunActivityNow 立即对池内所有可用账号执行一次对话活跃上报。

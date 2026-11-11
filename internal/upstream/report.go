@@ -99,6 +99,11 @@ func isBillingProcessingErr(err error) bool {
 	return false
 }
 
+// IsTransientBilling 导出「这次计费类失败值不值得过一会儿再试」的判据，供调度器
+// 决定要不要把账号放进延后补签队列（签到本身已有 2s/4s 两次内联重试，覆盖不了
+// 上游「请稍后重试」这种需要分钟级沉降的形态）。
+func IsTransientBilling(err error) bool { return isTransientBillingErr(err) }
+
 // isTransientBillingErr 报告 err 是否值得对计费维护类调用做有界重试：
 // 上游 5xx（ErrServer，实测偶发 "code 10000 / API request failed with status
 // code: 500"）、网络层错误（非 *Error 的传输失败），以及 429「请求处理中」
