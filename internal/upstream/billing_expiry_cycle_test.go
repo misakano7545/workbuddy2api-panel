@@ -169,7 +169,14 @@ func TestGlobalExpiryDailyBonusPacks(t *testing.T) {
 	rows = append(rows, expiryRow{code: "PKG-LONG", end: time.Date(2034, 12, 23, 23, 25, 0, 0, softRateResetLoc),
 		remain: 100, deduct: true, total: 100})
 
-	remain, total, expiring, earliestAt, earliestRem, buckets := snapshotWithRows(t, rows, 168*time.Hour)
+	// 「7 天内到期」的窗口必须锚到日界，不能用固定 168h。
+	//
+	// dayAt(d) 落在每天 12:00 CST，而固定 168h 是「现在 + 7×24h」：D+7 的 12:00 是否
+	// 落在窗口内，取决于此刻在 CST 的哪个时段——12:00 之后跑能命中 7 批（207），
+	// 12:00 之前跑只能命中 6 批（177）。这个用例因此在每天 00:00–12:00 CST 必红。
+	// 锚到 dayAt(7) 之后，无论几点跑都恰好覆盖 D+1..D+7，断言 207 恒成立。
+	soon := dayAt(7).Sub(time.Now())
+	remain, total, expiring, earliestAt, earliestRem, buckets := snapshotWithRows(t, rows, soon)
 
 	if remain != int64(sumCap+100) || total != int64(30*31+100) {
 		t.Fatalf("remain/total = %d/%d want %d/%d", remain, total, int64(sumCap+100), int64(30*31+100))
