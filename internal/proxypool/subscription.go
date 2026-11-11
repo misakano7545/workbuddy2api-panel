@@ -21,6 +21,7 @@ package proxypool
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net"
 	"net/url"
 	"strconv"
@@ -124,17 +125,23 @@ func hasClashProxies(text string) bool {
 	return false
 }
 
-// isClashProxiesKey 顶层（或任意缩进）的 `proxies:` 键，且后面没有值。
+// isClashProxiesKey 顶层（或任意缩进）的 `proxies:` 键。
 //
 // 允许缩进是因为有的订阅把 proxies 放在别的结构里；`proxies: []` 这种空值的也认
 // （下面解析会得到 0 条，用户看到「没有可用节点」而不是「格式错误」）。
+// 值为**流式序列**（`proxies: [{...}, {...}]`）时同样是合法的 proxies 段——此前只认
+// 字面量 "[]"，于是这种写法整体落到 URI 行解析，产出一个既无 type 也无 server 的
+// 空条目：节点被静默丢掉，还不报错。
 func isClashProxiesKey(line string) bool {
 	t := strings.TrimSpace(line)
 	if !strings.HasPrefix(t, "proxies:") {
 		return false
 	}
 	rest := strings.TrimSpace(strings.TrimPrefix(t, "proxies:"))
-	return rest == "" || rest == "[]" || strings.HasPrefix(rest, "#")
+	if rest == "" || strings.HasPrefix(rest, "#") {
+		return true
+	}
+	return strings.HasPrefix(rest, "[")
 }
 
 // parseClashProxies 只解析 proxies: 段，其余段一概不看。
@@ -183,12 +190,21 @@ func parseClashProxies(text string) ([]SubEntry, error) {
 		indent := len(line) - len(strings.TrimLeft(line, " \t"))
 		if !inProxies {
 			if isClashProxiesKey(line) {
-				inProxies = true
-				rest := strings.TrimSpace(strings.SplitN(trimmed, ":", 2)[1])
-				if strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]") {
-					// proxies: [ {...}, {...} ] 单行流式数组（少见但合法）
-					return append(out, parseFlowArray(lineNo, rest)...), nil
+				// proxies 的值是流式序列时整段取出来单独解析（可能同一行，也可能跨行：
+				//   proxies: [{...}, {...}]
+				//   proxies: [
+				//     {...},
+				//   ]
+				// ）。块式写法（下一行起 "- name: ..."）走下面的逐行状态机，两条路径
+				// 互斥，不会重复解析。
+				if val, vl, ok := flowSequenceValue(lines, i); ok {
+					if !bracketsBalanced(val) {
+						// 未闭合的数组按错误上报：静默返回 0 条会让用户以为订阅是空的。
+						return nil, fmt.Errorf("proxies 的流式数组未闭合（第 %d 行起）", vl)
+					}
+					return append(out, parseFlowArray(vl, val)...), nil
 				}
+				inProxies = true
 			}
 			continue
 		}
@@ -232,6 +248,93 @@ func parseClashProxies(text string) ([]SubEntry, error) {
 	}
 	flush()
 	return out, nil
+}
+
+// flowSequenceValue 取出 `proxies:` 的流式序列值（`[...]`，含跨行形式），并返回其
+// 起始行号（1 起）。值不是流式序列（块式 `- name: ...`）时 ok=false，调用方走原来的
+// 逐行状态机。
+//
+// 三种真实写法都要认：
+//
+//	proxies: [{name: a, ...}, {name: b, ...}]
+//	proxies: [
+//	  {name: a, ...},
+//	]
+//	proxies:
+//	  [{name: a, ...}]
+func flowSequenceValue(lines []string, keyIdx int) (string, int, bool) {
+	rest := strings.TrimSpace(valueAfterColon(lines[keyIdx]))
+	if rest == "" {
+		// 值在后续行：跳过空行与注释行，看第一行是不是 "["。
+		for j := keyIdx + 1; j < len(lines); j++ {
+			t := strings.TrimSpace(strings.TrimRight(lines[j], "\r"))
+			if t == "" || strings.HasPrefix(t, "#") {
+				continue
+			}
+			if !strings.HasPrefix(t, "[") {
+				return "", 0, false
+			}
+			return collectFlowValue(lines, j, t), j + 1, true
+		}
+		return "", 0, false
+	}
+	if !strings.HasPrefix(rest, "[") {
+		return "", 0, false
+	}
+	return collectFlowValue(lines, keyIdx, rest), keyIdx + 1, true
+}
+
+// collectFlowValue 从 start 行开始累积，直到方括号配平（跨行时按空格拼接，跳过纯注释行）。
+func collectFlowValue(lines []string, start int, first string) string {
+	buf := first
+	if bracketsBalanced(buf) {
+		return buf
+	}
+	for j := start + 1; j < len(lines); j++ {
+		t := strings.TrimSpace(strings.TrimRight(lines[j], "\r"))
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		buf += " " + t
+		if bracketsBalanced(buf) {
+			break
+		}
+	}
+	return buf
+}
+
+// valueAfterColon 取 `key: value` 里冒号之后的部分（未去引号；只用于判形态）。
+func valueAfterColon(line string) string {
+	i := strings.Index(line, ":")
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(line[i+1:])
+}
+
+// bracketsBalanced 报告 [ ] 与 { } 是否配平，忽略引号内的括号（名字/密码里出现
+// 括号是常见的，按字符数数必然误判）。
+func bracketsBalanced(s string) bool {
+	depth := 0
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '[' || c == '{':
+			depth++
+		case c == ']' || c == '}':
+			depth--
+		}
+	}
+	return depth == 0 && quote == 0
 }
 
 // parseFlowArray 解析 `[ {...}, {...} ]` 形式的流式数组。
