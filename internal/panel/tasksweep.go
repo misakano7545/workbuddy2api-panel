@@ -6,8 +6,10 @@
 package panel
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
@@ -53,6 +55,10 @@ func (p *Panel) RunTaskSweepNow() (int, string) {
 // 领奖判据只用 progress（Task.Claimable）而不是 accept_status：后者会在回读时短暂转
 // completed 随后被整体回滚（见 autotask.go），据此领奖会误领。领奖本身幂等（重复领
 // 上游返回 already_claimed → 0 分 0 能），所以逐条失败只记 WARN 不中断，宁可多试一轮。
+//
+// 接受走 acceptPendingWithFallback（与一键完成共用同一份补偿逻辑）：清洁路径仍是
+// 「一次批量 accept」，与改动前请求序列逐字一致；只有批量整体失败时才回读列表并对
+// 仍未生效的码逐码重试。
 func (p *Panel) sweepAccount(a *auth.Auth) (accepted, claimed int, err error) {
 	label := logfmt.Label(a.UID, a.Nickname)
 	tasks, err := p.cfg.Upstream.ListTasks(a)
@@ -65,18 +71,28 @@ func (p *Panel) sweepAccount(a *auth.Auth) (accepted, claimed int, err error) {
 	}
 
 	// 端标记不同，两种口径分开提交（缺 mp 头 accept 返回 task not found）。
+	//
+	// 为什么不再直接调 AcceptTasks / AcceptTasksMP 并在失败时只记 WARN：批量接受是
+	// 「一坏全坏」——上游对整批只回一个 error，其中任一码下架 / 前置不满足 / 撞频控，
+	// 其余本来能接受的码全部停在 not_accepted。而本清扫正是「任务已达标但用户没拿到
+	// 奖励」的唯一兜底路径，一坏全坏在这里的表现就是「任务做完却永远不自动领积分」。
+	// 补偿逻辑（回读 accept_status → 逐码重试 → 上限 20 → reportGap 节流）与一键完成
+	// 共用同一个 acceptPendingWithFallback，不另写一份。
+	//
+	// RunTaskSweepNow 没有 ctx（scheduler 周期触发，取消语义是「关进程」），传
+	// context.Background()：补偿循环里 ctx.Err() 恒为 nil，靠 20 个上限收敛。
 	if codes := acceptPendingCodes(tasks); len(codes) > 0 {
-		if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
-			log.Printf("WARN: 补领清扫 %s 接受: %v", label, err)
-		} else {
-			accepted += len(codes)
+		n, notes := p.acceptPendingWithFallback(context.Background(), a, codes, false)
+		accepted += n
+		if len(notes) > 0 {
+			log.Printf("WARN: 补领清扫 %s 接受: %s", label, strings.Join(notes, "；"))
 		}
 	}
 	if codes := acceptPendingCodes(mp); len(codes) > 0 {
-		if err := p.cfg.Upstream.AcceptTasksMP(a, codes); err != nil {
-			log.Printf("WARN: 补领清扫 %s 接受(mp): %v", label, err)
-		} else {
-			accepted += len(codes)
+		n, notes := p.acceptPendingWithFallback(context.Background(), a, codes, true)
+		accepted += n
+		if len(notes) > 0 {
+			log.Printf("WARN: 补领清扫 %s 接受(mp): %s", label, strings.Join(notes, "；"))
 		}
 	}
 

@@ -1439,6 +1439,142 @@ type autoTaskRunEvent struct {
 	Completed bool // true only for an autoAction result, not batch acceptance
 }
 
+// acceptBatchFallbackLimit 批量接受失败后逐个补偿的上限。
+//
+// 取 20 的由来：当前 autoActions 共 25 项，多数任务已 accepted/locked，实测单账号
+// 一轮待接受的码通常是个位数；超过 20 个码仍全部失败，更可能是账号级问题（凭证
+// 失效、被风控、上游整体故障），继续逐个重试只会成倍放大请求量、拖长整轮节流，
+// 反而更容易触发限流。因此到上限即停，并把剩余数量如实写进结果。
+const acceptBatchFallbackLimit = 20
+
+// acceptFallbackPending 从回读的任务列表里挑出「本批 codes 中仍未 accepted」的码。
+// 只认 accept_status 仍为 not_accepted 或空串（字段缺失）的任务：批量请求虽然
+// 返回错误，上游可能已登记了其中一部分，回读能把已生效的码排除，避免重复 accept。
+// 已领/已锁定、或回读列表里已消失的码不再重试（accept 对它们没有意义）。
+// 只在原批 codes 范围内补偿：不顺手接受本轮没提交过的任务，保持调用方语义。
+func acceptFallbackPending(tasks []upstream.Task, codes []string) (pending []string, confirmed int) {
+	states := make(map[string]upstream.Task, len(tasks))
+	for i := range tasks {
+		t := tasks[i]
+		if t.TaskCode == "" {
+			continue
+		}
+		states[t.TaskCode] = t
+	}
+	seen := make(map[string]bool, len(codes))
+	pending = make([]string, 0, len(codes))
+	for _, c := range codes {
+		if c == "" || seen[c] {
+			continue
+		}
+		seen[c] = true
+		t, ok := states[c]
+		if !ok {
+			continue
+		}
+		if t.Claimed || t.AcceptStatus == "accepted" || t.AcceptStatus == "completed" {
+			confirmed++
+			continue
+		}
+		if t.Locked {
+			continue
+		}
+		if t.AcceptStatus == "not_accepted" || t.AcceptStatus == "" {
+			pending = append(pending, c)
+		}
+	}
+	return pending, confirmed
+}
+
+// acceptPendingWithFallback 提交一批待接受任务：先按原口径批量 accept；批量失败
+// 再回读列表，对仍未生效的码逐个 accept 补偿（每码之间按 reportGap 节流，最多
+// acceptBatchFallbackLimit 个，ctx 取消立即停止）。
+//
+// 为什么需要补偿：AcceptTasks / AcceptTasksMP 一次 POST 携带全部 task_codes，
+// 但上游只回一个 error——其中任意一个码下架、前置不满足或触发频控，整批就失败，
+// 其余本来可以接受的码全部保持 not_accepted。后续逐项执行会把这些任务当作未接受
+// 跳过/不计数，补领清扫也领不到奖，表现为「动作上报 200 但进度不动、积分不自动
+// 到账」。批量失败后按码拆开重试，可把「一坏全坏」收敛为「只坏那一个」。
+//
+// 返回 accepted = 上游已确认接受的码数，notes = 异常/补偿说明（正常路径为 nil）。
+// 正常路径只发一次批量请求，不产生任何额外调用，也不改变「动作事件才是进度判据」
+// 的既有语义；补偿失败同样不阻塞后续任务。
+//
+// ctx 只用于让「一键完成」在取消时停手；补领清扫没有 ctx，传 context.Background()。
+func (p *Panel) acceptPendingWithFallback(ctx context.Context, a *auth.Auth, codes []string, mp bool) (accepted int, notes []string) {
+	if len(codes) == 0 {
+		return 0, nil
+	}
+	accept := p.cfg.Upstream.AcceptTasks
+	list := p.cfg.Upstream.ListTasks
+	if mp {
+		accept = p.cfg.Upstream.AcceptTasksMP
+		list = p.cfg.Upstream.ListTasksMP
+	}
+	if err := accept(a, codes); err == nil {
+		return len(codes), nil
+	} else {
+		notes = append(notes, "批量接受失败: "+truncateStr(err.Error(), 200))
+	}
+	if ctx.Err() != nil {
+		return 0, append(notes, "上下文已取消，未逐个重试")
+	}
+	// 回读判据与 acceptWithVerifyMP 同源：只信服务端 accept_status，不信 200。
+	tasks, err := list(a)
+	if err != nil {
+		return 0, append(notes, "回读任务列表失败，未逐个重试: "+truncateStr(err.Error(), 160))
+	}
+	pending, confirmed := acceptFallbackPending(tasks, codes)
+	if len(pending) == 0 {
+		return confirmed, append(notes, "回读后没有待接受的码（批量可能已生效）")
+	}
+	totalPending := len(pending)
+	if len(pending) > acceptBatchFallbackLimit {
+		notes = append(notes, fmt.Sprintf("待补偿 %d 个，超过上限 %d，只重试前 %d 个（剩余 %d 个未重试）",
+			len(pending), acceptBatchFallbackLimit, acceptBatchFallbackLimit, len(pending)-acceptBatchFallbackLimit))
+		pending = pending[:acceptBatchFallbackLimit]
+	}
+	log.Printf("autotask %s %s: 批量接受失败，回读仍有 %d 个待接受，开始逐个补偿",
+		logfmt.Label(a.UID, a.Nickname), map[bool]string{false: "默认口径", true: "mp 口径"}[mp], totalPending)
+
+	succeeded, failed := 0, 0
+	var firstErr error
+	stopReason := ""
+	for i, c := range pending {
+		if ctx.Err() != nil {
+			stopReason = fmt.Sprintf("上下文已取消，剩余 %d 个未重试", len(pending)-i)
+			break
+		}
+		if err := accept(a, []string{c}); err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+			log.Printf("autotask %s %s: 逐个补偿失败: %v", logfmt.Label(a.UID, a.Nickname), c, err)
+		} else {
+			succeeded++
+		}
+		// 每码之间留 reportGap：补偿走的是异常路径，但仍按正常上报节奏节流，
+		// 避免逐个重试本身触发频控。
+		if !waitForContext(ctx, reportGap) {
+			stopReason = fmt.Sprintf("上下文已取消，剩余 %d 个未重试", len(pending)-i-1)
+			break
+		}
+	}
+	notes = append(notes, fmt.Sprintf("批量接受失败后逐个重试成功 %d/%d", succeeded, totalPending))
+	if failed > 0 {
+		msg := fmt.Sprintf("逐个补偿仍失败 %d 个", failed)
+		if firstErr != nil {
+			msg += ": " + truncateStr(firstErr.Error(), 160)
+		}
+		notes = append(notes, msg)
+	}
+	if stopReason != "" {
+		notes = append(notes, stopReason)
+	}
+	return confirmed + succeeded, notes
+}
+
 // runAutoAllObserved 对全量任务执行流程提供进度事件。ctx 在每个网络阶段、
 // 自动任务项开始前检查；已有上游调用本身保持原超时语义，取消后不再发起下一项。
 func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe func(autoTaskRunEvent)) []map[string]any {
@@ -1491,14 +1627,8 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 				if ctx.Err() != nil {
 					return out
 				}
-				if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
-					result := map[string]any{
-						"task_code": "(批量接受)", "status": "error",
-						"message": "接受任务失败（不阻塞后续）: " + err.Error(),
-					}
-					out = append(out, result)
-					emit(autoTaskRunEvent{Kind: "result", TaskCode: "(批量接受)", Result: result})
-				} else {
+				accepted, notes := p.acceptPendingWithFallback(ctx, a, codes, false)
+				if len(notes) == 0 {
 					result := map[string]any{
 						"task_code": "(批量接受)", "status": "accepted",
 						"message": fmt.Sprintf("已接受 %d 个任务", len(codes)),
@@ -1506,6 +1636,20 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 					out = append(out, result)
 					emit(autoTaskRunEvent{Kind: "result", TaskCode: "(批量接受)", Result: result})
 					waitForContext(ctx, reportGap)
+				} else {
+					// 批量接受是「一坏全坏」：上游对整批只回一个 error，任一码失败会让
+					// 其余可接受的码保持 not_accepted。acceptPendingWithFallback 已回读
+					// 并逐码补偿；补偿失败也不阻塞后续任务，这里只如实输出。
+					status := "error"
+					if accepted == len(codes) {
+						status = "accepted"
+					}
+					result := map[string]any{
+						"task_code": "(批量接受-补偿)", "status": status,
+						"message": strings.Join(notes, "；"),
+					}
+					out = append(out, result)
+					emit(autoTaskRunEvent{Kind: "result", TaskCode: "(批量接受-补偿)", Result: result})
 				}
 			}
 		}
@@ -1530,14 +1674,8 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 					if ctx.Err() != nil {
 						return out
 					}
-					if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes); err != nil {
-						result := map[string]any{
-							"task_code": "(批量接受-mp)", "status": "error",
-							"message": "接受小程序任务失败（不阻塞后续）: " + err.Error(),
-						}
-						out = append(out, result)
-						emit(autoTaskRunEvent{Kind: "result", TaskCode: "(批量接受-mp)", Result: result})
-					} else {
+					accepted, notes := p.acceptPendingWithFallback(ctx, a, mpCodes, true)
+					if len(notes) == 0 {
 						result := map[string]any{
 							"task_code": "(批量接受-mp)", "status": "accepted",
 							"message": fmt.Sprintf("已接受 %d 个小程序任务", len(mpCodes)),
@@ -1545,6 +1683,18 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 						out = append(out, result)
 						emit(autoTaskRunEvent{Kind: "result", TaskCode: "(批量接受-mp)", Result: result})
 						waitForContext(ctx, reportGap)
+					} else {
+						// 同阶段 0：mp 批量也是一坏全坏，共享补偿逻辑（补偿失败不阻塞后续）。
+						status := "error"
+						if accepted == len(mpCodes) {
+							status = "accepted"
+						}
+						result := map[string]any{
+							"task_code": "(批量接受-mp-补偿)", "status": status,
+							"message": strings.Join(notes, "；"),
+						}
+						out = append(out, result)
+						emit(autoTaskRunEvent{Kind: "result", TaskCode: "(批量接受-mp-补偿)", Result: result})
 					}
 				}
 			}
