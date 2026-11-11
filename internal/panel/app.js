@@ -366,6 +366,25 @@ function disabledKind(reason) {
 // 为什么余额趋势要标：这张表每一行是一条**历史余额曲线**，它不会因为账号被封
 // 而消失——但读者不知道「这条线为什么从某天起不再更新」，会把「号被封了」误读成
 // 「这段时间没怎么用」。标出来才对得上。
+// bhColorOf 余额趋势统一取色：失效账号一律用灰线，且**不占色板序号**。
+//
+// 两个要点：
+//  1. 失效号用灰 —— 与表格里 bh-dead 行的去色一致，图上也不能让死号的颜色
+//     和活号一样鲜；它已经不再更新，艳丽的线会误导人以为「还在跑」。
+//  2. 灰线**不参与色板轮转** —— 否则某个健康号会因前面多了一个死号而换色，
+//     同一账号在不同时间/不同域下颜色飘移，读者对不上。
+
+// bhIsDead 该账号当前是否已失效（禁用）。暂停**不算** —— 暂停号照常保号、
+// 余额仍在更新，只是暂不接流量，图上应按活号正常着色。
+function bhIsDead(s) {
+  const a = acctStateOf(s && s.uid);
+  return !!(a && a.disabled);
+}
+
+function bhColorOf(uid, colorIndex, isDead) {
+  if (isDead) return 'var(--ink-3)';
+  return BH_COLORS[colorIndex % BH_COLORS.length];
+}
 function acctStateOf(uid) {
   const list = (overviewData && overviewData.accounts) || [];
   return list.find(a => a && a.uid === uid) || null;
@@ -4733,8 +4752,11 @@ function renderBalanceChart(series) {
       '" text-anchor="' + (i === 0 ? 'start' : i === tickCount - 1 ? 'end' : 'middle') + '">' + esc(fmtT(t)) + '</text>';
   }
 
+  // 色板序号只按**健康系列**推进：失效号用灰线但不占号，避免健康号换色。
+  let liveIdx = 0;
   rows.forEach((s, si) => {
-    const color = BH_COLORS[si % BH_COLORS.length];
+    const dead = bhIsDead(s);
+    const color = bhColorOf(s.uid, dead ? 0 : liveIdx++, dead);
     const pts = s.points.map(p => ({ x: X(Number(p.t) * 1000), y: Y(Number(p.c)), c: Number(p.c), t: Number(p.t) * 1000, g: p.d }));
     // 平滑 <path>（monotone，不过冲 —— 见 smoothPath 注释）+ 统一线宽/线帽。
     // 线宽按**本图系列数**取档，两处折线共用同一函数，风格不会各走各的。
@@ -4889,7 +4911,8 @@ function renderDailyBars(series) {
     series.forEach((s, si) => {
       const v = (map.get(s.uid) || {})[day];
       if (v === undefined) return;
-      const color = BH_COLORS[si % BH_COLORS.length];
+      const dead = bhIsDead(s);
+      const color = bhColorOf(s.uid, si, dead);
       // 组内柱之间留 1px 缝：无缝隙时相邻两柱会被知觉成一个整体
       // （格式塔共边界效应），看不出"两根独立的柱"。
       const gap = nAcc > 1 ? 1 : 0;
@@ -5137,9 +5160,18 @@ async function loadBalance() {
       bhRealm = pickRealm(all);
     }
     renderRealmSeg(all);
-    const rows = filterRealm(all, bhRealm);
-    renderBalanceChart(rows);
-    renderDailyBars(rows);
+    // 失效账号（禁用）**不参与统计**，但保留记录单独列出。
+    //
+    // 为什么分开：禁用号的余额是历史残留（人已不能干活），混进「当前合计 / 净变化 /
+    // 消耗到账」会把死钱算成活钱，运维据此判断容量必然高估。但历史曲线本身有诊断
+    // 价值（能看出「哪天开始不更新」），所以不是删掉，而是移出统计区单独陈列。
+    // 暂停号不受影响：它照常保号、余额仍会更新，只是暂不接流量。
+    const inRealm = filterRealm(all, bhRealm);
+    const isDead = s => { const a = acctStateOf(s.uid); return !!(a && a.disabled); };
+    const rows = inRealm.filter(s => !isDead(s));
+    const deadRows = inRealm.filter(isDead);
+    renderBalanceChart(inRealm);  // 折线画全部：失效号用灰线保留历史轨迹（表格才做统计剔除）
+    renderDailyBars(inRealm);    // 同上：柱子也画全，灰线/灰柱表示已失效
     // 分域小计：同域内可加（语义成立）；**不做跨域总计**——cn 与 global 的
     // 积分不同源、不可互换，相加得出的数没有意义（见 BH_REALMS 注释）。
     let total = 0, delta = 0;
@@ -5159,8 +5191,8 @@ async function loadBalance() {
       bhCard('窗口净变化', (delta > 0 ? '+' : '') + fmtNum(delta), delta > 0 ? 'ok' : delta < 0 ? 'bad' : '') +
       bhCard('采样点数', fmtNum(rows.reduce((a, s) => a + (s.points || []).length, 0)));
     const tb = $('bhAccBody');
-    if (tb) tb.innerHTML = rows.length ? rows.map((s, i) =>
-      '<tr><td class="mark"><i class="dot" style="background:' + BH_COLORS[i % BH_COLORS.length] + '"></i></td>' +
+    const renderRow = (s, i, dead) =>
+      '<tr' + (dead ? ' class="bh-dead"' : '') + '><td class="mark"><i class="dot" style="background:' + bhColorOf(s.uid, i, dead) + '"></i></td>' +
       (() => {
         const a = acctStateOf(s.uid);
         // 账号已禁用/暂停：名字后加小标签。曲线仍展示（历史数据有意义），
@@ -5188,7 +5220,14 @@ async function loadBalance() {
                fmtFlowCell(t, mo, 'consumed', days) +
                fmtFlowCell(t, mo, 'gained', days);
       })() +
-      '<td class="num">' + (s.points || []).length + '</td></tr>').join('')
+      '<td class="num">' + (s.points || []).length + '</td></tr>';
+
+    const deadHtml = deadRows.length
+      ? '<tr class="bh-sep"><td colspan="11">已失效 ' + deadRows.length + ' 个（不计入上方统计，仅保留历史记录）</td></tr>' +
+        deadRows.map((s, i) => renderRow(s, rows.length + i, true)).join('')
+      : '';
+    const liveHtml = rows.map((s, i) => renderRow(s, i, false)).join('');
+    if (tb) tb.innerHTML = (rows.length + deadRows.length) ? (liveHtml + deadHtml)
       : '<tr><td colspan="11"><div class="empty"><div class="big">该域暂无采样</div>' +
         '切到其他域，或等待下一次余额刷新</div></td></tr>';
     renderBalanceFoot(rows, d.now, days);
