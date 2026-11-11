@@ -118,6 +118,10 @@ type Config struct {
 		// 时限）。长流式 SSE 合法时长可达分钟级，固定 5s 必然把在途请求掐成
 		// 连接重置。缺省 "30s"；"0" = 不等待直接退。改动需重启进程。
 		ShutdownTimeout string `json:"shutdown_timeout"`
+		// HeadKeepalive 等上游首帧期间向客户端补 SSE 注释帧的间隔。
+		// 缺省 "1500ms"；"0" = 关闭（回到首帧否决窗口内零字节的旧行为）。
+		// 改动需重启进程。
+		HeadKeepalive string `json:"head_keepalive"`
 		// MaxPayloadBytes 入站请求体安全上限（字节），缺省 67108864（64 MiB）。
 		// 这不是「大请求预拦截」：旧的 8 MB 紧上限因为多图/长会话被移除过（大请求
 		// 交上游自然响应）。这里只挡「大到能把进程读死」的上传——读体是 io.ReadAll
@@ -555,6 +559,8 @@ type Config struct {
 	BalanceWindowDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// HeadKeepaliveDur 解析后的首帧心跳间隔（缺省 1.5s，0 = 关闭）。
+	HeadKeepaliveDur time.Duration `json:"-"`
 	// ShutdownTimeoutDur 解析后的优雅关停窗口；0 = 不等待在途请求直接退。
 	ShutdownTimeoutDur time.Duration `json:"-"`
 	// ReloadIntervalDur 解析后的账号目录轮询间隔（issue #199）；0 = 关闭轮询。
@@ -1015,6 +1021,17 @@ func (c *Config) normalize() error {
 	}
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
+	}
+	// 首帧心跳间隔：空回落 1.5s（等上游首帧期间补 SSE 注释帧，见 headkeepalive.go）；
+	// "0" 合法（关闭，回到零字节旧行为）；负值 fail fast。
+	if c.Server.HeadKeepalive == "" {
+		c.Server.HeadKeepalive = "1500ms"
+	}
+	if c.HeadKeepaliveDur, err = time.ParseDuration(c.Server.HeadKeepalive); err != nil {
+		return fmt.Errorf("server.head_keepalive: %q %w", c.Server.HeadKeepalive, err)
+	}
+	if c.HeadKeepaliveDur < 0 {
+		return fmt.Errorf("server.head_keepalive: 负时长 %q 无意义", c.Server.HeadKeepalive)
 	}
 	// 优雅关停窗口：空回落 30s（分钟级在途 SSE 远比旧固定 5s 常见）；"0" 合法
 	//（立即退）；负值 fail fast。

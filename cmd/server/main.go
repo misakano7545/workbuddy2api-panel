@@ -570,6 +570,8 @@ func main() {
 		// 入站请求体 OOM 护栏 + 11140 连坐暂停（两处都只在启动时读，改完需重启）。
 		MaxPayloadBytes: cfg.Server.MaxPayloadBytes,
 		RestrictionHold: time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
+		// 等上游首帧期间的 SSE 注释帧间隔（server.head_keepalive，缺省 1.5s）。
+		HeadKeepalive: cfg.HeadKeepaliveDur,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
