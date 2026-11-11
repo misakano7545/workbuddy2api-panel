@@ -108,7 +108,10 @@ func snapshotWithRows(t *testing.T, rows []expiryRow, soon time.Duration) (remai
 
 func dayAt(days int) time.Time {
 	base := time.Now().In(softRateResetLoc)
-	return time.Date(base.Year(), base.Month(), base.Day()+days, 12, 0, 0, 0, softRateResetLoc)
+	// 取当日 00:00 而不是 12:00：到期窗口是按「now + N 小时」判的，固定 12:00 会让
+	// 「第 7 天算不算在窗口内」随时钟漂移（上午跑会少算一天、下午跑才对），
+	// 00:00 对任何时刻都稳定落在窗口内，第 8 天则稳定落在窗口外。
+	return time.Date(base.Year(), base.Month(), base.Day()+days, 0, 0, 0, 0, softRateResetLoc)
 }
 
 var f64 = func(v float64) *float64 { return &v }
