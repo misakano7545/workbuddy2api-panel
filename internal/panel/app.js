@@ -660,7 +660,7 @@ function renderAccounts(list) {
         // 「探活」单独占一槽（仅封禁态渲染）：它与「解冻」是两个独立动作，若挤在同一
         // 槽里输出两个按钮，冻结行的列数就与其它行不同，整列又会错位。
         (personal ?
-          '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>' : ''),
+          '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到：重复签发不了积分，点击只是重查状态并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>' : ''),
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>',
         (personal ?
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' : ''),
@@ -1057,15 +1057,28 @@ if ($('accGroupActions')) {
     if (b.dataset.gact !== 'checkin' &&
         !confirm('对分组「' + accGroupFilter + '」的 ' + targets.length + ' 个账号执行「' + act.verb + '」？')) return;
     b.disabled = true;
-    let ok = 0;
+    let ok = 0, already = 0;
     const bad = [];
     for (const s of targets) {
-      try { await api('accounts/' + encodeURIComponent(s.uid) + '/' + b.dataset.gact, { method: 'POST' }); ok++; }
-      catch (e) { bad.push((s.nickname || String(s.uid).slice(0, 8)) + '：' + e.message); }
+      const name = s.nickname || String(s.uid).slice(0, 8);
+      try {
+        const r = await api('accounts/' + encodeURIComponent(s.uid) + '/' + b.dataset.gact, { method: 'POST' });
+        /* 签到端点对失败也回 200（错误在 body 里）：只按 HTTP 成功计数，会把「今天早就
+           签过」和上游拒签一起算进「成功 N 个」——hub#875 那类误报的同一个根。
+           按 checkin_state 分开统计，already 单独报，不冒充新签到。 */
+        if (b.dataset.gact === 'checkin') {
+          if (r && r.checkin_state === 'already') { already++; continue; }
+          if (r && r.ok === false) { bad.push(name + '：' + (r.checkin_message || '未完成')); continue; }
+        }
+        ok++;
+      } catch (e) { bad.push(name + '：' + e.message); }
     }
     b.disabled = false;
-    toast('组内' + act.verb + '：成功 ' + ok + ' 个' +
-      (bad.length ? '，失败 ' + bad.length + ' 个（' + bad[0] + '）' : ''), bad.length ? 'warn' : 'ok');
+    const tail = bad.length ? '，失败 ' + bad.length + ' 个（' + bad[0] + '）' : '';
+    toast(b.dataset.gact === 'checkin'
+      ? '组内签到：新签到 ' + ok + ' 个' + (already ? '，今日已签 ' + already + ' 个' : '') + tail
+      : '组内' + act.verb + '：成功 ' + ok + ' 个' + tail,
+      bad.length ? 'warn' : 'ok');
     loadOverview(true);
   });
 }
@@ -2494,12 +2507,24 @@ let taskJobTimer = null, taskJobPolling = null, taskJobID = null, taskJobGenerat
 let taskJobsLoading = false;
 
 // 服务端状态与界面反馈共用的纯函数，避免把已提交/失败当成已完成。
+/* 签到四态文案（checkin_state 由后端按回执判定，见 upstream.CheckinState）：
+   checked = 本次真签到、上游发了积分；already = 今天早就签过、一个积分都没发；
+   pending = 上游还在处理；failed = 上游拒签。
+   关键：already 和 checked 的事实不同。以前只凭 checkin_done 一律显示「签到已完成」
+   （绿色），重复点按钮看起来像能无限刷积分——同类项目 hub#875 在生产 1288 条签到
+   记录里就踩了同一个坑（250 条幂等拒绝被报成「签到成功 (+100积分)」）。
+   积分数字只取上游这次真实带回的 checkin_credit，取不到就不显示，绝不硬编码。 */
 function checkinResultNote(r) {
   if (r.skipped) return { message: r.skip_reason || '该账号不适用签到', severity: '' };
-  const balance = r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '';
-  if (!r.checkin_done) return { message: '签到未完成：' + (r.checkin_error || r.checkin_message || '请稍后重试') + balance, severity: 'err' };
-  if (r.balance_error) return { message: '签到已完成；余额刷新失败：' + r.balance_error, severity: 'err' };
-  return { message: '签到已完成' + balance, severity: 'ok' };
+  const balance = r.credits != null ? '，当前积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '';
+  const state = r.checkin_state || (r.checkin_done ? 'checked' : 'failed');
+  if (state === 'skipped') return { message: r.checkin_message || r.skip_reason || '该账号不适用签到', severity: '' };
+  if (state === 'already') return { message: '今天已签到，无需重复，上游不会再发积分' + balance, severity: '' };
+  if (state === 'pending') return { message: '签到未完成：上游还在处理，稍后重试' + balance, severity: 'warn' };
+  if (state !== 'checked') return { message: '签到未完成：' + (r.checkin_message || '请稍后重试') + balance, severity: 'err' };
+  const gain = typeof r.checkin_credit === 'number' ? '，+' + r.checkin_credit + ' 积分' : '';
+  if (r.balance_error) return { message: '签到成功' + gain + '；余额刷新失败：' + r.balance_error, severity: 'err' };
+  return { message: '签到成功' + gain + balance, severity: 'ok' };
 }
 
 function taskOutcomeStatus(item) {

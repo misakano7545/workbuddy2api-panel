@@ -1172,30 +1172,46 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 	checkinMsg := ""
 	checkinDone := false
+	// checkin_state 是「这次签到到底发生了什么」的权威答复，四态见 upstream.CheckinState：
+	// checked（本次真签到、上游发了积分）/ already（今天早就签过、一个积分都没发）/
+	// pending（上游处理中，可稍后重试）/ failed。前端据此出文案与配色——只凭
+	// checkin_done 会把 already 和 checked 说成同一句话（同类项目 hub#875 的坑）。
+	checkinState := ""
+	checkinCredit, checkinCreditKnown := 0, false
 	// 企业版无签到体系（上游 400 code 10001「企业账号不支持该操作」）：不发起该调用，
 	// 端点退化为「刷新额度」——企业额度走 get-enterprise-user-usage 口径（见 upstream）。
 	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能调用）。
 	if !a.SupportsPersonalGrowth() {
+		checkinState = "skipped"
 		// 静态 API Key 与企业版同列：都没有签到端点可调，但余额照旧刷新（企业口径）。
 		if a.IsAPIKey() {
 			checkinMsg = "API Key 账号无签到体系（已跳过签到，仅刷新额度）"
 		} else {
 			checkinMsg = "企业账号无签到体系（已跳过签到，仅刷新额度）"
 		}
-	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
-		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额
-		// 幂等拒绝同样是「今日已签」，标记后按钮显示「已签」。
-		if upstream.IsAlreadyCheckin(err) {
+	} else {
+		receipt, err := p.cfg.Upstream.CheckinReceipt(a)
+		checkinState = string(receipt.State)
+		checkinMsg = receipt.Msg
+		if err != nil && checkinMsg == "" {
+			checkinMsg = err.Error()
+		}
+		// 幂等拒绝（already）同样是「今日已签」，标记后按钮显示「已签」。
+		if receipt.State == upstream.CheckinChecked || receipt.State == upstream.CheckinAlready {
 			p.cfg.Pool.NoteCheckinDone(uid)
 			checkinDone = true
 		}
-	} else {
-		p.cfg.Pool.NoteCheckinDone(uid)
-		checkinDone = true
+		// 积分只取上游这次真实发放的数：already 没发、失败没发，都不能给数字。
+		if receipt.State == upstream.CheckinChecked && receipt.CreditKnown {
+			checkinCredit, checkinCreditKnown = receipt.Credit, true
+		}
 	}
 	// realm 取账号真值，不写字面量：上面 global 分支一旦被改（提前返回挪走、门控放宽），
 	// 这里硬写的 "cn" 会让国际号拿到错误回显。
-	resp := map[string]any{"ok": checkinDone, "realm": a.Realm(), "checkin_done": checkinDone}
+	resp := map[string]any{"ok": checkinDone, "realm": a.Realm(), "checkin_done": checkinDone, "checkin_state": checkinState}
+	if checkinCreditKnown {
+		resp["checkin_credit"] = checkinCredit
+	}
 	if a.IsEnterprise() {
 		resp["enterprise"] = true
 	}
