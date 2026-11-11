@@ -104,6 +104,71 @@ func hasToolCallMarkup(text string) bool {
 	return toolCallMarkupState(text) != markupNone
 }
 
+// userYieldMarkers 正文里「把控制权交回用户」的措辞。
+//
+// 为什么必须有这条判据（2026-11-11 issue #209）：救援的语义是「模型没说完，替它
+// 补上」，但有一类收尾是**故意的**——模型在等用户拍板（"邮件已经写好，请确认后我再
+// 发送。"）。这时补一句"继续执行下一步"会得到工具调用并被采纳，客户端于是真的把
+// 邮件发出去了。线上已发生两例：用户要求先确认再发，结果 agent 直接群发。
+//
+// 判据取「措辞 + 问号」，不猜语义：宁可漏救（客户端自己重试一轮的代价是几秒），
+// 也不能替用户按下发送键。
+var userYieldMarkers = []string{
+	"请确认", "确认后", "等你确认", "待你确认", "等你回复", "等你确认后",
+	"是否需要", "需不需要", "要不要我", "要不要", "你希望", "请告知",
+	"让我知道", "请你确认", "你确认后", "确认无误", "可以吗", "行吗", "好吗",
+}
+
+// userYieldMarkersEN 英文形态（模型偶发用英文收尾）。
+var userYieldMarkersEN = []string{
+	"please confirm", "let me know", "should i ", "do you want", "would you like",
+	"awaiting your", "waiting for your", "confirm before", "shall i ",
+}
+
+// textYieldsToUser 报告这段正文是否在「等用户回话」：以问号收尾，或含请确认类措辞。
+//
+// 注意问号收尾在 narrationTailSuspends 里被判为「说完了」（句末标点），所以这条判据
+// 必须独立成立——它挡的是「模型主动提问后停下」这个正确行为，而不是「话没说完」。
+func textYieldsToUser(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	if strings.HasSuffix(t, "？") || strings.HasSuffix(t, "?") {
+		return true
+	}
+	for _, m := range userYieldMarkers {
+		if strings.Contains(t, m) {
+			return true
+		}
+	}
+	low := strings.ToLower(t)
+	for _, m := range userYieldMarkersEN {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// narrationMaxBytes narration 的长度闸门（只对「标点型尾部」生效）。
+//
+// 这条救援原本没有长度上限：正文多长、只要停在冒号/逗号上就续写一次，而 agent 客户端
+// 的「说明 + 列表」几乎总是以冒号或逗号收尾（issue #209 的复现条件之一）。预告句实测
+// 集中在 40~200B，400B 已覆盖全部真实预告样本，再长的「停在冒号上」更可能是正常排版。
+//
+// 未闭合代码块与截断的工具调用标记不受这条限制：那是结构上确实没写完，与长度无关。
+const narrationMaxBytes = 400
+
+// narrationTailStructurallyOpen 尾部是否「结构上没写完」（未闭合代码块 / 截断的调用标记）：
+// 这类形态长度不设限，见 narrationMaxBytes。
+func narrationTailStructurallyOpen(text string) bool {
+	if toolCallMarkupState(text) == markupPartial {
+		return true
+	}
+	return strings.Count(strings.TrimRight(text, " \t\r\n"), "```")%2 == 1
+}
+
 // narrationTailSuspends 正文尾部是否「话没说完」。
 //
 // 只认结构性的收尾符，不猜测语义：
@@ -195,7 +260,19 @@ func (r *continueReader) tryNarrationRetry() bool {
 	case r.seg >= maxContinueSegments-1:
 		return false
 	}
-	if !narrationTailSuspends(r.text.String()) {
+	txt := r.text.String()
+	// 模型在等用户拍板（问句结尾 / 「请确认后我再…」）：这是**故意的**收尾。
+	// 补一句「继续执行下一步」会拿到工具调用并被采纳，等于替用户按下发送键
+	// （issue #209 两例：要确认的邮件被直接群发）。
+	if textYieldsToUser(txt) {
+		return false
+	}
+	// 长度闸门：预告句实测 40~200B，400B 已覆盖；再长的「停在冒号上」多半是正常排版。
+	// 结构上确实没写完的（未闭合代码块 / 截断的调用标记）不受此限。
+	if !narrationTailStructurallyOpen(txt) && len(txt) > narrationMaxBytes {
+		return false
+	}
+	if !narrationTailSuspends(txt) {
 		return false
 	}
 	declared, toolTurn := bodyToolShape(r.body)

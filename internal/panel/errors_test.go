@@ -260,22 +260,34 @@ func TestAggregateErrorsSampleIsRuneSafe(t *testing.T) {
 	}
 }
 
-// 续写救援要能在面板里数出来：`[narration]` / `[toolonly]` 是「模型自己收尾」时
-// 网关补了一次续写的痕迹，属于 info（链路成功、客户端内容正常），不能混进「其他」，
-// 否则永远说不清到底救了多少、还剩多少没救。
+// 续写救援要能在面板里数出来，且**按入口分开**（issue #209 建议 3）：
+// `[narration]` / `[toolonly]` / `[starved]` 是三条不同的规则，混成一个数字就只能
+// 看到「救了多少」，看不出是哪条在反复触发——而定位「停不下来」恰恰需要这个。
 func TestAggregateErrorsRescueKinds(t *testing.T) {
 	got := AggregateErrors([]LogLine{
 		{Text: `2026/11/10 20:31:27 [toolonly] acct=示例号(11f49997) model=deepseek-v4.1-flash seg=1 正文只有 1400B 就收尾（末条是工具结果）→ 试续一次，只采纳工具调用`, TS: time.Now()},
 		{Text: `2026/11/10 20:31:28 [toolonly] acct=示例号(11f49997) model=deepseek-v4.1-flash seg=1 续写段拿到工具调用 → 采纳`, TS: time.Now()},
 		{Text: `2026/11/10 20:31:29 [narration] acct=示例号(11f49997) model=deepseek-v4.1-flash 结果：共 2 段，工具调用=true，正文合计=343B`, TS: time.Now()},
+		{Text: `2026/11/10 20:31:30 [starved] acct=示例号(11f49997) model=deepseek-v4.1-flash seg=1 思考吃光预算（正文 0B）→ 同额度关思考重发`, TS: time.Now()},
 	})
-	if len(got) != 1 {
-		t.Fatalf("三类救援行应归成一个统计项，实际 %d 项：%+v", len(got), got)
+	want := map[string]int{
+		"续写救援（说一句就停）":  2,
+		"续写救援（预告句）":    1,
+		"续写救援（思考吃光预算）": 1,
 	}
-	if got[0].Kind != "续写救援（说一句就停）" || got[0].Sev != sevInfo {
-		t.Fatalf("救援行应归类为 info 的「续写救援」：%+v", got[0])
+	if len(got) != len(want) {
+		t.Fatalf("三个入口应各成一类，实际 %d 项：%+v", len(got), got)
 	}
-	if got[0].Count != 3 {
-		t.Fatalf("救援计数应为 3，实际 %d", got[0].Count)
+	for _, st := range got {
+		if st.Sev != sevInfo {
+			t.Fatalf("%s 应为 info：%+v", st.Kind, st)
+		}
+		n, ok := want[st.Kind]
+		if !ok {
+			t.Fatalf("出现意外的归类 %q", st.Kind)
+		}
+		if st.Count != n {
+			t.Fatalf("%s 计数=%d want %d", st.Kind, st.Count, n)
+		}
 	}
 }
