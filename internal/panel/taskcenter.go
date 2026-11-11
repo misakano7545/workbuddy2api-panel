@@ -9,6 +9,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -516,7 +517,14 @@ func (p *Panel) queueSet(q *queueState, uid string, fn func(*queueItem)) {
 	}
 }
 
-// acceptPendingTasks 批量接受该账号未接受的任务，返回接受的个数（失败返回 0 不阻塞）。
+// acceptPendingTasks 批量接受该账号未接受的任务，返回接受的个数。
+//
+// 失败不阻塞（行为事件才是进度判据），但不再一次全量失败就整批放弃：复用
+// acceptPendingWithFallback——批量失败后回读列表，对仍为 not_accepted 的码逐个补偿
+// （上限 acceptBatchFallbackLimit）。返回值因此可能是「批量一次成功数」「批量失败后
+// 补偿成功数」或 0（列表不可用 / 上游整体不可用 / 全部补偿仍失败）；调用方
+// （runQueueItems）只按 >0 决定要不要等 reportGap，任何小于 len(codes) 的返回值都表示
+// 仍有任务没被接受，本轮照常继续，不做任何阻塞或重试——这就是「失败不阻塞」的保留语义。
 func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
@@ -531,12 +539,15 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 	if len(codes) == 0 {
 		return 0
 	}
-	if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
-		log.Printf("panel: 队列 accept uid=%s: %v（不阻塞）", a.UID, err)
-		return 0
+	accepted, notes := p.acceptPendingWithFallback(context.Background(), a, codes, false)
+	// 正常路径 notes 为空，日志与改动前逐字一致（accepted == len(codes)）。
+	if len(notes) > 0 {
+		log.Printf("panel: 队列 accept uid=%s: %s（不阻塞）", a.UID, strings.Join(notes, "; "))
 	}
-	log.Printf("panel: 队列 accept uid=%s: 已接受 %d 个任务", a.UID, len(codes))
-	return len(codes)
+	if accepted > 0 {
+		log.Printf("panel: 队列 accept uid=%s: 已接受 %d 个任务", a.UID, accepted)
+	}
+	return accepted
 }
 
 // runGrowthQueued 与单任务和 auto_all 共用完成判据（executeAutoTask），

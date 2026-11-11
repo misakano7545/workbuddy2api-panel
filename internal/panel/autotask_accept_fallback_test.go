@@ -26,6 +26,9 @@ type acceptFallbackFake struct {
 	// batchFailButApply：批量回 500 但服务端其实已登记（上游存在「报错却生效」形态）。
 	// 用来验证补偿只在回读仍为 not_accepted 时才动手，不做无谓的重复 accept。
 	batchFailButApply bool
+	// singleFailCodes：只让这些码的单码 accept 失败（批量失败后的逐码补偿里混一个坏码）。
+	// 用来验证 failed 精确到「回读确认仍未被接受」的码，而不是把整片都记失败。
+	singleFailCodes map[string]bool
 	cancel            context.CancelFunc
 	accepted          map[string]bool
 	singles           []string
@@ -86,6 +89,9 @@ func (f *acceptFallbackFake) handler() http.HandlerFunc {
 				}
 			}
 			fail := (f.batchFail && batch) || (f.singleFail && !batch)
+			if !batch && len(body.TaskCodes) == 1 && f.singleFailCodes[body.TaskCodes[0]] {
+				fail = true
+			}
 			cancel := f.cancel
 			apply := f.batchFailButApply
 			f.mu.Unlock()

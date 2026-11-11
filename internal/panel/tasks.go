@@ -5,6 +5,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -113,7 +114,9 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 // 为什么值得做：accept 不产生进度（进度靠行为事件点亮），但让状态机规范
 // （not_accepted → accepted → completed），也便于后续筛选"我报过名的任务"。
 // 上游 scripts 的注释同样建议"先 accept"。
-// 批量提交会分片（上游对 task_codes 数组长度无公开上限，保守每批 20 个）。
+// 批量提交会分片（上游对 task_codes 数组长度无公开上限，保守每批 20 个），默认与
+// mp 两个口径都分片；某片失败时片内降级逐码补偿（acceptPendingWithFallback），
+// 一个坏码不再拖垮同片其余任务。
 func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
@@ -148,8 +151,11 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const batch = 20
+	ctx := r.Context()
 	accepted := 0
 	var failed []string
+	// 分片失败不再整片丢弃：片内降级到 acceptPendingWithFallback 逐码补偿，
+	// 只有回读确认仍未被接受的码才计入 failed（此前一个坏码会让整片全记失败）。
 	for i := 0; i < len(codes); i += batch {
 		end := i + batch
 		if end > len(codes) {
@@ -157,13 +163,19 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := p.cfg.Upstream.AcceptTasks(a, codes[i:end]); err != nil {
 			log.Printf("panel: 批量接受失败 uid=%s codes=%v err=%v", uid, codes[i:end], err)
-			failed = append(failed, codes[i:end]...)
+			n, notes := p.acceptPendingWithFallback(ctx, a, codes[i:end], false)
+			if len(notes) > 0 {
+				log.Printf("panel: 批量接受降级 uid=%s codes=%v notes=%v", uid, codes[i:end], notes)
+			}
+			accepted += n
+			failed = append(failed, p.acceptFailedCodes(ctx, a, codes[i:end], n, false)...)
 			continue
 		}
 		accepted += end - i
 		time.Sleep(acceptBatchGap) // 批间节流（对齐脚本 1.05s 口径）
 	}
 	// 小程序口径任务单独批量接受（默认列表不含 mp 码，accept 也要求 mp 头）。
+	// mp 口径同样分片：此前一次全量提交，一个坏码就让整批 mp 任务都没被接受。
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
 		var mpCodes []string
 		for _, t := range mpTasks {
@@ -172,14 +184,23 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 			}
 			mpCodes = append(mpCodes, t.TaskCode)
 		}
-		if len(mpCodes) > 0 {
-			if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes); err != nil {
-				log.Printf("panel: mp 批量接受失败 uid=%s err=%v", uid, err)
-				failed = append(failed, mpCodes...)
-			} else {
-				accepted += len(mpCodes)
-				time.Sleep(acceptBatchGap)
+		for i := 0; i < len(mpCodes); i += batch {
+			end := i + batch
+			if end > len(mpCodes) {
+				end = len(mpCodes)
 			}
+			if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes[i:end]); err != nil {
+				log.Printf("panel: mp 批量接受失败 uid=%s err=%v", uid, err)
+				n, notes := p.acceptPendingWithFallback(ctx, a, mpCodes[i:end], true)
+				if len(notes) > 0 {
+					log.Printf("panel: mp 批量接受降级 uid=%s codes=%v notes=%v", uid, mpCodes[i:end], notes)
+				}
+				accepted += n
+				failed = append(failed, p.acceptFailedCodes(ctx, a, mpCodes[i:end], n, true)...)
+				continue
+			}
+			accepted += end - i
+			time.Sleep(acceptBatchGap)
 		}
 	}
 	log.Printf("panel: 全部接受 uid=%s 接受=%d 失败=%d", uid, accepted, len(failed))
@@ -188,6 +209,34 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 		resp["message"] = "部分任务接受失败（上游拒绝），可重试"
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// acceptFailedCodes 把「批量分片失败并做完逐码补偿后，真正仍未被接受」的码还原出来。
+//
+// acceptPendingWithFallback 只回报成功数量与说明，不回到码粒度，而 failed 列表要精确
+// 到码（前端 app.js 按 failed.length 提示「N 个被上游拒绝（可重试）」）。这里再回读一次
+// 列表确认补偿之后的真实状态——判据与 helper 同源：只信服务端 accept_status，不信
+// 单次响应的 200/500。只在分片失败的异常路径发生；正常路径（各片一次成功）不产生
+// 任何额外请求。
+// 回读失败或 ctx 已取消时保守地把「helper 未确认接受的码」都算作失败：宁可让用户多点
+// 一次重试，也不静默丢掉失败信息。
+func (p *Panel) acceptFailedCodes(ctx context.Context, a *auth.Auth, codes []string, accepted int, mp bool) []string {
+	if accepted >= len(codes) {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return codes[accepted:]
+	}
+	list := p.cfg.Upstream.ListTasks
+	if mp {
+		list = p.cfg.Upstream.ListTasksMP
+	}
+	tasks, err := list(a)
+	if err != nil {
+		return codes[accepted:]
+	}
+	pending, _ := acceptFallbackPending(tasks, codes)
+	return pending
 }
 
 // accountTaskClaim 领取任务奖励（未达标时上游返回业务错误，原样透出给前端提示）。
