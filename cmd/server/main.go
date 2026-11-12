@@ -14,9 +14,11 @@ import (
 	"net/http"
 	_ "net/http/pprof" // WB2API_PPROF 打开时提供 /debug/pprof（默认无监听）
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -576,6 +578,16 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// iOS 上 daemon 被外部杀死时进程内什么都不会留：没有 panic、没有 "bye"，
+	// server.log 只剩「上一次启动」和「这一次启动」两截。下面三件东西把它钉在时间轴上：
+	//   [launchd] 上次退出原因（launchctl 记着）   [alive] 每 30s 的 uptime/heap
+	//   [signal] 收到终止信号
+	// 判据：有 [signal] 且随后有 bye = 优雅关停；日志突然断在心跳之后、一行 [signal] 都没有
+	// = 被 SIGKILL（内存压力 / 外部 kill），此时 heap 值就是唯一线索。
+	startedAt := time.Now()
+	go startAliveLogger(ctx, startedAt)
+	go watchSignals(startedAt)
+	logJobExitReason()
 	proxyCtx, stopProxies := context.WithCancel(ctx)
 	proxyDone := make(chan struct{})
 	go func() {
@@ -734,6 +746,70 @@ func listenWithRetry(ctx context.Context, srv *http.Server) error {
 		if backoff < 15*time.Second {
 			backoff *= 2
 		}
+	}
+}
+
+// startAliveLogger 每 30 秒打一行心跳，把「活着多久、堆多大」留在日志里。
+// 被 SIGKILL 的进程写不出遗言，这一行就是它最后的现场。
+func startAliveLogger(ctx context.Context, startedAt time.Time) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			log.Printf("[alive] uptime=%s heap=%dMB sys=%dMB goroutines=%d",
+				time.Since(startedAt).Round(time.Second), ms.HeapAlloc>>20, ms.Sys>>20, runtime.NumGoroutine())
+		}
+	}
+}
+
+// watchSignals 记录收到的终止信号。与 signal.NotifyContext 并列注册（signal.Notify
+// 是多播，不影响原有的优雅关停路径）。一条都没有就消失 = SIGKILL。
+func watchSignals(startedAt time.Time) {
+	ch := make(chan os.Signal, 4)
+	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT)
+	for s := range ch {
+		log.Printf("[signal] 收到 %v，uptime=%s", s, time.Since(startedAt).Round(time.Second))
+	}
+}
+
+// logJobExitReason 启动时把 launchd 记着的「上一次退出原因」抄进日志。
+// RootHide 的 bootstrap 路径是随机的，用可执行文件自身位置反推：
+// <jbroot>/usr/local/bin/wb2api → <jbroot>。取不到就安静跳过，绝不阻塞启动。
+func logJobExitReason() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	jb := filepath.Dir(filepath.Dir(filepath.Dir(exe)))
+	label := os.Getenv("LAUNCH_JOBKEY_LABEL")
+	if label == "" {
+		label = "com.gan.wb2api"
+	}
+	for _, cand := range []string{
+		filepath.Join(jb, "usr/bin/launchctl"),
+		filepath.Join(jb, "bin/launchctl"),
+	} {
+		if _, err := os.Stat(cand); err != nil {
+			continue
+		}
+		out, err := exec.Command(cand, "print", "system/"+label).CombinedOutput()
+		if err != nil && len(out) == 0 {
+			log.Printf("[launchd] %s print 失败: %v", cand, err)
+			return
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			l := strings.TrimSpace(line)
+			if strings.Contains(l, "last exit") || strings.HasPrefix(l, "state =") ||
+				strings.HasPrefix(l, "runs =") || strings.HasPrefix(l, "pid =") {
+				log.Printf("[launchd] %s", l)
+			}
+		}
+		return
 	}
 }
 
