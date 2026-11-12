@@ -261,30 +261,103 @@ func logJetsamEvidence() {
 		if err := json.Unmarshal(body, &v); err != nil {
 			continue
 		}
-		for _, hit := range findProcByName(v, "wb2api") {
-			log.Printf("[jetsam] %s → name=%v reason=%v rpages=%v lifetimeMax=%v footprint=%v",
-				filepath.Base(f), hit["name"], hit["reason"], hit["rpages"],
-				hit["lifetimeMax"], hit["phys_footprint"])
+		log.Printf("[jetsam]   %s 事件: reason=%s largestProcess=%s",
+			filepath.Base(f), eventField(v, "reason"), eventField(v, "largestProcess"))
+
+		// JetsamEvent 会把内存最高的几十个进程全抄一遍，**只有被杀的条目带 reason**。
+		// -16 把「快照成员」当成「死因」报了三回，这里按 reason 分流。
+		procs := collectProcs(v)
+		victims := 0
+		for _, p := range procs {
+			r := asText(p["reason"])
+			if r == "" {
+				continue
+			}
+			victims++
+			if victims <= 4 {
+				log.Printf("[jetsam]   %s 被杀: name=%s reason=%s rpages=%v lifetimeMax=%v",
+					filepath.Base(f), asText(p["name"]), r, p["rpages"], p["lifetimeMax"])
+			}
+		}
+		if victims == 0 {
+			log.Printf("[jetsam]   %s 没有带 reason 的条目（本次事件未杀进程）", filepath.Base(f))
+		}
+		for _, p := range procs {
+			if !strings.Contains(strings.ToLower(asText(p["name"])), "wb2api") {
+				continue
+			}
+			note := "快照成员，未杀"
+			if asText(p["reason"]) != "" {
+				note = "被杀的就是我们"
+			}
+			// 键名一并打出来：下次不用再猜字段叫什么。
+			log.Printf("[jetsam]   %s 我方: rpages=%v lifetimeMax=%v footprint=%v（%s）keys=%s",
+				filepath.Base(f), p["rpages"], p["lifetimeMax"], p["phys_footprint"], note, keysOf(p))
+			break
 		}
 	}
 }
 
-// findProcByName 在任意形状的 JSON 里找 name 命中目标的进程字典。
-// 不假设 processes 是数组还是以 pid 为键的字典 —— 格式各机型不一样。
-func findProcByName(v interface{}, name string) []map[string]interface{} {
+// eventField 取事件顶层的单个字段（reason=highwater / largestProcess 之类）。
+func eventField(v interface{}, key string) string {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return "-"
+	}
+	if s := asText(m[key]); s != "" {
+		return s
+	}
+	return "-"
+}
+
+// collectProcs 在任意形状的 JSON 里收集「进程条目」：有 name，且带 pid 或 rpages。
+// 不假设 processes 是数组还是以 pid 为键的字典 —— 各机型格式不一样。
+func collectProcs(v interface{}) []map[string]interface{} {
 	var out []map[string]interface{}
 	switch t := v.(type) {
 	case map[string]interface{}:
-		if s, ok := t["name"].(string); ok && strings.Contains(strings.ToLower(s), name) {
-			return append(out, t)
+		if _, ok := t["name"].(string); ok {
+			_, hasPid := t["pid"]
+			_, hasRPages := t["rpages"]
+			if hasPid || hasRPages {
+				return append(out, t)
+			}
 		}
 		for _, vv := range t {
-			out = append(out, findProcByName(vv, name)...)
+			out = append(out, collectProcs(vv)...)
 		}
 	case []interface{}:
 		for _, vv := range t {
-			out = append(out, findProcByName(vv, name)...)
+			out = append(out, collectProcs(vv)...)
 		}
 	}
 	return out
+}
+
+// asText 把 JSON 里的任意标量转成字符串；null / 缺失一律空串。
+func asText(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case nil:
+		return ""
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	default:
+		return fmt.Sprint(t)
+	}
+}
+
+// keysOf 打出条目的键名，最多 14 个 —— 只用于把 schema 暴露出来。
+func keysOf(m map[string]interface{}) string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	if len(ks) > 14 {
+		ks = ks[:14]
+		ks = append(ks, "…")
+	}
+	return strings.Join(ks, ",")
 }
