@@ -770,12 +770,21 @@ func exePath() string {
 // 不能依赖 os.Executable()：真机上它会失败。改用两条独立线索——
 // 当前工作目录（plist 的 WorkingDirectory 就在 <jbroot>/var/mobile/... 下）
 // 与可执行文件路径（能拿到时）。
-func jbrootGuess() string {
+func jbrootCandidates() []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
 	for _, d := range []string{cwdOrEmpty(), filepath.Dir(exePath())} {
 		p := filepath.Clean(d)
 		for i := 0; i < 8; i++ {
 			if strings.HasPrefix(filepath.Base(p), ".jbroot-") {
-				return p
+				add(p)
+				break
 			}
 			parent := filepath.Dir(p)
 			if parent == p {
@@ -784,10 +793,8 @@ func jbrootGuess() string {
 			p = parent
 		}
 	}
-	if _, err := os.Stat("/var/jb/usr/bin/launchctl"); err == nil {
-		return "/var/jb"
-	}
-	return ""
+	add("/var/jb")
+	return out
 }
 
 func cwdOrEmpty() string {
@@ -830,22 +837,27 @@ func watchSignals(startedAt time.Time) {
 // RootHide 的 bootstrap 路径是随机的，用可执行文件自身位置反推：
 // <jbroot>/usr/local/bin/wb2api → <jbroot>。取不到就安静跳过，绝不阻塞启动。
 func logJobExitReason() {
-	jb := jbrootGuess()
-	if jb == "" {
+	roots := jbrootCandidates()
+	if len(roots) == 0 {
 		log.Printf("[launchd] 无法反推 jbroot，跳过上次退出原因")
 		return
 	}
+	log.Printf("[launchd] jbroot 候选: %s", strings.Join(roots, " , "))
 	label := os.Getenv("LAUNCH_JOBKEY_LABEL")
 	if label == "" {
 		label = "com.gan.wb2api"
 	}
-	for _, cand := range []string{
-		filepath.Join(jb, "usr/bin/launchctl"),
-		filepath.Join(jb, "bin/launchctl"),
-	} {
+	var cands []string
+	for _, jb := range roots {
+		for _, sub := range []string{"usr/bin/launchctl", "bin/launchctl", "usr/local/bin/launchctl"} {
+			cands = append(cands, filepath.Join(jb, sub))
+		}
+	}
+	for _, cand := range cands {
 		if _, err := os.Stat(cand); err != nil {
 			continue
 		}
+		log.Printf("[launchd] 使用 %s", cand)
 		// 先列全部 job：两套 job 跑同一个二进制时，这里会直接暴露另一个 label。
 		if out, err := exec.Command(cand, "list").CombinedOutput(); err == nil || len(out) > 0 {
 			n := 0
@@ -879,6 +891,7 @@ func logJobExitReason() {
 		}
 		return
 	}
+	log.Printf("[launchd] %d 个候选路径里都没有 launchctl", len(cands))
 }
 
 // warmModelRates 启动预热各域模型积分倍率表（供积分保底的目录兜底判定）。
