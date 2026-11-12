@@ -186,7 +186,7 @@ func TestCNContractGolden(t *testing.T) {
 	defer srv.Close()
 
 	a := &auth.Auth{
-		UID: "11f49997-8875-4ce2-ae68-d093e3088524", AccessToken: "AT",
+		UID: "00000000-0000-4000-8000-000000000002", AccessToken: "AT",
 		RefreshToken: "RT", Nickname: "MisakaNo",
 	}
 	c := &Client{
