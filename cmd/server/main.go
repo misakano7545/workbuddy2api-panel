@@ -591,6 +591,7 @@ func main() {
 	log.Printf("[boot] job label=%q xpc=%q", os.Getenv("LAUNCH_JOBKEY_LABEL"), os.Getenv("XPC_SERVICE_NAME"))
 	// 身份 + 内存天花板：过去只能猜「到底以谁的身份跑、上限是多少」，这两行把它钉死。
 	log.Printf("[boot] uid=%d euid=%d jetsam=%s", os.Getuid(), os.Geteuid(), applyProcessLimits())
+	go logBootMemory()
 	go logJetsamEvidence()
 	go startAliveLogger(ctx, startedAt)
 	go watchSignals(startedAt)
@@ -822,8 +823,10 @@ func startAliveLogger(ctx context.Context, startedAt time.Time) {
 			runtime.ReadMemStats(&ms)
 			// rss = 生命周期 RSS 峰值（getrusage）。heap/sys 是 Go 自己的账，
 			// rss 才是内核 jetsam 记的那个数 —— 判「是不是撞内存」只看它。
-			log.Printf("[alive] pid=%d uptime=%s heap=%dMB sys=%dMB rss=%dMB goroutines=%d",
-				os.Getpid(), time.Since(startedAt).Round(time.Second), ms.HeapAlloc>>20, ms.Sys>>20, maxRSSMB(), runtime.NumGoroutine())
+			fp, wk := memSample()
+			log.Printf("[alive] pid=%d uptime=%s heap=%dMB sys=%dMB rss=%dMB fp=%dMB wk=%d goroutines=%d",
+				os.Getpid(), time.Since(startedAt).Round(time.Second), ms.HeapAlloc>>20, ms.Sys>>20,
+				maxRSSMB(), fp, wk, runtime.NumGoroutine())
 		}
 	}
 }
