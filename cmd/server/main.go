@@ -696,7 +696,7 @@ func main() {
 		log.Printf("WARN: %s", warn)
 	}
 	log.Print(listenBanner(cfg.Listen, loadedFrom, cfg.APIKey))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := listenWithRetry(ctx, srv); err != nil && err != http.ErrServerClosed {
 		p.Flush() // 监听失败时信号路径不会跑：这里同样兜底落盘再退
 		log.Fatalf("http: %v", err)
 	}
@@ -704,6 +704,37 @@ func main() {
 		<-shutdownDone
 	}
 	log.Printf("bye")
+}
+
+// listenWithRetry 监听失败时退避重试，而不是让进程退出。
+//
+// 为什么：端口被另一个实例占住（同机再起一份 wb2api、或旧版 App 内嵌服务）时，
+// 原来的 log.Fatalf 会 os.Exit(1)。在 launchd 下 ThrottleInterval=10 会把
+// 「自杀 → 重拉」放大成端口反复易主：客户端在空窗期拿到 ECONNREFUSED，
+// 面板则在两个实例的 api_key 之间来回 401。这里改成常驻重试，端口一空立刻接管。
+//
+// 只有地址被占用（EADDRINUSE）才退避重试，其它错误照旧上抛——配置错、权限错
+// 重试一万次也不会好，必须让上层 log.Fatal 把原因打出来。
+func listenWithRetry(ctx context.Context, srv *http.Server) error {
+	backoff := time.Second
+	for {
+		err := srv.ListenAndServe()
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			return err
+		}
+		log.Printf("端口 %s 被占用，%s 后重试（进程保持存活，不退出）", srv.Addr, backoff)
+		select {
+		case <-ctx.Done():
+			return http.ErrServerClosed
+		case <-time.After(backoff):
+		}
+		if backoff < 15*time.Second {
+			backoff *= 2
+		}
+	}
 }
 
 // warmModelRates 启动预热各域模型积分倍率表（供积分保底的目录兜底判定）。
