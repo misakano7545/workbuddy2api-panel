@@ -753,11 +753,38 @@ func listenWithRetry(ctx context.Context, srv *http.Server) error {
 // exePath / cwdOrEmpty 只用于启动那一行日志：被谁拉起、在哪个目录跑。
 // iOS 上 daemon 是 launchd 直接拉的，ppid 恒为 1，路径才是判断「是不是另一份实例」的关键。
 func exePath() string {
-	p, err := os.Executable()
-	if err != nil {
-		return "?"
+	if p, err := os.Executable(); err == nil {
+		return p
 	}
-	return p
+	// iOS 上 os.Executable() 可能拿不到（真机实测返回 error），退回 argv[0]。
+	if len(os.Args) > 0 && strings.HasPrefix(os.Args[0], "/") {
+		return os.Args[0]
+	}
+	return "?"
+}
+
+// jbrootGuess 反推 RootHide 的 jbroot（形如 .../.jbroot-XXXX）。
+// 不能依赖 os.Executable()：真机上它会失败。改用两条独立线索——
+// 当前工作目录（plist 的 WorkingDirectory 就在 <jbroot>/var/mobile/... 下）
+// 与可执行文件路径（能拿到时）。
+func jbrootGuess() string {
+	for _, d := range []string{cwdOrEmpty(), filepath.Dir(exePath())} {
+		p := filepath.Clean(d)
+		for i := 0; i < 8; i++ {
+			if strings.HasPrefix(filepath.Base(p), ".jbroot-") {
+				return p
+			}
+			parent := filepath.Dir(p)
+			if parent == p {
+				break
+			}
+			p = parent
+		}
+	}
+	if _, err := os.Stat("/var/jb/usr/bin/launchctl"); err == nil {
+		return "/var/jb"
+	}
+	return ""
 }
 
 func cwdOrEmpty() string {
@@ -800,11 +827,11 @@ func watchSignals(startedAt time.Time) {
 // RootHide 的 bootstrap 路径是随机的，用可执行文件自身位置反推：
 // <jbroot>/usr/local/bin/wb2api → <jbroot>。取不到就安静跳过，绝不阻塞启动。
 func logJobExitReason() {
-	exe, err := os.Executable()
-	if err != nil {
+	jb := jbrootGuess()
+	if jb == "" {
+		log.Printf("[launchd] 无法反推 jbroot，跳过上次退出原因")
 		return
 	}
-	jb := filepath.Dir(filepath.Dir(filepath.Dir(exe)))
 	label := os.Getenv("LAUNCH_JOBKEY_LABEL")
 	if label == "" {
 		label = "com.gan.wb2api"
