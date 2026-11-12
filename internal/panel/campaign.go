@@ -20,8 +20,11 @@ import (
 
 // campaignDefaultModule / campaignDefaultCode 当前在跑的活动（星巴克 11/12–11/16）。
 // 调用方可用 ?module= / ?code= 覆盖，免得每有活动就改代码。
+//
+// module 留空是这期的真实形状（`/portal/activity/tasks`）；早期咖啡节那期要
+// 传 module=coffee（`/portal/activity/coffee/tasks`）。
 const (
-	campaignDefaultModule = "campaign"
+	campaignDefaultModule = ""
 	campaignDefaultCode   = "campaign_starbucks_2026"
 )
 

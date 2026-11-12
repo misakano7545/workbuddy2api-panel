@@ -90,8 +90,20 @@ type CampaignVoucher struct {
 	StockReset  int64  `json:"stock_reset_at"`
 }
 
-// campaignBase 活动接口前缀。module 是活动模块名（如 coffee、campaign）。
-func campaignBase(module string) string { return "/portal/activity/" + module }
+// campaignBase 活动接口前缀。
+//
+// module 为空 → `/portal/activity`（星巴克这期的形状：`campaign_starbucks_2026`
+// 直接挂在 /portal/activity 下）；module 非空 → `/portal/activity/<module>`
+// （早期咖啡节那期是 `/portal/activity/coffee`）。
+//
+// 这个差别踩过一次：按「一定有模块段」拼成 `/portal/activity/campaign/tasks`，
+// 上游照样回 200 但任务表是空的，看起来像「活动没任务」而不是「路径错了」。
+func campaignBase(module string) string {
+	if module == "" {
+		return "/portal/activity"
+	}
+	return "/portal/activity/" + module
+}
 
 // campaignJSON 发一次活动接口请求并解信封 data。
 //
