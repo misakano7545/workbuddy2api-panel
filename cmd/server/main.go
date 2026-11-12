@@ -586,6 +586,9 @@ func main() {
 	// = 被 SIGKILL（内存压力 / 外部 kill），此时 heap 值就是唯一线索。
 	startedAt := time.Now()
 	log.Printf("[boot] pid=%d ppid=%d ppath=%s cwd=%s", os.Getpid(), os.Getppid(), exePath(), cwdOrEmpty())
+	// 同一个 Label 的 job 不可能在 ThrottleInterval 内起两次；日志里出现 1 秒
+	// 间隔的两次启动，说明跑的是两个不同的 launchd job。这两行把身份问出来。
+	log.Printf("[boot] job label=%q xpc=%q", os.Getenv("LAUNCH_JOBKEY_LABEL"), os.Getenv("XPC_SERVICE_NAME"))
 	go startAliveLogger(ctx, startedAt)
 	go watchSignals(startedAt)
 	logJobExitReason()
@@ -843,16 +846,35 @@ func logJobExitReason() {
 		if _, err := os.Stat(cand); err != nil {
 			continue
 		}
+		// 先列全部 job：两套 job 跑同一个二进制时，这里会直接暴露另一个 label。
+		if out, err := exec.Command(cand, "list").CombinedOutput(); err == nil || len(out) > 0 {
+			n := 0
+			for _, line := range strings.Split(string(out), "\n") {
+				l := strings.TrimSpace(line)
+				if l == "" {
+					continue
+				}
+				if strings.Contains(l, "wb2api") || strings.Contains(l, "workbuddy") || strings.Contains(l, "gan.") {
+					log.Printf("[launchd] list: %s", l)
+					n++
+				}
+			}
+			log.Printf("[launchd] list 共 %d 行，匹配 %d 行", len(strings.Split(strings.TrimSpace(string(out)), "\n")), n)
+		} else {
+			log.Printf("[launchd] launchctl list 不可用: %v", err)
+		}
 		out, err := exec.Command(cand, "print", "system/"+label).CombinedOutput()
 		if err != nil && len(out) == 0 {
 			log.Printf("[launchd] %s print 失败: %v", cand, err)
 			return
 		}
-		for _, line := range strings.Split(string(out), "\n") {
-			l := strings.TrimSpace(line)
-			if strings.Contains(l, "last exit") || strings.HasPrefix(l, "state =") ||
-				strings.HasPrefix(l, "runs =") || strings.HasPrefix(l, "pid =") {
-				log.Printf("[launchd] %s", l)
+		// 不再静默过滤：原样倒前 12 行，过滤逻辑猜错就什么都看不到。
+		for i, line := range strings.Split(string(out), "\n") {
+			if i >= 12 {
+				break
+			}
+			if l := strings.TrimSpace(line); l != "" {
+				log.Printf("[launchd] print: %s", l)
 			}
 		}
 		return
