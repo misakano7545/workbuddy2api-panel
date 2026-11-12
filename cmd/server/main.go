@@ -882,7 +882,7 @@ func logJobExitReason() {
 		}
 		// 不再静默过滤：原样倒前 12 行，过滤逻辑猜错就什么都看不到。
 		for i, line := range strings.Split(string(out), "\n") {
-			if i >= 12 {
+			if i >= 40 {
 				break
 			}
 			if l := strings.TrimSpace(line); l != "" {
