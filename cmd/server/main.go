@@ -589,6 +589,9 @@ func main() {
 	// 同一个 Label 的 job 不可能在 ThrottleInterval 内起两次；日志里出现 1 秒
 	// 间隔的两次启动，说明跑的是两个不同的 launchd job。这两行把身份问出来。
 	log.Printf("[boot] job label=%q xpc=%q", os.Getenv("LAUNCH_JOBKEY_LABEL"), os.Getenv("XPC_SERVICE_NAME"))
+	// 身份 + 内存天花板：过去只能猜「到底以谁的身份跑、上限是多少」，这两行把它钉死。
+	log.Printf("[boot] uid=%d euid=%d jetsam=%s", os.Getuid(), os.Geteuid(), applyProcessLimits())
+	go logJetsamEvidence()
 	go startAliveLogger(ctx, startedAt)
 	go watchSignals(startedAt)
 	logJobExitReason()
@@ -817,8 +820,10 @@ func startAliveLogger(ctx context.Context, startedAt time.Time) {
 		case <-t.C:
 			var ms runtime.MemStats
 			runtime.ReadMemStats(&ms)
-			log.Printf("[alive] pid=%d uptime=%s heap=%dMB sys=%dMB goroutines=%d",
-				os.Getpid(), time.Since(startedAt).Round(time.Second), ms.HeapAlloc>>20, ms.Sys>>20, runtime.NumGoroutine())
+			// rss = 生命周期 RSS 峰值（getrusage）。heap/sys 是 Go 自己的账，
+			// rss 才是内核 jetsam 记的那个数 —— 判「是不是撞内存」只看它。
+			log.Printf("[alive] pid=%d uptime=%s heap=%dMB sys=%dMB rss=%dMB goroutines=%d",
+				os.Getpid(), time.Since(startedAt).Round(time.Second), ms.HeapAlloc>>20, ms.Sys>>20, maxRSSMB(), runtime.NumGoroutine())
 		}
 	}
 }
@@ -880,9 +885,10 @@ func logJobExitReason() {
 			log.Printf("[launchd] %s print 失败: %v", cand, err)
 			return
 		}
-		// 不再静默过滤：原样倒前 12 行，过滤逻辑猜错就什么都看不到。
+		// 不再静默过滤：原样倒。40 行时正好截在 trampolined —— 后面才是
+		// last exit reason / jetsam 相关字段，那些才是「上次为什么死」的答案。
 		for i, line := range strings.Split(string(out), "\n") {
-			if i >= 40 {
+			if i >= 200 {
 				break
 			}
 			if l := strings.TrimSpace(line); l != "" {
