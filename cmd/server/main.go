@@ -585,6 +585,7 @@ func main() {
 	// 判据：有 [signal] 且随后有 bye = 优雅关停；日志突然断在心跳之后、一行 [signal] 都没有
 	// = 被 SIGKILL（内存压力 / 外部 kill），此时 heap 值就是唯一线索。
 	startedAt := time.Now()
+	log.Printf("[boot] pid=%d ppid=%d ppath=%s cwd=%s", os.Getpid(), os.Getppid(), exePath(), cwdOrEmpty())
 	go startAliveLogger(ctx, startedAt)
 	go watchSignals(startedAt)
 	logJobExitReason()
@@ -749,10 +750,28 @@ func listenWithRetry(ctx context.Context, srv *http.Server) error {
 	}
 }
 
-// startAliveLogger 每 30 秒打一行心跳，把「活着多久、堆多大」留在日志里。
+// exePath / cwdOrEmpty 只用于启动那一行日志：被谁拉起、在哪个目录跑。
+// iOS 上 daemon 是 launchd 直接拉的，ppid 恒为 1，路径才是判断「是不是另一份实例」的关键。
+func exePath() string {
+	p, err := os.Executable()
+	if err != nil {
+		return "?"
+	}
+	return p
+}
+
+func cwdOrEmpty() string {
+	d, err := os.Getwd()
+	if err != nil {
+		return "?"
+	}
+	return d
+}
+
+// startAliveLogger 每 10 秒打一行心跳，把「活着多久、堆多大」留在日志里。
 // 被 SIGKILL 的进程写不出遗言，这一行就是它最后的现场。
 func startAliveLogger(ctx context.Context, startedAt time.Time) {
-	t := time.NewTicker(30 * time.Second)
+	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	for {
 		select {
@@ -761,8 +780,8 @@ func startAliveLogger(ctx context.Context, startedAt time.Time) {
 		case <-t.C:
 			var ms runtime.MemStats
 			runtime.ReadMemStats(&ms)
-			log.Printf("[alive] uptime=%s heap=%dMB sys=%dMB goroutines=%d",
-				time.Since(startedAt).Round(time.Second), ms.HeapAlloc>>20, ms.Sys>>20, runtime.NumGoroutine())
+			log.Printf("[alive] pid=%d uptime=%s heap=%dMB sys=%dMB goroutines=%d",
+				os.Getpid(), time.Since(startedAt).Round(time.Second), ms.HeapAlloc>>20, ms.Sys>>20, runtime.NumGoroutine())
 		}
 	}
 }
