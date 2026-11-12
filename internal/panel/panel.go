@@ -304,6 +304,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/packages", p.packages)
 	p.mux.HandleFunc("GET /panel/api/balance_history", p.balanceHistory)
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.schoolVouchers)
+	// 运营活动（星巴克等）：批量读进度 + 批量领已达标的奖励。
+	// 只做「读 + 领」——任务本身要客户端真实会话，服务端侧伪造不计数（见 docs/campaign-probe.md）。
+	p.mux.HandleFunc("GET /panel/api/campaign", p.campaignStatus)
+	p.mux.HandleFunc("POST /panel/api/campaign/claim", p.campaignClaim)
 	p.mux.HandleFunc("GET /panel/api/usage", p.usage)
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.usageSave)
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.modelProbes)
