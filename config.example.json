@@ -97,6 +97,7 @@
     "sanitize_blacklist_fingerprints": true,
     "sanitize_brand_scope": "all",
     "embeddings_enabled": false,
+    "repair_deferred_tool_args": false,
     "watermark_strip_enabled": false
   },
   "models": {

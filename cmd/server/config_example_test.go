@@ -38,7 +38,18 @@ func TestConfigExampleIsValid(t *testing.T) {
 	}
 	// models.allowed（issue #68）：示例必须是存在的数组（仿上方各项的「示例可见」
 	// 口径）。空数组解析为非 nil 空切片；nil = 键缺失，用户无从发现白名单配置。
-	if c.Models.Allowed == nil {
-		t.Error("models.allowed 示例应存在（空数组即可），否则用户不知道有白名单开关")
+	var example map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &example); err != nil {
+		t.Fatal(err)
+	}
+	var features map[string]json.RawMessage
+	if err := json.Unmarshal(example["features"], &features); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := features["repair_deferred_tool_args"]; !ok {
+		t.Error("features.repair_deferred_tool_args 示例键缺失")
+	}
+	if c.Features.RepairDeferredToolArgs {
+		t.Error("features.repair_deferred_tool_args 示例应显式关闭")
 	}
 }

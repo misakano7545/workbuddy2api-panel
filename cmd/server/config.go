@@ -329,6 +329,11 @@ type Config struct {
 		// 「功能存在、只是没开」，不用去猜路径拼错）。
 		EmbeddingsEnabled bool `json:"embeddings_enabled"`
 
+		// RepairDeferredToolArgs 实验特性：修复 DeferredToolCall 的残缺参数——模型把
+		// input 写成 JSON 字符串，或参数 JSON 被截断（见 internal/upstream/tool_arg_repair.go）。
+		// 只影响 DeferredToolCall，其它工具零改写。默认关闭；启动时读取（改完需重启）。
+		RepairDeferredToolArgs bool `json:"repair_deferred_tool_args"`
+
 		// WatermarkStripEnabled 实验特性：水印裁切端点 POST /v1/images/strip-watermark
 		// 与 MCP 工具 strip_watermark 的总开关，默认 false。
 		//
@@ -931,6 +936,7 @@ func (c *Config) EnvironmentManagedFields() []string {
 		{"WB2A_DEVICE_TOKEN_FILE", "upstream.device_token_file", ""}, {"WB2A_PASSTHROUGH_IP", "upstream.passthrough_ip", "bool"},
 		{"WB2A_SANITIZE_FINGERPRINTS", "features.sanitize_blacklist_fingerprints", "bool"},
 		{"WB2A_SANITIZE_BRAND_SCOPE", "features.sanitize_brand_scope", ""},
+		{"WB2A_REPAIR_DEFERRED_TOOL_ARGS", "features.repair_deferred_tool_args", "bool"},
 		{"WB2A_PROMPT_MODE", "prompt.mode", ""}, {"WB2A_PROMPT_FILE", "prompt.file", ""},
 		{"WB2A_THINKING_ENABLED", "thinking.enabled", "bool"},
 		{"WB2A_THINKING_DEFAULT_EFFORT", "thinking.default_effort", ""},

@@ -577,6 +577,9 @@ func main() {
 		RestrictionHold: time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
 		// 等上游首帧期间的 SSE 注释帧间隔（server.head_keepalive，缺省 1.5s）。
 		HeadKeepalive: cfg.HeadKeepaliveDur,
+		// DeferredToolCall 残缺参数修复（features.repair_deferred_tool_args，默认关；
+		// 启动时读取）。只影响 DeferredToolCall，其它工具零改写。
+		RepairDeferredToolArgs: cfg.Features.RepairDeferredToolArgs,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

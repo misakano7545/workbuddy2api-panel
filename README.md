@@ -459,6 +459,7 @@ DMG 未公证，首次打开需要右键 →「打开」。
 | **出视频端点** | `POST /v1/videos/generations`（上游 `/v2/videos/generations` 提交 → `/v2/videos/tasks` 轮询 → 透出签名直链）+ `GET /v1/videos/{task_id}` + `POST /v1/videos/tasks`。缺省 `wait=true` 阻塞到出片（实测 minimax 4s ≈124s、kling 4s ≈473s），`wait=false` 秒回 `task_id`；任务→账号台账进程内保存，带「已记账」标记与用量快照——重复查询既不重复记账、也不丢 `usage`（上游只回一次） |
 | **水印裁切（可选）** | `POST /v1/images/strip-watermark` + MCP 工具 `strip_watermark`：把成品图底部的整条纯白留白裁掉，右下角「AI生成」水印随之消失（实测水印 111×51px、贴边 10px；白底上像素级不可见）。默认关闭（`features.watermark_strip_enabled`），纯 stdlib 实现（`internal/media`，逐行标准差找内容/留白分界），只做裁剪不做 inpainting，留白不足回 422 并给实测数字；图片地址限上游产物域，避免 SSRF |
 | **MCP 端点** | `POST /mcp`：JSON-RPC 2.0 纯 POST 形态（无 SSE、无 session），`initialize` / `ping` / `tools/list` / `tools/call` 齐全，工具 `list_generation_models`、`generate_image`、`edit_image`、`generate_video`、`get_video_task`。工具调用复用网关自己的 HTTP handler，换号/错误策略/记账/请求日志与 REST 同一路径 |
+| **DeferredToolCall 参数修复（实验）** | `features.repair_deferred_tool_args`（默认 false）只处理名为 `DeferredToolCall` 的流式工具调用：把可解析为对象的字符串 `input` 还原成对象，并仅在括号/字符串明确未闭合时补结构。缺失值、截断的数字/布尔值及其他非法 JSON 原样透传；单调用参数超过 1 MiB 后停止缓存并原样透传。其它工具不改写，开启后该工具的参数会在收尾前集中发出 |
 | **嵌入端点（实验）** | `POST /v1/embeddings`：OpenAI 兼容嵌入，默认关闭（`features.embeddings_enabled`）。上游 `POST /v2/embeddings` 与对话是两套注册表，实测只有 `bge-m3`（1024 维）；`11351` 映射成 404 `model_not_found`，回程补 `object`/`index`，条数不符 502。关闭时回 403 `embeddings_disabled` |
 | **补签卡每轮上限** | `schedule.makeup_cards_per_round`（默认 `0` = 不限，保持既有行为）。补签会改账号历史，保守部署设 `1` 即每轮只补一张，剩余漏签下一轮继续；面板保存后热生效 |
 

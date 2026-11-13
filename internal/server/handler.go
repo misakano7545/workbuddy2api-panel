@@ -122,6 +122,12 @@ type Config struct {
 	// （features.watermark_strip_enabled，默认关闭）。同上：Live 非 nil 时以热快照为准。
 	WatermarkStripEnabled bool
 
+	// RepairDeferredToolArgs 实验特性：修复 DeferredToolCall 的残缺参数
+	// （features.repair_deferred_tool_args，默认关闭；启动时读取）。见
+	// internal/upstream/tool_arg_repair.go。只影响 function.name == DeferredToolCall
+	// 的调用，其它工具零改写。
+	RepairDeferredToolArgs bool
+
 	// MaxPayloadBytes 入站请求体安全上限（字节，server.max_payload_bytes，默认 64MiB）。
 	// 只挡「大到能把进程读死」的上传，不做大请求预拦截（见 bodylimit.go）。启动时读取。
 	MaxPayloadBytes int64
@@ -1817,6 +1823,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
 			}), upstream.WithMarkupRepair(repair), upstream.WithModelEcho(modelEcho),
+				upstream.WithToolArgRepair(h.cfg.RepairDeferredToolArgs),
 				// 客户端已断开时上游只是被动跟随，别把断流记成上游故障（日志归因）。
 				upstream.WithClientGoneFn(func() bool { return r.Context().Err() != nil }))
 			// 首帧否决（见 upstream.HeadVetoError）：网关一个字节都没写出，这次尝试对
