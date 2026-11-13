@@ -14,7 +14,7 @@ func TestParseNormalizesOfficialCLIExpiresAt(t *testing.T) {
 	wantSec := int64(cliMillis / 1000)
 
 	raw := []byte(`{
-		"account": {"uid":"00000000-0000-4000-8000-000000000001","nickname":"misakano7545","uin":"450701993596"},
+		"account": {"uid":"00000000-0000-4000-8000-000000000001","nickname":"misakano7545","uin":"000000000000"},
 		"auth": {"accessToken":"at","refreshToken":"rt","expiresAt":1795254516410,
 		         "domain":"www.codebuddy.ai","tokenType":"Bearer","expiresIn":2418995}
 	}`)
