@@ -216,6 +216,9 @@ func main() {
 	// （kimi-k3-1 实案：全池无观测 → 保底全放行 → 两笔打穿并硬冷却到次日 04:00）。
 	// 位于 up 装配之后：倍率表由探测下发，闭包每次调用读实时快照。
 	p.SetModelRateOf(func(realm, model string) string { return up.ModelRate(realm, model) })
+	// 「免费号调不通」的模型（modelTiers accessMode=exclusive）：知道账号免费就不派给它。
+	// 付费状态来自 billing summary 的 IsPaidUser（顺手记在 upstream 里），没观测过就放行。
+	p.SetExclusiveModels(up.ModelExclusive, up.PaidUser)
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
@@ -232,6 +235,8 @@ func main() {
 	}
 	defer proxies.Close()
 	proxies.SetTLSOver(up.TLSOver) // 经代理的 HTTPS 与直连同一指纹、同一请求头顺序
+	// 出口画像（国家 / 住宅或机房 / ISP）：随健康探测顺手查，查不到就空着，不参与选号。
+	proxies.EnableExitLookup()
 	up.ProxyPool = proxies
 	up.SanitizeFingerprints.Store(cfg.Features.SanitizeBlacklistFingerprints)
 	up.SanitizeBrandScope.Store(cfg.Features.SanitizeBrandScope)

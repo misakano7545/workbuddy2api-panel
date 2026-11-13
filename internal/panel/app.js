@@ -5704,8 +5704,11 @@ function renderProxies() {
   setHTML($('proxyBody'), list.length ? list.slice((proxyPage - 1) * 25, proxyPage * 25).map(p => {
     const [tone, text] = PROXY_STATES[p.status] || ['warn', p.status];
     const action = (type, label, disabled = false) => '<button class="icon ghost' + (type === 'remove' ? ' danger' : '') + '" data-proxy-action="' + type + '" data-id="' + esc(p.id) + '" title="' + esc(label) + '" aria-label="' + esc(label + ' ' + p.name) + '"' + (disabled ? ' disabled' : '') + '>' + proxyIcon(type) + '</button>';
+    const exitNote = p.exit && p.exit.ip
+      ? '<div class="note">出口 ' + esc(p.exit.ip) + ' · ' + esc([p.exit.country, ({residential:'住宅',datacenter:'机房'})[p.exit.ip_type] || ''].filter(Boolean).join(' ')) + (p.exit.isp ? ' · ' + esc(p.exit.isp) : '') + '</div>'
+      : '';
     return '<tr><td class="proxy-name"><b>' + esc(p.name) + '</b><div class="note">' + esc(p.protocol.toUpperCase()) + '</div></td>' +
-      '<td class="proxy-address">' + esc(p.url) + (p.password_set ? '<div class="note">已设置密码</div>' : '') + '</td>' +
+      '<td class="proxy-address">' + esc(p.url) + (p.password_set ? '<div class="note">已设置密码</div>' : '') + exitNote + '</td>' +
       '<td><span class="tag ' + tone + '">' + (p.checking ? '检测中' : esc(text)) + '</span></td>' +
       '<td class="num">' + (p.checked_at && !p.checked_at.startsWith('0001-') ? p.latency_ms + ' ms' : '—') + '</td>' +
       '<td class="note">' + (p.checked_at && !p.checked_at.startsWith('0001-') ? esc(fmtLocalDateTime(p.checked_at)) : '—') + '</td>' +

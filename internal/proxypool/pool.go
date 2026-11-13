@@ -2,6 +2,7 @@
 package proxypool
 
 import (
+	"context"
 	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -119,6 +120,8 @@ type View struct {
 	Failures    int       `json:"failures"`
 	Successes   int       `json:"successes"`
 	BoundCount  int       `json:"bound_count"`
+	// Exit 出口画像（国家 / 住宅或机房 / ISP / ASN）。空字段 = 不知道，不是「没问题」。
+	Exit ExitInfo `json:"exit"`
 }
 
 type Snapshot struct {
@@ -161,6 +164,11 @@ type Manager struct {
 	wake       chan struct{}
 	// Shared by periodic and manual probes, including concurrent HTTP handlers.
 	slots chan struct{}
+	// exit 每个节点的出口画像（ip / 国家 / 住宅或机房 / ISP），见 intel.go。
+	// 持久化不必要：重启后第一次探测会重新取。
+	exit map[string]ExitInfo
+	// lookupExitFn 出口画像的查询函数；nil = 关闭（默认，见 EnableExitLookup）。
+	lookupExitFn func(context.Context) ExitInfo
 }
 
 func New(path string, base *http.Transport, dialer *net.Dialer) (*Manager, error) {
@@ -175,6 +183,7 @@ func New(path string, base *http.Transport, dialer *net.Dialer) (*Manager, error
 		data:   disk{Nodes: []node{}, Bindings: map[string]Binding{}, Realms: map[string]Binding{}, Settings: DefaultSettings()},
 		health: map[string]health{}, generation: map[string]uint64{}, checking: map[string]bool{}, requested: map[string]bool{},
 		transports: map[string]*http.Transport{}, wake: make(chan struct{}, 1), slots: make(chan struct{}, 8),
+		exit: map[string]ExitInfo{},
 	}
 	if path != "" {
 		raw, err := safefile.Read(path, nil)
@@ -311,6 +320,7 @@ func (m *Manager) Snapshot() Snapshot {
 			ID: n.ID, Name: n.Name, URL: u.String(), Protocol: u.Scheme, PasswordSet: passwordSet,
 			Enabled: n.Enabled, Status: status, Checking: m.checking[n.ID], LatencyMS: h.latencyMS,
 			CheckedAt: h.checkedAt, LastError: h.lastError, Failures: h.failures, Successes: h.successes, BoundCount: counts[n.ID],
+			Exit: m.exit[n.ID],
 		})
 	}
 	return s
@@ -452,6 +462,7 @@ func (m *Manager) Update(id string, in Input) error {
 func (m *Manager) resetLocked(id string) {
 	m.generation[id]++
 	delete(m.health, id)
+	delete(m.exit, id) // 换了地址就是换了出口，旧画像不能留着
 	if tr := m.transports[id]; tr != nil {
 		tr.CloseIdleConnections()
 		delete(m.transports, id)
