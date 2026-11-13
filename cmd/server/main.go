@@ -577,6 +577,9 @@ func main() {
 		RestrictionHold: time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
 		// 等上游首帧期间的 SSE 注释帧间隔（server.head_keepalive，缺省 1.5s）。
 		HeadKeepalive: cfg.HeadKeepaliveDur,
+		// 6020/6021 渠道排队：网关内先等一轮（features.busy_retry / busy_wait_seconds）。
+		BusyRetry:   cfg.Features.BusyRetry,
+		BusyWaitMax: time.Duration(cfg.Features.BusyWaitSeconds) * time.Second,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

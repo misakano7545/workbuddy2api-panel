@@ -329,6 +329,12 @@ type Config struct {
 		// 「功能存在、只是没开」，不用去猜路径拼错）。
 		EmbeddingsEnabled bool `json:"embeddings_enabled"`
 
+		// BusyRetry 6020/6021 渠道排队时，先在网关内按上游 retry_after 等一轮再试一次，
+		// 避免把「等 40 秒就好」的排队当成不可重试错误甩给客户端（默认 true）。
+		BusyRetry bool `json:"busy_retry"`
+		// BusyWaitSeconds 单次排队等待上限（秒，默认 60）。0 = 用默认；负数 = 不等。
+		BusyWaitSeconds int `json:"busy_wait_seconds"`
+
 		// WatermarkStripEnabled 实验特性：水印裁切端点 POST /v1/images/strip-watermark
 		// 与 MCP 工具 strip_watermark 的总开关，默认 false。
 		//
@@ -625,6 +631,10 @@ func Default() *Config {
 	c.Global.Enabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Features.SanitizeBrandScope = "all"
+	// 6020/6021 排队等待（见 internal/server/handler.go 的 ErrUpstreamBusy 分支）：
+	// 缺省等一轮（60s 上限），避免把上游明说「40 秒后再来」的排队秒变成客户端可见失败。
+	c.Features.BusyRetry = true
+	c.Features.BusyWaitSeconds = 60
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	// 思考档位策略缺省：网关按模型最高档补缺档请求，但客户端显式档位优先
 	// （client_priority=true），且不覆盖客户端的关闭思考意图（override_scope=level）。
@@ -1032,6 +1042,14 @@ func (c *Config) normalize() error {
 	}
 	if c.HeadKeepaliveDur < 0 {
 		return fmt.Errorf("server.head_keepalive: 负时长 %q 无意义", c.Server.HeadKeepalive)
+	}
+	// 排队等待上限：0 回落缺省 60s；负数合法（= 不等，直接把排队交给客户端）；
+	// 超过 Retry-After 上报上限（600s）没有意义也无从验证，fail fast。
+	if c.Features.BusyWaitSeconds == 0 {
+		c.Features.BusyWaitSeconds = 60
+	}
+	if c.Features.BusyWaitSeconds > 600 {
+		return fmt.Errorf("features.busy_wait_seconds: %d 超出允许范围 1–600", c.Features.BusyWaitSeconds)
 	}
 	// 优雅关停窗口：空回落 30s（分钟级在途 SSE 远比旧固定 5s 常见）；"0" 合法
 	//（立即退）；负值 fail fast。

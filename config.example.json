@@ -97,6 +97,8 @@
     "sanitize_blacklist_fingerprints": true,
     "sanitize_brand_scope": "all",
     "embeddings_enabled": false,
+    "busy_retry": true,
+    "busy_wait_seconds": 60,
     "watermark_strip_enabled": false
   },
   "models": {
