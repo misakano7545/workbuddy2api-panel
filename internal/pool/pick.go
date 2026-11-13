@@ -55,6 +55,8 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// 触底 + 收费（本地实测台账 或 上游目录倍率）即拦；免费/未知倍率不受限。
 	floorBlocked := func(e *entry) bool { return p.floorBlockedForRealmModel(e, reqModel, realm, now) }
 	var cands []*entry
+	// exclusiveHeld 只因为「模型免费号调不通」被挡下的号（见下方 relaxation）。
+	var exclusiveHeld []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
@@ -69,7 +71,16 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if floorBlocked(e) {
 			continue // 积分保底：触底号不接实测收费模型（tier 0/1 不受限）
 		}
+		if p.exclusiveBlockedForRealmModel(e, reqModel, realm) {
+			exclusiveHeld = append(exclusiveHeld, e)
+			continue // 模型免费号调不通：已知免费的号不接这一单
+		}
 		cands = append(cands, e)
+	}
+	// 池里只剩「已知免费」的号：放行。宁可撞一次 11158（随后进模型级负缓存），
+	// 也好过把「有号但都没订阅」变成「无号可用」。
+	if len(cands) == 0 && len(exclusiveHeld) > 0 {
+		cands = exclusiveHeld
 	}
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
@@ -322,6 +333,28 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 		return false // 倍率非数值（异常形态）：不据此惩罚账号
 	}
 	return v > p.creditFloorMaxRate
+}
+
+// exclusiveBlockedForRealmModel 该号是否因为「这个模型免费号调不通」而不该接这一单。
+//
+// 判据只有一条：目录里的 modelTiers 给了 accessMode=exclusive（海外 Pro Only 的机器可读
+// 口径），且这个号的付费状态**已知为免费**。付费状态不知道就放行——缺数据不能变成「把
+// 能用的号排掉」，宁可按现状打一次上游（撞 11158 后进模型级负缓存）。
+//
+// 粘性路径不受这条约束：绑定的号如果调不通，11158 的确定性负缓存会让下一次 Resolve
+// 换号，代价是多一次失败请求，不影响正确性。
+func (p *Pool) exclusiveBlockedForRealmModel(e *entry, model, realm string) bool {
+	if p.exclusiveModelOf == nil || p.exclusivePaidOf == nil || model == "" {
+		return false
+	}
+	if realm == "" {
+		realm = e.a.Realm()
+	}
+	if !p.exclusiveModelOf(realm, model) {
+		return false
+	}
+	paid, known := p.exclusivePaidOf(e.a.UID)
+	return known && !paid
 }
 
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
