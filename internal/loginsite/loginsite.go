@@ -359,7 +359,7 @@ func CodeFatal(code int) bool {
 //
 // **不发 version**：2026-10-31 实测，workbuddy.ai 授权页的 bundle（index-oMkbFDfl.js）
 // 只从 URL 读 `platform` 与 `fromSource`，`version` 一次都没读过；去掉后真机登录照样
-// 成功（global 号 204af49d 入池）。而本仓填的 version 与真机包不同版本（链接 2.176.0
+// 成功（global 号 00000001 入池）。而本仓填的 version 与真机包不同版本（链接 2.176.0
 // vs 桌面端 5.9.4/内置 CLI 2.165.0），一旦上游开始读它就是「错的指纹」——与
 // ww_device_nonce 同一条原则：错值比缺值更容易被判异常。
 //

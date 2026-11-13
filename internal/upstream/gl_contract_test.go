@@ -29,7 +29,7 @@ import (
 // glGlobalAuth 国际版个人号（Domain 落 www.workbuddy.ai，与真机 X-Domain 同值）。
 func glGlobalAuth() *auth.Auth {
 	return &auth.Auth{
-		UID: "204af49d-0208-4ed9-a36d-35dfcbbec818", AccessToken: "AT",
+		UID: "00000000-0000-4000-8000-000000000001", AccessToken: "AT",
 		RefreshToken: "RT", Nickname: "misakano7545",
 		Domain: "www.workbuddy.ai",
 	}
