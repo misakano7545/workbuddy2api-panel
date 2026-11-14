@@ -313,7 +313,7 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 对齐官方：授权链接补 version（workbuddy 域再加设备 nonce）。
-	st.AuthURL = loginsite.DecorateAuthURL(st.AuthURL, site, loginDeviceNonce())
+	st.AuthURL = loginsite.DecorateAuthURL(st.AuthURL, site, loginDeviceNonce(), loginsite.NewLoginSessionID())
 	p.loginMu.Lock()
 	// 顺手回收过期会话，防"开弹窗走开"的 state 滞留。
 	for s, sess := range p.logins {

@@ -80,6 +80,12 @@ type Site struct {
 	// —— 该头声明「哪个前端在调用」，与落到哪台机器无关。
 	// 空 = 回落 Origin 的主机名。
 	Domain string
+	// Version 授权链接的 version 参数（官方客户端写自己的包版本）。
+	//
+	// 2026-11-14 真机实测（CN 5.9.3，Chrome 地址栏）：官方链接带 `version=5.9.3`，
+	// 授权页把这个值原样转给 `console/auth/risk-context?platform=workbuddy&version=5.9.3`
+	// 并编进回调地址——它确实被读取，不是装饰。空 = 不加（未复核站点）。
+	Version string
 }
 
 // 官方域表。两个国际站实测是同一后端（2026-10-24：同一 token 打两域，
@@ -101,6 +107,7 @@ var (
 		Platform:  "workbuddy",
 		UserAgent: "WorkBuddy/" + ClientVersionWorkBuddyCN + " WorkBuddy/" + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLI,
 		Domain:    "www.workbuddy.cn",
+		Version:   ClientVersionWorkBuddyCN,
 	}
 	siteIntl = Site{
 		ID: SiteIntl, Realm: RealmGlobal,
@@ -352,28 +359,55 @@ func CodeFatal(code int) bool {
 	return false
 }
 
-// DecorateAuthURL 按官方 CLI 行为补齐授权链接参数（对应 appendAuthUrlParams /
-// appendLoginPageHintParams）：
+// DecorateAuthURL 按真机实测补齐授权链接参数（对应官方的 appendHostLoginJourneyParams /
+// appendAuthUrlParams / appendLoginPageHintParams）：
 //
-//	ww_device_nonce=<nonce>   官方仅 platform=workbuddy 且拿到设备 nonce 时加
+//	version=<site.Version>      官方写自己的包版本；CN 授权页会把它转给
+//	                            console/auth/risk-context 并编进回调地址
+//	loginSessionId=<id>         官方客户端本地生成的登录会话标识；授权页从 URL 读它，
+//	                            并原样带进 signin-callback
+//	ww_device_nonce=<nonce>     官方仅 platform=workbuddy 且拿到设备 nonce 时加
 //
-// **不发 version**：2026-10-31 实测，workbuddy.ai 授权页的 bundle（index-oMkbFDfl.js）
-// 只从 URL 读 `platform` 与 `fromSource`，`version` 一次都没读过；去掉后真机登录照样
-// 成功（global 号 00000001 入池）。而本仓填的 version 与真机包不同版本（链接 2.176.0
-// vs 桌面端 5.9.4/内置 CLI 2.165.0），一旦上游开始读它就是「错的指纹」——与
-// ww_device_nonce 同一条原则：错值比缺值更容易被判异常。
+// 2026-11-14 对 CN 5.9.3 的真机链接实测（Chrome 地址栏原文，state/nonce 已脱敏）：
 //
-// 本仓没有桌面端 Turing 设备 SDK，nonce 只能由部署侧提供；为空则不加——不伪造
-// 设备指纹。raw 解析失败时原样返回。
-func DecorateAuthURL(raw string, s Site, nonce string) string {
+//	/login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>
+//	      &traceparent=00-…-…-01&login_owner_id=<uuid>&ww_device_nonce=<nonce>
+//
+// traceparent / login_owner_id 是客户端自己的链路与宿主标识，本仓没有等价物，
+// 不伪造（错值比缺值更容易被判异常）。旧的「不发 version」判断来自 workbuddy.ai
+// 的 bundle（那份确实没读），CN 这份读了——所以只有配了 Version 的站点才加。
+//
+// 本仓没有桌面端 Turing 设备 SDK，nonce 只能由部署侧提供；为空则不加。
+// raw 解析失败时原样返回。
+func DecorateAuthURL(raw string, s Site, nonce, sessionID string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return raw
 	}
 	q := u.Query()
+	if s.Version != "" && q.Get("version") == "" {
+		q.Set("version", s.Version)
+	}
+	if sessionID != "" && q.Get("loginSessionId") == "" {
+		q.Set("loginSessionId", sessionID)
+	}
 	if s.Platform == "workbuddy" && nonce != "" && q.Get("ww_device_nonce") == "" {
 		q.Set("ww_device_nonce", nonce)
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// NewLoginSessionID 生成 uuid v4 形态的登录会话标识。
+//
+// 官方由客户端本地生成、只做透传（授权页读它再编进回调），不是服务端签发的凭证，
+// 所以本地随机即可；用 v4 形状只是为了与真机同一形态。
+func NewLoginSessionID() string {
+	var b [16]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return ""
+	}
+	b[6] = b[6]&0x0f | 0x40 // version 4
+	b[8] = b[8]&0x3f | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

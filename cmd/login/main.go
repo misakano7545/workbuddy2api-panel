@@ -293,7 +293,7 @@ func runURL(site loginsite.Site, statePath string, client *http.Client, out io.W
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		fatal("write state: %v", err)
 	}
-	fmt.Fprintln(out, loginsite.DecorateAuthURL(st.AuthURL, site, loginDeviceNonce()))
+	fmt.Fprintln(out, loginsite.DecorateAuthURL(st.AuthURL, site, loginDeviceNonce(), loginsite.NewLoginSessionID()))
 }
 
 // loginDeviceNonce 官方 ww_device_nonce 的来源（桌面端 Turing 设备 SDK）。本仓无

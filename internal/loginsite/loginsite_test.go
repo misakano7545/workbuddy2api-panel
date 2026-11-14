@@ -2,6 +2,7 @@ package loginsite
 
 import (
 	"net/url"
+	"regexp"
 	"testing"
 )
 
@@ -125,15 +126,28 @@ func TestCodeSemantics(t *testing.T) {
 	}
 }
 
-// TestDecorateAuthURL 覆盖授权链接参数补齐（对齐官方 appendAuthUrlParams）：
-// 不发 version（授权页 bundle 从不读它）；ww_device_nonce 只对 platform=workbuddy
-// 的站点且 nonce 非空时补——按官方口径，platform=workbuddy 的正是国内桌面端（CN 站）。
+// TestDecorateAuthURL 覆盖授权链接参数补齐（对齐官方 appendHostLoginJourneyParams /
+// appendAuthUrlParams）：
+//
+//   - version：只有配了 Site.Version 的站点（目前 CN）才补——2026-11-14 实测 CN 授权页
+//     会读它并转给 console/auth/risk-context；workbuddy.ai 那份 bundle 不读，故不补。
+//   - loginSessionId：调用方给了就补（官方便是客户端本地生成后透传）。
+//   - ww_device_nonce：只对 platform=workbuddy 的站点且 nonce 非空时补。
 func TestDecorateAuthURL(t *testing.T) {
 	const base = "https://example.com/login?platform=CLI&state=abc"
+	const sid = "caf6af35-8aa2-4037-89e8-c8a70ffbda5a"
 
-	// 不发 version；原有参数（含 URL 自带的 platform）一律不动。
-	for _, id := range []string{SiteCN, SiteIntl, SiteWorkBuddy} {
-		got := DecorateAuthURL(base, For(id), "")
+	// CN 补 version 与 loginSessionId；原有参数一律不动。
+	got := DecorateAuthURL(base, For(SiteCN), "", sid)
+	if !containsParam(t, got, "version", ClientVersionWorkBuddyCN) {
+		t.Errorf("cn 站未补 version: %s", got)
+	}
+	if !containsParam(t, got, "loginSessionId", sid) {
+		t.Errorf("cn 站未补 loginSessionId: %s", got)
+	}
+	// 未配 Version 的站点不补 version（不拿错版本冒充）。
+	for _, id := range []string{SiteIntl, SiteWorkBuddy} {
+		got := DecorateAuthURL(base, For(id), "", sid)
 		u, err := url.Parse(got)
 		if err != nil {
 			t.Fatalf("%s: parse %q: %v", id, got, err)
@@ -141,7 +155,9 @@ func TestDecorateAuthURL(t *testing.T) {
 		if v := u.Query().Get("version"); v != "" {
 			t.Errorf("%s 不该补 version，得到 %q", id, v)
 		}
-		// 原有参数不得丢。
+		if !containsParam(t, got, "loginSessionId", sid) {
+			t.Errorf("%s 未补 loginSessionId: %s", id, got)
+		}
 		if s := u.Query().Get("state"); s != "abc" {
 			t.Errorf("%s state=%q want abc（原有参数被破坏）", id, s)
 		}
@@ -151,27 +167,38 @@ func TestDecorateAuthURL(t *testing.T) {
 	}
 
 	// platform=workbuddy 的站点（= 国内桌面端）带 nonce。
-	if got := DecorateAuthURL(base, For(SiteCN), "nonce-1"); !containsParam(t, got, "ww_device_nonce", "nonce-1") {
+	if got := DecorateAuthURL(base, For(SiteCN), "nonce-1", ""); !containsParam(t, got, "ww_device_nonce", "nonce-1") {
 		t.Errorf("cn 站（platform=workbuddy）未补 ww_device_nonce: %s", got)
 	}
 	for _, id := range []string{SiteIntl, SiteWorkBuddy} {
-		if got := DecorateAuthURL(base, For(id), "nonce-1"); containsParam(t, got, "ww_device_nonce", "") {
+		if got := DecorateAuthURL(base, For(id), "nonce-1", ""); containsParam(t, got, "ww_device_nonce", "") {
 			t.Errorf("%s 站不该补 ww_device_nonce: %s", id, got)
 		}
 	}
 	// nonce 为空时一律不补（不伪造设备指纹）。
-	if got := DecorateAuthURL(base, For(SiteCN), ""); containsParam(t, got, "ww_device_nonce", "") {
+	if got := DecorateAuthURL(base, For(SiteCN), "", ""); containsParam(t, got, "ww_device_nonce", "") {
 		t.Errorf("nonce 为空时不该补 ww_device_nonce: %s", got)
 	}
 
-	// 上游已带 version 时不覆盖（尊重上游口径）。
-	if got := DecorateAuthURL(base+"&version=9.9.9", For(SiteCN), ""); !containsParam(t, got, "version", "9.9.9") {
-		t.Errorf("已有 version 被覆盖: %s", got)
+	// 上游已带的值不覆盖（尊重上游口径）。
+	if got := DecorateAuthURL(base+"&version=9.9.9&loginSessionId=up", For(SiteCN), "", sid); !containsParam(t, got, "version", "9.9.9") || !containsParam(t, got, "loginSessionId", "up") {
+		t.Errorf("已有参数被覆盖: %s", got)
 	}
 
 	// 非法 URL 原样返回（不阻断登录）。
-	if got := DecorateAuthURL("://bad", For(SiteCN), ""); got != "://bad" {
+	if got := DecorateAuthURL("://bad", For(SiteCN), "", sid); got != "://bad" {
 		t.Errorf("非法 URL 未原样返回: %q", got)
+	}
+}
+
+// NewLoginSessionID 必须是 uuid v4 形态且每次不同（授权页会原样透传进回调地址）。
+func TestNewLoginSessionID(t *testing.T) {
+	a, b := NewLoginSessionID(), NewLoginSessionID()
+	if a == "" || a == b {
+		t.Fatalf("loginSessionId 应非空且每次不同: %q / %q", a, b)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(a) {
+		t.Fatalf("不是 uuid v4 形态: %q", a)
 	}
 }
 
