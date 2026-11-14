@@ -15,11 +15,12 @@ import (
 //
 // 为什么钉死 sha：面板 CSP 只允许 self（不能引外链 QR 服务），也不引前端依赖，
 // 所以 QR 是手写实现 —— 分段、纠错、交织、掩码任一处错都只表现为「扫不出来」，
-// 浏览器里没有任何断言能发现。下面的 golden 已由 python qrcode 库逐像素交叉验证
-// （byte 模式 + ECC L + mask 0，v1-v6 共 30 组输入全部 diff=0）。
+// 浏览器里没有任何断言能发现。下面的 golden 由 npm `qrcode`（byte 模式 + ECC L +
+// mask 0，逐版本用 maskPattern 强制）生成并逐像素 diff=0 交叉验证过。
 //
-// v6 是 issue #94 新增的：workbuddy 站的授权链接 108 字节超过 v5 单块上限 106，
-// 需要两块交织；CN 站 105 字节仍走 v5。两条路径都要钉。
+// 版本要求随授权链接变长而涨：加 loginSessionId 后 CN 链接 158 字节（v8），带
+// ww_device_nonce 时 207 字节（v9）。v7+ 还多了版本信息块（BCH(6,18)），且
+// 对齐图案的中心会落在贯穿线上 —— 这两处都是 v6 之前不存在的代码路径。
 func TestAppJSQRMatrix(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -51,13 +52,19 @@ fs.writeFileSync(process.argv[4], JSON.stringify(out));`
 	f.Close()
 
 	const st = "12345678-1234-1234-1234-123456789abc"
+	const sid = "dcca8b18-4ad8-4a60-aa13-e7592a0e13a4"
 	inputs := map[string]string{
 		// CN 站真实形态：105 字节 → v5（37×37，单块）
 		"cn": "https://copilot.tencent.com/login?platform=CLI&state=" + st + "&version=2.176.0",
 		// workbuddy 站：108 字节 → v6（41×41，两块交织）
 		"wb": "https://www.workbuddy.ai/login?platform=workbuddy&state=" + st + "&version=2.176.0",
-		// 容量上界 134 字节；135 必须报错（前端据此退回只显示链接）
-		"over": strings.Repeat("a", 135),
+		// 现在面板真实产出的 CN 链接（带 loginSessionId）：158 字节 → v8（49×49）
+		"cnSid": "https://www.workbuddy.cn/login?loginSessionId=" + sid + "&platform=workbuddy&state=" + st + "&version=5.9.3",
+		// 配了 ww_device_nonce 时：207 字节 → v9（53×53）
+		"cnNonce": "https://www.workbuddy.cn/login?loginSessionId=" + sid + "&platform=workbuddy&state=" + st +
+			"&version=5.9.3&ww_device_nonce=" + strings.Repeat("n", 32),
+		// 容量上界 230 字节；231 必须报错（前端据此退回只显示链接）
+		"over": strings.Repeat("a", 231),
 	}
 	in, _ := json.Marshal(inputs)
 	outPath := filepath.Join(t.TempDir(), "out.json")
@@ -85,6 +92,8 @@ fs.writeFileSync(process.argv[4], JSON.stringify(out));`
 	}{
 		{"cn", "CN 站 105 字节 / v5", 37, "2ccaa4c9502d84f197a54ec1d4a174a8312e1db42b3d8a05f306c97477a0a3cd"},
 		{"wb", "workbuddy 站 108 字节 / v6 两块交织", 41, "c5818c46fe1cdb1bc829a2249d3fc790f5a0f2c7b141bd196e722bbe5c6ed1ef"},
+		{"cnSid", "CN 授权链接 158 字节 / v8（带版本信息块）", 49, "01c41b6708bb8a8f6b309ebef6310ea9719170dee926da1919128bb315f47356"},
+		{"cnNonce", "CN 授权链接 207 字节 / v9（带 nonce）", 53, "3af9a315f226ba5c553fc8b1e81bb81a7520ddf400763093178760a64f156d32"},
 	} {
 		r := got[c.key]
 		if r.Err != "" {
@@ -100,6 +109,6 @@ fs.writeFileSync(process.argv[4], JSON.stringify(out));`
 		}
 	}
 	if r := got["over"]; r.Err == "" {
-		t.Errorf("135 字节超出 v6 容量应报错（前端靠它退回链接），实际编码成功 n=%d", r.N)
+		t.Errorf("231 字节超出 v9 容量应报错（前端靠它退回链接），实际编码成功 n=%d", r.N)
 	}
 }
