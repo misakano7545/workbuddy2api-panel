@@ -1846,9 +1846,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 段时，同账号同模型补发「已输出内容+续写指令」，多段拼成一条客户端可见流。
 			// 显式限额 / 工具参数截断 / 续写请求失败 → 自动降级为今天的截断终态。
 			// 本轮生效档位对应的输出预算下限：续写/救援段从原始 body 重建，靠它把
-			// max_tokens 补回可用值（见 upstream.MinOutputBudget 的说明）。
+			// max_tokens 补回可用值（与出站抬额度同一口径、按目录封顶，见 upstream.OutputBudgetFloor）。
 			cont := newContinueReaderWithFloor(r.Context(), h.cfg.Upstream, acct, body, clientIP, chatMeta, rc,
-				upstream.MinOutputBudget(hopTiming.Effort))
+				h.cfg.Upstream.OutputBudgetFloor(acct.Realm(), curModel, hopTiming.Effort))
 			defer cont.Close()
 			stats := newChatStatsReaderSince(cont, st.start)
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
@@ -1870,7 +1870,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 透给客户端（SSE 发过字节就改不了状态码，此前只能这么兜底）。
 			var hv *upstream.HeadVetoError
 			if errors.As(sErr, &hv) {
-				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+				// 客户端一个字节没收到，但续写层在首帧之前可能已经跑完过一段（零输出的首段
+				// 触发了救援重发、救援段才吐出 error 帧）：那一段已经计费，照实记账。
+				bd, bc, _, bhc := billedDelta(cont.billedUsage())
+				recordAttempt(acct.UID, bd, bc, bhc, attemptStarted, 0)
 				st.status = http.StatusServiceUnavailable
 				st.outcome = reqlog.OutcomeStreamError
 				// 上游 body 是活的（200 长流），随轮转立即关闭，不留给函数末尾的 defer 堆 fd。
@@ -1922,7 +1925,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// credit 显式存在且有限非负、total 为正整数时计入成本账本/用量账；
 			// 缺字段/NaN/负值不再被当成「免费」或脏数据污染台账（上游 PR #104）。
 			hasCredit = validUsageCost(credit, hasCredit, total, hasTotal)
-			recordAttempt(acct.UID, stats.Usage(), credit, hasCredit, attemptStarted, stats.TTFB())
+			bill := stats.Usage()
+			// 记账取续写层的各段纯求和（见 continueReader.billed）：续写、盲重试、各类救援每段
+			// 都是一次计费的上游调用，客户端可见的合计 usage 只留末段 prompt；客户端中途断开时
+			// 那条合计帧根本没发出来，已结束各段的用量也不能丢。
+			if u := cont.billedUsage(); u != nil {
+				bill, credit, total, hasCredit = billedDelta(u)
+			}
+			recordAttempt(acct.UID, bill, credit, hasCredit, attemptStarted, stats.TTFB())
 			if n, ok := stats.Thinking(); ok {
 				st.think = n
 			}
@@ -1972,6 +1982,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.toks = toks
 			}
 			st.cacheHit, st.cacheMiss, st.hasCache = stats.Cache()
+			if bill.HasCacheTokens {
+				// 与 st.promptTokens（recordAttempt 按记账口径填的各段 prompt 之和）同口径，
+				// 否则缓存告警会拿「各段 prompt 之和」去比「末段 miss」。
+				st.cacheHit, st.cacheMiss, st.hasCache = int(bill.CacheHitTokens), int(bill.CacheMissTokens), true
+			}
 			// WARN 信号（issue #92 同步）：曾命中过的模型本次大前缀整段未命中 →
 			// 记一条可行动告警（上游前缀缓存重算，费用数倍放大）。
 			if st.hasCache {
@@ -2015,11 +2030,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		// 空截断救援（见 starved.go）：额度被思考吃光、正文零字节。非流式这一侧
 		// 没有 continueReader，救援在这里做——同预算关思考重发一次、重新聚合。
+		// billUsage 救援重发成功时两次调用 usage 的纯求和（记账口径，与流式 continueReader.billed
+		// 同理）：被丢弃的首个聚合体也是一次计费的上游调用。nil = 只有一次调用，按 resp 记。
+		var billUsage map[string]any
 		if aggregateStarved(resp) && bodyHasOutputLimit(body) {
-			if rb, ok := starvedRetryBodyWithFloor(body, upstream.MinOutputBudget(hopTiming.Effort)); ok {
+			if rb, ok := starvedRetryBodyWithFloor(body, h.cfg.Upstream.OutputBudgetFloor(acct.Realm(), curModel, hopTiming.Effort)); ok {
 				if rc2, st2, _, e2 := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, rb, clientIP, chatMeta, nil); e2 == nil && st2 < 400 && rc2 != nil {
 					if resp2, e3 := upstream.Aggregate(rc2); e3 == nil {
 						rc2.Close()
+						// 客户端只收到救援这次的内容，看到的 usage 也只是这次的；记账两次相加。
+						u1, _ := resp["usage"].(map[string]any)
+						u2, _ := resp2["usage"].(map[string]any)
+						if u1 != nil || u2 != nil {
+							billUsage = sumUsage(sumUsage(nil, u1), u2)
+						}
 						resp = resp2
 						log.Printf("INFO: [starved] non-stream acct=%s model=%s: 预算被思考吃光（正文 0B）→ 同额度关思考重发成功",
 							logfmt.Label(acct.UID, acct.Nickname), bareModel)
@@ -2053,6 +2077,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.toolCalls = toolCallCount(resp)
 		ud := usageDeltaFromResponse(resp)
 		credit, total, hasCredit := usageCreditTotal(resp)
+		if billUsage != nil {
+			ud, credit, total, hasCredit = billedDelta(billUsage)
+		}
 		recordAttempt(acct.UID, ud, credit, hasCredit, attemptStarted, 0)
 		// 模型名回显（issue #30，与流式 WithModelEcho 同语义）：聚合体的 model
 		// 覆写回客户端原发名，严格校验客户端不当场报错。
@@ -2410,6 +2437,17 @@ func promptTooLongMessage(body string) string {
 		return "prompt is too long"
 	}
 	return body
+}
+
+// billedDelta 把一份记账口径的 usage（多次上游调用的纯求和；nil = 没有观测）转成记账入参，
+// 与非流式聚合体同一套解析与合法性闸门。
+func billedDelta(u map[string]any) (delta pool.TokenUsageDelta, credit float64, total int, hasCredit bool) {
+	if u == nil {
+		return
+	}
+	resp := map[string]any{"usage": u}
+	credit, total, hasCredit = usageCreditTotal(resp)
+	return usageDeltaFromResponse(resp), credit, total, hasCredit
 }
 
 // usageCreditTotal 从聚合响应取 usage.credit 与 total_tokens（成本台账非流式入口）。

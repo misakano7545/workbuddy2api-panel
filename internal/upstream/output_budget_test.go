@@ -52,7 +52,7 @@ func TestEnsureMinOutputBudgetRaises(t *testing.T) {
 	}
 	for _, c := range cases {
 		obj := budgetObj(t, c.body)
-		ensureMinOutputBudget(obj, c.effort, nil)
+		ensureMinOutputBudget(obj, c.effort, map[string]int64{"m": 131072})
 		if got := budgetOf(obj); got != c.want {
 			t.Errorf("%s: max_tokens=%d want %d", c.name, got, c.want)
 		}
@@ -72,11 +72,13 @@ func TestEnsureMinOutputBudgetLeavesAlone(t *testing.T) {
 		{"关闭思考", `{"model":"m","max_tokens":512,"thinking":{"type":"disabled"}}`, "high"},
 		{"档位未知", `{"model":"m","max_tokens":512}`, ""},
 		{"档位是 off", `{"model":"m","max_tokens":512}`, "off"},
+		// 目录里没有这个模型：不知道它最多能写多少，按档位抬到 16384 可能直接换来上游参数错误。
+		{"模型不在目录里", `{"model":"unknown-model","max_tokens":1024}`, "max"},
 	}
 	for _, c := range cases {
 		obj := budgetObj(t, c.body)
 		before := budgetOf(obj)
-		ensureMinOutputBudget(obj, c.effort, nil)
+		ensureMinOutputBudget(obj, c.effort, map[string]int64{"m": 131072})
 		if got := budgetOf(obj); got != before {
 			t.Errorf("%s: max_tokens 被改成了 %d（want 原值 %d）", c.name, got, before)
 		}
@@ -90,6 +92,32 @@ func TestEnsureMinOutputBudgetRespectsCatalogCap(t *testing.T) {
 	ensureMinOutputBudget(obj, "max", map[string]int64{"small-model": 6000})
 	if got := budgetOf(obj); got != 6000 {
 		t.Fatalf("max_tokens=%d want 6000（目录上限封顶）", got)
+	}
+}
+
+// TestOutputBudgetFloorCappedByCatalog 续写/救援段用的下限必须与出站抬额度同口径：按目录
+// 封顶、目录里没有的模型不抬、按域分桶、realm 前缀不影响查找。否则续写段会被抬到模型写
+// 不了的额度（目录 6000 的模型续写段拿到 16384）。
+func TestOutputBudgetFloorCappedByCatalog(t *testing.T) {
+	c := &Client{}
+	c.StoreModelMaxOutForTest("cn", map[string]int64{"small-model": 6000, "big-model": 131072})
+	for _, tc := range []struct {
+		model, effort string
+		want          int64
+	}{
+		{"small-model", "max", 6000},
+		{"cn:small-model", "max", 6000},
+		{"big-model", "max", 16384},
+		{"big-model", "low", 4096},
+		{"big-model", "", 0},
+		{"unknown-model", "max", 0},
+	} {
+		if got := c.OutputBudgetFloor("cn", tc.model, tc.effort); got != tc.want {
+			t.Errorf("OutputBudgetFloor(%s,%s)=%d want %d", tc.model, tc.effort, got, tc.want)
+		}
+	}
+	if got := c.OutputBudgetFloor("global", "small-model", "max"); got != 0 {
+		t.Errorf("另一个域没有目录时应为 0，got %d", got)
 	}
 }
 

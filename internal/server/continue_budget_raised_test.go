@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -26,9 +27,13 @@ func TestBudgetWasRaisedDetection(t *testing.T) {
 		{"没给额度（目录补的，不算抬）", `{"model":"m"}`, upstream.MinOutputBudget("high"), false},
 		{"没有下限（档位未知）", highClientBody, 0, false},
 		{"别名 max_completion_tokens", `{"model":"m","max_completion_tokens":1024}`, upstream.MinOutputBudget("max"), true},
+		// 出站抬额度对这两种请求不动（见 upstream.ensureMinOutputBudget），这里也不能当成「抬过」。
+		{"探活级额度 max_tokens=1", `{"model":"m","max_tokens":1}`, upstream.MinOutputBudget("high"), false},
+		{"客户端自己关了思考", `{"model":"m","max_tokens":2048,"thinking":{"type":"disabled"}}`, upstream.MinOutputBudget("high"), false},
 	}
 	for _, c := range cases {
 		r := &continueReader{body: []byte(c.body), budgetFloor: c.floor}
+		r.limitSet, r.limit = bodyOutputLimit(r.body)
 		if got := r.budgetWasRaised(); got != c.want {
 			t.Errorf("%s: budgetWasRaised=%v want %v", c.name, got, c.want)
 		}
@@ -113,5 +118,44 @@ func TestContinueWhenClientLimitIsLongAnswer(t *testing.T) {
 	s := string(out)
 	if !strings.Contains(s, "继续") || strings.Contains(s, `"finish_reason":"length"`) {
 		t.Fatalf("客户端应看到续接后的完整收尾:\n%s", s)
+	}
+}
+
+// TestContinueLimitedExceptionsGated 带限额请求的续写例外有三条闸门，每条漏掉都会白付上游调用：
+//   - 关不掉思考的模型（glm 等）：续写段拿同一份额度再把思考烧一遍，几段合计还是半句；
+//   - 探活级额度（max_tokens=1）：思考占比再高也只是一句探活，旧实现能续满 7 段；
+//   - 客户端自己关了思考：出站不会被抬额度，「额度被网关抬过」不成立。
+func TestContinueLimitedExceptionsGated(t *testing.T) {
+	starvedSeg := func(completion, think int) string {
+		return `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"半句"}}]}` + "\n\n" +
+			fmt.Sprintf(`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":%d,"completion_thinking_tokens":%d,"total_tokens":%d}}`, completion, think, completion+10) + "\n\n" +
+			"data: [DONE]\n\n"
+	}
+	cases := []struct {
+		name string
+		body string
+		seg  string
+	}{
+		{"不可关思考的模型 + 额度被抬过", `{"model":"glm-5.2","max_tokens":2048,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`, starvedSeg(8192, 7000)},
+		{"探活级额度", `{"model":"cn:deepseek-v4.1-flash","max_tokens":1,"messages":[{"role":"user","content":"Reply with OK."}]}`, starvedSeg(1, 1)},
+		{"客户端自己关了思考", `{"model":"cn:deepseek-v4.1-flash","max_tokens":2048,"thinking":{"type":"disabled"},"messages":[{"role":"user","content":"hi"}]}`, starvedSeg(2048, 0)},
+	}
+	for _, c := range cases {
+		seg := c.seg
+		up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, seg })
+		r := newContinueReaderWithFloor(context.Background(), up,
+			&auth.Auth{UID: "u1", AccessToken: "at-1", ExpiresAt: 9999999999},
+			[]byte(c.body), "1.2.3.4", upstream.ChatMeta{},
+			io.NopCloser(strings.NewReader(seg)), upstream.MinOutputBudget("high"))
+		out, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatalf("%s: read: %v", c.name, err)
+		}
+		if len(*reqs) != 0 {
+			t.Errorf("%s: 续写请求数=%d want 0", c.name, len(*reqs))
+		}
+		if n := strings.Count(string(out), `"finish_reason"`); n != 1 || !strings.Contains(string(out), `"finish_reason":"length"`) {
+			t.Errorf("%s: 应恰好一个 length 终态，实际 %d 个:\n%s", c.name, n, out)
+		}
 	}
 }

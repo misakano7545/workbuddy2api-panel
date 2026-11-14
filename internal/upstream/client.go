@@ -2527,6 +2527,16 @@ func (c *Client) storeModelMaxOut(realm string, infos []ModelInfo) {
 	c.modelMaxOut[realmKey(realm)] = m
 }
 
+// StoreModelMaxOutForTest 跨包测试钩子：直接写入某域的模型输出上限快照（真实路径由
+// FetchModels 刷新目录时写入）。仅测试引用。
+func (c *Client) StoreModelMaxOutForTest(realm string, maxOut map[string]int64) {
+	infos := make([]ModelInfo, 0, len(maxOut))
+	for id, n := range maxOut {
+		infos = append(infos, ModelInfo{ID: id, MaxTokens: n})
+	}
+	c.storeModelMaxOut(realm, infos)
+}
+
 // modelMaxOutSnapshot 返回输出上限快照副本；nil 表示未知（不补默认，行为同旧路径）。
 func (c *Client) modelMaxOutSnapshot(realm string) map[string]int64 {
 	c.effortsMu.RLock()
