@@ -105,8 +105,9 @@ func (p *Pool) pickRoundRobinLocked(order []*entry, key string) *entry {
 		}
 	}
 	selected := order[next]
+	// 游标是运行态、不进 state.json（见 Pool.scheduling），这里不能置 dirty：
+	// 否则每次选号都让 flusher 重写一遍 state.json。
 	p.scheduling[key] = scheduleCursor{Strategy: StrategyRoundRobin, UID: selected.a.UID}
-	p.dirty.Store(true)
 	return selected
 }
 
@@ -127,7 +128,6 @@ func (p *Pool) pickSequentialLocked(order []*entry, key string) *entry {
 	for _, e := range order {
 		if cur.UID != "" && e.a.UID == cur.UID {
 			p.scheduling[key] = scheduleCursor{Strategy: StrategySequentialExhaust, UID: cur.UID}
-			p.dirty.Store(true)
 			return e
 		}
 	}
@@ -141,7 +141,6 @@ func (p *Pool) pickSequentialLocked(order []*entry, key string) *entry {
 		}
 	}
 	p.scheduling[key] = scheduleCursor{Strategy: StrategySequentialExhaust, UID: selected.a.UID}
-	p.dirty.Store(true)
 	return selected
 }
 
