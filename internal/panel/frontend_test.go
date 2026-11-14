@@ -709,9 +709,16 @@ process.stdout.write(JSON.stringify({
   upstream: state(model('global:glm-5.3'), [], [{ model: 'global:glm-5.3', status: 503 }]),
   ok: state(model('global:ok'), [], success),
   effBare: state(model('global:deepseek-v4-flash'), [],
-    [{ model: 'global:deepseek-v4.1-flash', model_eff: 'deepseek-v4-flash', status: 200, outcome: 'success' }]),
+    [{ model: 'global:deepseek-v4.1-flash', model_eff: 'deepseek-v4-flash', realm: 'global', status: 200, outcome: 'success' }]),
   effPrefixed: state(model('global:deepseek-v4-flash'), [],
     [{ model: 'deepseek-v4.1-flash', model_eff: 'global:deepseek-v4-flash', status: 200, outcome: 'success' }]),
+  cnBare: state(model('global:glm-5.2'), [], [{ model: 'glm-5.2', realm: 'cn', status: 200, outcome: 'success' }]),
+  noRealmBare: state(model('global:glm-5.2'), [], [{ model: 'glm-5.2', status: 200, outcome: 'success' }]),
+  globalBare: state(model('global:glm-5.2'), [], [{ model: 'glm-5.2', realm: 'global', status: 200, outcome: 'success' }]),
+  fallbackFrom: state(model('global:deepseek-v4.1-flash'), [],
+    [{ model: 'deepseek-v4.1-flash', model_eff: 'deepseek-v4-flash', realm: 'global', status: 200, outcome: 'success' }]),
+  fallbackTo: state(model('global:deepseek-v4-flash'), [],
+    [{ model: 'deepseek-v4.1-flash', model_eff: 'deepseek-v4-flash', realm: 'global', status: 200, outcome: 'success' }]),
   deniedTag: deniedTag.includes('无权限') && deniedTag.includes('tag bad'),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "model-availability-*.cjs")
@@ -726,7 +733,7 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("model availability node test failed: %v\n%s", err, out)
 	}
-	const want = `{"cn":null,"unknown":"unknown","denied":"denied","missing":"missing","partial":"partial","starved":"starved","rate":"rate","upstream":"upstream","ok":"ok","effBare":"ok","effPrefixed":"ok","deniedTag":true}`
+	const want = `{"cn":null,"unknown":"unknown","denied":"denied","missing":"missing","partial":"partial","starved":"starved","rate":"rate","upstream":"upstream","ok":"ok","effBare":"ok","effPrefixed":"ok","cnBare":"unknown","noRealmBare":"unknown","globalBare":"ok","fallbackFrom":"unknown","fallbackTo":"ok","deniedTag":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("model availability=%s want %s", out, want)
 	}

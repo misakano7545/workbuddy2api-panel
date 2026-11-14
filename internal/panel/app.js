@@ -1341,8 +1341,16 @@ function mdAvailabilityOf(m, locks, recent) {
   // B 的「可用」标注也要由这条真实流量合成（2026-10-25 链路补齐）。
   // model_eff 记的是出站线协议原值（通常是裸名），而这里的 id 带域前缀，
   // 两种形态都要认——只比 id 会让 global 域的降级流量完全命中不了。
-  const ev = recent.find(e => e && (e.model === id || e.model === bare ||
-    e.model_eff === id || e.model_eff === bare));
+  // 裸名必须限定在 global 域的事件上：cn 与 global 有同名模型，不限域会把 cn 的流量
+  // 算成 global 模型的可用证据（事件的 realm 由网关按实际选中的账号写入）。
+  // 降级了的事件（model_eff 非空且与 model 不同）实际服务它的是 model_eff：只按 model_eff 认，
+  // 否则「请求 A 降级到 B 成功」会把根本没被服务的 A 标成可用（A 正是被限流才降级的）。
+  const hits = (e, name) => name === id || (e.realm === 'global' && name === bare);
+  const ev = recent.find(e => {
+    if (!e) return false;
+    if (e.model_eff && e.model_eff !== e.model) return hits(e, e.model_eff);
+    return hits(e, e.model);
+  });
   if (ev) {
     const status = Number(ev.status || 0);
     const when = ev.time ? new Date(ev.time).toLocaleString('zh-CN', { hour12: false }) : '';

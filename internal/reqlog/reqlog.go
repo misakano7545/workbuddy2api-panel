@@ -76,7 +76,11 @@ type Event struct {
 	// 使用**的模型（2026-10-25 实案）：只记 Model 会让「global:deepseek-v4.1-flash」
 	// 与实际在跑的「deepseek-v4.1-flash-sg」归为一类——两者计价/能力都不同，
 	// 归档与面板请求记录必须分开可辨。空 = 未降级。
-	ModelEff         string  `json:"model_eff,omitempty"`
+	ModelEff string `json:"model_eff,omitempty"`
+	// Realm 实际服务本次请求的账号所在域（cn / global）。cn 与 global 有同名模型，
+	// 而 Model / ModelEff 常是不带域前缀的裸名：面板的模型可用性靠它区分
+	// 「这条成功流量属于哪个域的模型」，缺了它裸名只能两边都认。空 = 没选到账号。
+	Realm            string  `json:"realm,omitempty"`
 	Status           int     `json:"status"`
 	OK               bool    `json:"ok"`
 	Outcome          string  `json:"outcome"`
