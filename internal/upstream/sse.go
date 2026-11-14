@@ -189,8 +189,21 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 				sawDone = true
 				break
 			} else {
-				var chunk map[string]any
-				if json.Unmarshal([]byte(payload), &chunk) == nil {
+				// 粘帧（issue #197）：一个 data 行里首尾相接两个以上 JSON 对象时整行解析失败，
+				// 原先两份内容都被静默丢掉；拆开后逐份并入聚合。
+				var chunks []map[string]any
+				var whole map[string]any
+				if json.Unmarshal([]byte(payload), &whole) == nil {
+					chunks = []map[string]any{whole}
+				} else {
+					for _, part := range SplitConcatenatedJSON(payload) {
+						var c map[string]any
+						if json.Unmarshal([]byte(part), &c) == nil {
+							chunks = append(chunks, c)
+						}
+					}
+				}
+				for _, chunk := range chunks {
 					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
 					validEvents++
 					if v, ok := chunk["id"].(string); ok && id == "" {
@@ -836,7 +849,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			// `Unexpected non-whitespace character after JSON at position N`
 			// 并且整轮对话作废。这里拆成多个对象逐个走常规路径，客户端每秒都在
 			// 解析合法帧，不会看到这个形态。
-			if parts := splitConcatenatedJSON(payload); len(parts) > 1 {
+			if parts := SplitConcatenatedJSON(payload); len(parts) > 1 {
 				log.Printf("WARN: [upstream] data 帧内含 %d 个 JSON 对象（上游粘帧）→ 拆成独立帧透传，首个 %.120q",
 					len(parts), truncate(parts[0], 120))
 				n := 0
@@ -911,10 +924,23 @@ readLoop:
 				headOpen = false
 				// 带 error 键的帧即上游 error-passthrough 形态（判据同 writeFrame）：
 				// 它不含可用正文，换号重试对客户端无痕。
+				// 粘帧（issue #197）：首行是 `{a} {b}` 时整行解析失败，首帧是其中第一个对象。
+				// 不拆开探测的话粘在第一个位置的 error 帧会漏过否决，响应头照常提交、
+				// 客户端拿到 200 + error 帧（writeFrame 随后才拆）。
 				var probe map[string]any
-				if json.Unmarshal([]byte(payload), &probe) == nil {
+				first := payload
+				if json.Unmarshal([]byte(first), &probe) != nil {
+					probe = nil
+					if parts := SplitConcatenatedJSON(payload); len(parts) > 1 {
+						first = parts[0]
+						if json.Unmarshal([]byte(first), &probe) != nil {
+							probe = nil
+						}
+					}
+				}
+				if probe != nil {
 					if _, hasErr := probe["error"]; hasErr {
-						return &HeadVetoError{Payload: payload}
+						return &HeadVetoError{Payload: first}
 					}
 					// 流内失败帧（HTTP 200 内嵌顶层 {code,msg}，无 choices；判据同
 					// writeFrame 的 StreamErrorFrame）：首帧即失败同样否决换号——否则
@@ -922,7 +948,7 @@ readLoop:
 					// 以「200 + error 帧」透给客户端。payload 改写成标准 error 帧后再带出，
 					// FrameKind 与末端错误映射的口径和 writeFrame 的透出形态一致。
 					if code, msg, ok := StreamErrorFrame(probe); ok {
-						return &HeadVetoError{Payload: streamErrorPayload(code, msg, payload)}
+						return &HeadVetoError{Payload: streamErrorPayload(code, msg, first)}
 					}
 				}
 			}
