@@ -1061,7 +1061,7 @@ func (w *responsesWriter) flushJSON() {
 }
 
 // responsesReasoningOnly 判定序列化后的 Responses 对象是否「只有 reasoning item」：
-// output 里既没有非空正文也没有任何工具调用，但至少有一个 reasoning item。与流式侧
+// output 里既没有非空正文也没有 reasoning / message 之外的任何 item，但至少有一个 reasoning item。与流式侧
 // 的 reasoningOnlyNoOutput 同口径，只是这里只能看成品 JSON。
 //
 // message 要按**文本内容**判，不能只看 type：chatCompletionToResponse 对空正文也会
@@ -1094,7 +1094,9 @@ func responsesReasoningOnly(raw []byte) bool {
 					return false
 				}
 			}
-		case "function_call", "custom_tool_call", "web_search_call", "local_shell_call":
+		default:
+			// 其余类型一律算产出（排除法，与流式同口径）：白名单漏掉的类型——如网关已交付、
+			// 已扣费的 image_generation_call——会被误判成 502，客户端重试再出一遍图。
 			return false
 		}
 	}
@@ -1683,6 +1685,10 @@ func (w *responsesWriter) emitCompleted() error {
 // 判据（与 hub 的 reasoning_only_response 同口径）：正文空、无工具调用、有思考、
 // 且不是 finish_reason=length 的截断（截断走 incomplete，不能在这里抢成 failed，
 // 否则客户端会把「额度用尽」误读成「上游故障」）。
+//
+// 另外，除 reasoning / message 外任何已发出的 output item 都算产出（排除法）：网关代执行的
+// 托管工具（preItems 里的 image_generation_call）在对话开始前就交付、也已经扣费，模型随后
+// 只想不说是正常收尾；判成 failed 会让客户端重试、把已扣费的图再出一遍。
 func (w *responsesWriter) reasoningOnlyNoOutput() bool {
 	if w.x.status == "incomplete" {
 		return false
@@ -1692,6 +1698,11 @@ func (w *responsesWriter) reasoningOnlyNoOutput() bool {
 	}
 	if len(w.x.toolOrder) > 0 {
 		return false
+	}
+	for _, it := range w.x.output {
+		if m, _ := it.(map[string]any); m != nil && m["type"] != "reasoning" && m["type"] != "message" {
+			return false
+		}
 	}
 	return strings.TrimSpace(w.x.reasoningText.String()) != ""
 }
