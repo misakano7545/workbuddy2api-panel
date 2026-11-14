@@ -2406,7 +2406,8 @@ $('btnImportCommit').onclick = async () => {
     $('importDone').hidden = false;
     $('importDone').textContent = '导入完成（' + label + '）：新增 ' + (d.creates || 0)
       + ' 个，覆盖 ' + (d.overwrites || 0) + ' 个'
-      + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
+      + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '')
+      + (d.warnings && d.warnings.length ? '；其中 ' + d.warnings.length + ' 个凭据落盘失败（新令牌只在内存里，请检查凭证目录后重新导入）' : '');
     if (d.errors && d.errors.length) console.warn('import errors:', d.errors);
     importPending = null;
     $('btnImportCommit').hidden = true;
