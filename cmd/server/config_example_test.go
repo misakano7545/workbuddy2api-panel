@@ -38,6 +38,10 @@ func TestConfigExampleIsValid(t *testing.T) {
 	}
 	// models.allowed（issue #68）：示例必须是存在的数组（仿上方各项的「示例可见」
 	// 口径）。空数组解析为非 nil 空切片；nil = 键缺失，用户无从发现白名单配置。
+	if c.Models.Allowed == nil {
+		t.Error("models.allowed 示例应存在（空数组即可），否则用户不知道有白名单")
+	}
+	// 6020/6021 排队等待的默认值也要在示例里可见（PR #217）。
 	if !c.Features.BusyRetry || c.Features.BusyWaitSeconds != 60 {
 		t.Errorf("features.busy_retry / busy_wait_seconds 示例应为 true / 60: %+v", c.Features)
 	}
