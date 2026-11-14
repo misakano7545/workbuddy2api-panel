@@ -60,6 +60,7 @@ func TestReloadPollRemovesExactlyAtConfirmCount(t *testing.T) {
 	e.panel.SetReloadConfig(0, 3) // 用 3 才能区分「第 2 次」「第 3 次」
 	now := time.Now().Add(24 * time.Hour).Unix()
 
+	e.writeAuth("keep", "at-keep", now) // 目录不能被删空，否则整轮不删
 	e.writeAuth("solo", "at", now)
 	if _, err := e.panel.reloadIfChanged("poll"); err != nil {
 		t.Fatal(err)
@@ -102,31 +103,6 @@ func TestReloadPollRemovesExactlyAtConfirmCount(t *testing.T) {
 	}
 }
 
-// 单账号（池里只有被删的那个）同样要能删掉：确认不是「因为还有别的账号在动才触发」。
-func TestReloadPollRemovesLastAccount(t *testing.T) {
-	e := newReloadEnv(t)
-	e.panel.SetReloadConfig(0, 2)
-	now := time.Now().Add(24 * time.Hour).Unix()
-
-	e.writeAuth("solo", "at", now)
-	if res, err := e.panel.reloadIfChanged("poll"); err != nil {
-		t.Fatal(err)
-	} else if res.Added != 1 {
-		t.Fatalf("准备阶段 added=%d want 1", res.Added)
-	}
-	if err := os.Remove(filepath.Join(e.dir, "workbuddy-solo.json")); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 4; i++ {
-		if _, err := e.panel.reloadIfChanged("poll"); err != nil {
-			t.Fatalf("第 %d 轮: %v", i+1, err)
-		}
-	}
-	if e.poolUIDs()["solo"] {
-		t.Fatal("唯一账号删文件后仍未移出池")
-	}
-}
-
 // 在途请求未结束时，轮询路径也不能删——护栏 2 的后半条必须在新路径里同样生效。
 //
 // 变异判据：confirmMissing 里去掉 `InFlight(st.UID) > 0` 判断时本用例红。
@@ -135,6 +111,7 @@ func TestReloadPollSkipsRemovalWhileInFlight(t *testing.T) {
 	e.panel.SetReloadConfig(0, 2)
 	now := time.Now().Add(24 * time.Hour).Unix()
 
+	e.writeAuth("keep", "at-keep", now)
 	e.writeAuth("u1", "at1", now)
 	if _, err := e.panel.reloadIfChanged("poll"); err != nil {
 		t.Fatal(err)
@@ -171,6 +148,7 @@ func TestReloadPollClearsMissingTableAfterRemoval(t *testing.T) {
 	e.panel.SetReloadConfig(0, 2)
 	now := time.Now().Add(24 * time.Hour).Unix()
 
+	e.writeAuth("keep", "at-keep", now)
 	e.writeAuth("u1", "at1", now)
 	if _, err := e.panel.reloadIfChanged("poll"); err != nil {
 		t.Fatal(err)

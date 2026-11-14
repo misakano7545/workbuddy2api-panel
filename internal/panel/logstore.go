@@ -11,6 +11,13 @@
 //	reqlog      逐请求的**结构化元数据**（模型/账号/时延/结果），用于统计与筛选
 //	logstore    面板三频道（chat/task/sys）的**原始文本行**，用于照着日志读事故
 //
+// 写入约束：
+//   - 每行只走一次 write（O_APPEND 下单次 write 不与同机另一个进程的追加交错）。
+//     不能用 bufio 攒批：缓冲满时一行会被拆进两次 write，与另一个进程的行交错成坏行；
+//     进程被杀时缓冲里最多 48KB 也会丢，事故现场恰恰在最后几行。
+//   - Append 只由 Ring 的后台 goroutine 调用（见 ring.go），不在 log 输出路径上；
+//     本文件也不调 log.Printf（输出会回流进 Ring），失败只记在 err 里由面板展示。
+//
 // 与 Ring.SetTaskArchive 的关系：那份 JSON 只存任务频道、只存最近 500 条、跨天即丢。
 // 本文件上线后由它接管回填（见 Ring.SetLogStore）；task-logs.json 保留为落盘目录
 // 不可用时的兜底，不再作为主路径。
@@ -35,9 +42,6 @@ const (
 	// logStoreDefaultDays / logStoreDefaultMaxMB 配置缺省（与 reqlog 的默认量级对齐）。
 	logStoreDefaultDays  = 7
 	logStoreDefaultMaxMB = 50
-	// logStoreFlushBytes 攒到这么多字节才落盘一次。
-	// 不逐行 flush：日志是高频写入，每行一次 syscall 会在长流式会话里明显吃掉 CPU。
-	logStoreFlushBytes = 48 << 10
 	// logStoreBackfillMax 回填上限（条）。环路只有 500/频道，回填更多也留不住。
 	logStoreBackfillMax = 3000
 )
@@ -49,7 +53,6 @@ type LogStore struct {
 	retentionDays int
 	maxBytes      int64
 	file          *os.File
-	bw            *bufio.Writer
 	day           string // 当前文件对应的自然日（CST，与切天口径一致）
 	written       int64  // 当前文件已写字节（上限判定用）
 	err           string // 最近一次写盘失败原因（面板可提示）
@@ -130,17 +133,11 @@ func (s *LogStore) Append(e LogEntry) {
 		return
 	}
 	line = append(line, '\n')
-	n, err := s.bw.Write(line)
+	n, err := s.file.Write(line) // 一行一次 write，见文件头
 	s.written += int64(n)
 	if err != nil {
 		s.err = err.Error()
 		return
-	}
-	if s.bw.Buffered() >= logStoreFlushBytes {
-		if err := s.bw.Flush(); err != nil {
-			s.err = err.Error()
-			return
-		}
 	}
 	s.err = ""
 }
@@ -173,39 +170,18 @@ func (s *LogStore) rotateLocked(day string) {
 		s.written = 0
 	}
 	s.file = f
-	s.bw = bufio.NewWriterSize(f, 64<<10)
 	s.day = day
 }
 
-// closeLocked 刷盘并关闭当前文件。调用方必须持 s.mu。
+// closeLocked 关闭当前文件。调用方必须持 s.mu。
 func (s *LogStore) closeLocked() {
-	if s.bw != nil {
-		if err := s.bw.Flush(); err != nil && s.err == "" {
-			s.err = err.Error()
-		}
-		s.bw = nil
-	}
 	if s.file != nil {
 		_ = s.file.Close()
 		s.file = nil
 	}
 }
 
-// Flush 立即刷盘（导出前调用，保证文件里有内存中尚未落盘的尾巴）。
-func (s *LogStore) Flush() {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.bw != nil {
-		if err := s.bw.Flush(); err != nil {
-			s.err = err.Error()
-		}
-	}
-}
-
-// Close 刷盘并关闭（进程退出时调用）。
+// Close 关闭当前文件（进程退出时，在 Ring.Flush 之后调用）。
 func (s *LogStore) Close() error {
 	if s == nil {
 		return nil
@@ -255,13 +231,7 @@ func (s *LogStore) Backfill(limit int) []LogEntry {
 	if limit <= 0 || limit > logStoreBackfillMax {
 		limit = logStoreBackfillMax
 	}
-	s.mu.Lock()
-	// 先把内存里的尾巴刷下去，否则回填会漏掉重启前最后几行。
-	if s.bw != nil {
-		_ = s.bw.Flush()
-	}
 	files := s.files()
-	s.mu.Unlock()
 
 	var out []LogEntry
 	for i := len(files) - 1; i >= 0 && len(out) < limit; i-- {
@@ -310,7 +280,6 @@ func (s *LogStore) Export(w *os.File, from, to time.Time) (int, error) {
 	if s == nil {
 		return 0, fmt.Errorf("日志落盘未启用")
 	}
-	s.Flush()
 	zw := zip.NewWriter(w)
 	written := 0
 	for _, path := range s.files() {

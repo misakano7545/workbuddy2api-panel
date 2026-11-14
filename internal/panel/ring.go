@@ -70,7 +70,15 @@ func classifyLine(line string) string {
 	return ChSys
 }
 
+// storeQueueMax 待落盘队列上限：磁盘卡住时内存不无界增长，超出的行只留在环里。
+const storeQueueMax = 10000
+
 // Ring 日志环形缓冲。
+//
+// 落盘（任务频道快照、按天 JSONL）不在 Write 里做：Ring 是 log 的输出，Write 运行时调用方
+// 还持着 logger 的锁，落盘路径上任何一次 log.Printf 或慢盘都会让整个进程的日志随之卡死。
+// 所以 Write 只入环、排队并发信号，由后台 goroutine 在锁外写；写得慢时多次变更合成一次。
+// 进程退出前调 Flush 把尾巴写完。
 type Ring struct {
 	mu           sync.Mutex
 	entries      []LogEntry
@@ -78,8 +86,16 @@ type Ring struct {
 	cap          int
 	taskArchive  string
 	archiveError string
+	taskDirty    bool // 有未落盘的任务行
+
 	// store 全频道按天落盘（见 logstore.go）。nil = 未启用（纯内存）。
-	store *LogStore
+	store        *LogStore
+	storeQ       []LogEntry // 待落盘的行，FIFO
+	storeDropped int        // 磁盘跟不上、队列满时丢掉的行数（面板展示）
+
+	wake    chan struct{} // 容量 1：有待落盘的内容
+	flushMu sync.Mutex    // 串行化落盘：队列按 FIFO 写，文件里的顺序就是入环顺序；旧快照不盖新的
+	loop    sync.Once
 }
 
 // SetLogStore 挂上按天落盘存储，并用它回填最近日志。
@@ -88,16 +104,14 @@ type Ring struct {
 // 跨天即丢，重启后「昨天的 chat 行」它给不了。store 可用即由它接管，taskArchive
 // 退化为落盘目录建不出来时的兜底（见 main 的装配）。
 func (r *Ring) SetLogStore(store *LogStore) error {
-	r.mu.Lock()
-	r.store = store
-	// 回填期间不能持锁调用 store 的读（store 内部也有锁，且要 Flush），先取数据。
-	r.mu.Unlock()
 	if store == nil {
 		return nil
 	}
 	back := store.Backfill(0)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.store = store
+	r.loop.Do(func() { go r.persistLoop() })
 	for _, entry := range back {
 		entry.Text = boundedLogText(entry.Text)
 		r.appendLocked(entry)
@@ -116,7 +130,7 @@ func NewRing(capacity int) *Ring {
 	if capacity <= 0 {
 		capacity = 500
 	}
-	return &Ring{cap: capacity, seq: uint64(time.Now().UnixMilli())}
+	return &Ring{cap: capacity, seq: uint64(time.Now().UnixMilli()), wake: make(chan struct{}, 1)}
 }
 
 // SetTaskArchive 恢复并持久化任务频道的最近日志。不存在的文件是正常首启。
@@ -129,6 +143,7 @@ func (r *Ring) SetTaskArchive(path string) error {
 	if path == "" {
 		return nil
 	}
+	r.loop.Do(func() { go r.persistLoop() })
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -158,8 +173,15 @@ func (r *Ring) SetTaskArchive(path string) error {
 // ArchiveError 供面板反馈写盘故障，日志写失败不阻塞/破坏模型请求。
 func (r *Ring) ArchiveError() string {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.archiveError
+	msg, store, dropped := r.archiveError, r.store, r.storeDropped
+	r.mu.Unlock()
+	if err := store.Error(); err != "" {
+		msg = strings.TrimPrefix(msg+"；运行日志落盘失败: "+err, "；")
+	}
+	if dropped > 0 {
+		msg = strings.TrimPrefix(fmt.Sprintf("%s；落盘跟不上，已丢 %d 行（只留在内存里）", msg, dropped), "；")
+	}
+	return msg
 }
 
 // boundedLogText 超长行截断到 4096 个字符（含恢复路径：防历史文件拖垮面板）。
@@ -196,42 +218,72 @@ func (r *Ring) appendLocked(entry LogEntry) {
 	}
 }
 
-// persistTasksLocked 把任务频道整体原子落盘（tmp+rename；失败只记 archiveError）。
-func (r *Ring) persistTasksLocked() {
-	if r.taskArchive == "" {
-		return
+func (r *Ring) persistLoop() {
+	for range r.wake {
+		r.Flush()
 	}
-	tasks := make([]LogEntry, 0, r.cap)
-	for _, entry := range r.entries {
-		if entry.Ch == ChTask {
-			tasks = append(tasks, entry)
+}
+
+// Flush 同步把排队的行与任务频道快照写盘（后台 goroutine 与停机、导出前调用；
+// 不能在持有 logger 锁时调用）。失败只记 archiveError，不影响日志入环。
+func (r *Ring) Flush() {
+	r.flushMu.Lock()
+	defer r.flushMu.Unlock()
+	r.mu.Lock()
+	q, store := r.storeQ, r.store
+	r.storeQ = nil
+	path, writeTasks := r.taskArchive, r.taskDirty
+	var tasks []LogEntry
+	if writeTasks {
+		r.taskDirty = false
+		tasks = make([]LogEntry, 0, r.cap)
+		for _, entry := range r.entries {
+			if entry.Ch == ChTask {
+				tasks = append(tasks, entry)
+			}
 		}
 	}
+	r.mu.Unlock()
+	for _, e := range q {
+		store.Append(e)
+	}
+	if !writeTasks {
+		return
+	}
+	err := persistTasks(path, tasks)
+	r.mu.Lock()
+	r.archiveError = ""
+	if err != nil {
+		r.archiveError = err.Error()
+	}
+	r.mu.Unlock()
+}
+
+// persistTasks 把任务频道整体原子落盘（tmp+rename）。
+func persistTasks(path string, tasks []LogEntry) error {
 	raw, err := json.Marshal(tasks)
 	if err == nil {
-		err = os.MkdirAll(filepath.Dir(r.taskArchive), 0700)
+		err = os.MkdirAll(filepath.Dir(path), 0700)
 	}
-	tmp := r.taskArchive + ".tmp"
+	tmp := path + ".tmp"
 	if err == nil {
 		err = os.WriteFile(tmp, raw, 0600)
 	}
 	if err == nil {
-		err = os.Rename(tmp, r.taskArchive)
+		err = os.Rename(tmp, path)
 	}
 	if err != nil {
-		r.archiveError = err.Error()
 		_ = os.Remove(tmp)
-	} else {
-		r.archiveError = ""
 	}
+	return err
 }
 
 // Write 按 \n 切分入环（实现 io.Writer）。频道互不淘汰，任务结果独立保存。
+// 落盘排给后台 goroutine（见 Ring 注释）。
 func (r *Ring) Write(p []byte) (int, error) {
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	taskChanged := false
 	for _, line := range strings.Split(strings.TrimRight(string(p), "\r\n"), "\n") {
 		if line == "" {
 			continue
@@ -240,16 +292,20 @@ func (r *Ring) Write(p []byte) (int, error) {
 		channel := classifyLine(text)
 		entry := LogEntry{TS: now, Ch: channel, Text: text}
 		r.appendLocked(entry)
-		// 落盘在**锁内**做：与既有 persistTasksLocked 同款取舍——同一把锁保证
-		// 「入环顺序 = 文件顺序」，swap 出去写会让两条并发日志在文件里倒序，
-		// 事故复盘时按时间读就错位了。
+		r.taskDirty = r.taskDirty || channel == ChTask && r.taskArchive != ""
 		if r.store != nil {
-			r.store.Append(entry)
+			if len(r.storeQ) < storeQueueMax {
+				r.storeQ = append(r.storeQ, entry)
+			} else {
+				r.storeDropped++
+			}
 		}
-		taskChanged = taskChanged || channel == ChTask
 	}
-	if taskChanged {
-		r.persistTasksLocked()
+	if len(r.storeQ) > 0 || r.taskDirty {
+		select {
+		case r.wake <- struct{}{}:
+		default: // 已有一次待落盘，它会取到这些行
+		}
 	}
 	return len(p), nil
 }

@@ -28,7 +28,7 @@
     "reload_interval": "10s",
     "_reload_interval_comment": "轮询间隔；\"0s\" = 关闭轮询（手动接口 POST /panel/api/accounts/reload 仍可用）。",
     "reload_delete_confirm": 2,
-    "_reload_delete_confirm_comment": "文件消失后要连续几轮扫描确认才移出账号池。半写文件、临时移走文件都只让账号「这一轮看不见」；剔除会写进 state.json 且下次启动不复活，所以要连续确认。1 = 立即删（不建议）。"
+    "_reload_delete_confirm_comment": "文件消失后要连续几轮扫描确认才移出账号池。半写文件、临时移走文件都只让账号「这一轮看不见」；剔除会写进 state.json 且下次启动不复活，所以要连续确认。1 = 立即删（不建议）。另有三道护栏：目录读不动或里面一个账号文件都没有时不删；一轮要删的号超过池的 1/5（至少放行 2 个）时不删，手动重载加 ?force=1 才放行；被删的号只是暂存，文件回来时禁用/暂停/分组原样复活。"
   },
   "logging": {
     "request_archive_enabled": true,

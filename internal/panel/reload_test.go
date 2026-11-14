@@ -66,10 +66,12 @@ func TestReloadAddsUpdatesAndRemoves(t *testing.T) {
 	e := newReloadEnv(t)
 	now := time.Now().Add(24 * time.Hour).Unix()
 
+	// keep 始终在盘：目录里一个账号文件都没有时不删（见 TestReloadNeverEmptiesPool）。
+	e.writeAuth("keep", "at-keep", now)
 	e.writeAuth("u1", "at1", now)
 	res := e.reload()
-	if res.Added != 1 || res.Updated != 0 || res.Removed != 0 || res.ParseErrors != 0 {
-		t.Fatalf("首轮 added=%d updated=%d removed=%d parse_errors=%d want 1/0/0/0",
+	if res.Added != 2 || res.Updated != 0 || res.Removed != 0 || res.ParseErrors != 0 {
+		t.Fatalf("首轮 added=%d updated=%d removed=%d parse_errors=%d want 2/0/0/0",
 			res.Added, res.Updated, res.Removed, res.ParseErrors)
 	}
 	if !e.poolUIDs()["u1"] {
@@ -171,7 +173,7 @@ func TestReloadResumesAfterFileRepaired(t *testing.T) {
 		t.Fatalf("坏文件轮 parse_errors=%d removed=%d want 1/0", res.ParseErrors, res.Removed)
 	}
 	// 修好（换一份新凭证）
-	e.writeAuth("u1", "at1-fixed", now)
+	e.writeAuth("u1", "at1-fixed", now+3600) // 磁盘令牌更晚过期才会被采用
 	res := e.reload()
 	if res.ParseErrors != 0 || res.Removed != 0 || res.Updated != 1 {
 		t.Fatalf("修复轮 parse_errors=%d removed=%d updated=%d want 0/0/1", res.ParseErrors, res.Removed, res.Updated)
@@ -185,6 +187,7 @@ func TestReloadResumesAfterFileRepaired(t *testing.T) {
 func TestReloadSkipsRemovalWhileInFlight(t *testing.T) {
 	e := newReloadEnv(t)
 	now := time.Now().Add(24 * time.Hour).Unix()
+	e.writeAuth("keep", "at-keep", now)
 	e.writeAuth("u1", "at1", now)
 	e.reload()
 

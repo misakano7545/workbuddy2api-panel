@@ -35,7 +35,6 @@ func TestLogStoreWritesPerDayFiles(t *testing.T) {
 	defer s.Close()
 	s.Append(LogEntry{TS: dayTS("2026-11-08", 23), Ch: ChChat, Text: "row-a"})
 	s.Append(LogEntry{TS: dayTS("2026-11-09", 1), Ch: ChSys, Text: "row-b"})
-	s.Flush()
 
 	for _, day := range []string{"2026-11-08", "2026-11-09"} {
 		path := filepath.Join(dir, "panel-"+day+".jsonl")
@@ -222,7 +221,7 @@ func TestRingBackfillsFromLogStore(t *testing.T) {
 	}
 	// 新写入必须照常入环 + 落盘（回填不能把写路径挂掉）。
 	r.Write([]byte("2026-11-09 10:00:00 fresh line\n"))
-	store2.Flush()
+	r.Flush()
 	if got := r.Snapshot(); len(got) != 2 {
 		t.Fatalf("新写入后环条数 = %d want 2", len(got))
 	}
