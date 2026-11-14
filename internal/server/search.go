@@ -74,7 +74,7 @@ var cardSearchBase = "https://cn.bing.com/search?q="
 //
 // 三件事：
 //  1. 空 url 的条目按上游卡片处理，改写成一次同词检索的链接（见 cardSearchBase）；
-//     query 与 title 皆空、无从取词的才丢弃，并同步修正 total_results。
+//     query 与 title 皆空、无从取词的才丢弃，并把 total_results 扣去丢弃数。
 //  2. results[] 里缺 date 时补 `null`。上游（WorkBuddy /agenttool）不返回发布日期，
 //     而 DSH 用 `item.date !== null && typeof item.date !== 'string'` 判定，字段
 //     **缺失**（undefined）会直接抛 invalidResponse（"invalid response body"）。
@@ -130,9 +130,15 @@ func compatDeepSeekSearch(raw []byte) []byte {
 		kept = append(kept, it)
 	}
 	if len(kept) != len(items) {
-		// 有条目被丢弃：total_results 跟着修正，避免「说 8 条只回 7 条」。
-		if n, err := json.Marshal(len(kept)); err == nil {
-			obj["total_results"] = n
+		// 有条目被丢弃：total_results 只扣掉丢弃数，而不是覆盖成 len(kept)——
+		// 上游的它是命中总数（实测可大于本页条数，如 results 1 条而 total_results 5），
+		// 覆盖会把「共 5 条」谎报成「共 1 条」。下限取 len(kept)，避免「说 7 条回 8 条」。
+		var total int
+		if raw, has := obj["total_results"]; has && json.Unmarshal(raw, &total) == nil {
+			total = max(total-(len(items)-len(kept)), len(kept))
+			if n, err := json.Marshal(total); err == nil {
+				obj["total_results"] = n
+			}
 		}
 	}
 	patchedResults, err := json.Marshal(kept)
