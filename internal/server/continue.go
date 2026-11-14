@@ -116,10 +116,11 @@ type continueReader struct {
 
 	// toolOnlyTried 安全续写（只采纳工具调用）已用（每请求一次；见 tryToolOnlyRescue）。
 	toolOnlyTried bool
-	// toolOnly 当前段处于「只采纳工具调用」模式：正文/思考增量全部丢弃。
+	// toolOnly 当前段处于「只采纳工具调用」模式：帧全部改道 toolOnlyFrame，裁决前客户端什么都收不到。
 	toolOnly bool
-	// toolCallBuf 只在 toolOnly 段暂存工具调用帧：判为「重发上一次调用」时整段丢弃，
-	// 否则 settleToolOnly 里按原顺序补发（见那里的说明）。
+	// toolOnlyFailed 当前 toolOnly 段出现过 error 帧 / 流内失败帧 / 非法帧（整段回滚）。
+	toolOnlyFailed bool
+	// toolCallBuf toolOnly 段暂存的工具调用帧与终态帧（已剥掉正文/思考/usage），采纳时按序补发。
 	toolCallBuf []string
 	// toolCallNames/toolCallArgs 按 index 累积续写段的工具调用（name 与 arguments 都
 	// 分片到达），用于与请求体历史里上一次执行的调用做同名同参比较。
@@ -255,6 +256,12 @@ func (r *continueReader) step() {
 
 // frame 处理一个 data 帧：解析状态（正文/推理/工具/usage），决定透传、吞掉或入 tail。
 func (r *continueReader) frame(payload string) {
+	// 「只采纳工具调用」段在裁决前一个字节都不给客户端：整段改道，不走下面的常规路径
+	// （常规路径会透传 error 帧、非法 JSON，以及工具分片之后的正文）。
+	if r.toolOnly {
+		r.toolOnlyFrame(payload)
+		return
+	}
 	var obj map[string]any
 	if json.Unmarshal([]byte(payload), &obj) != nil {
 		// 非法 JSON：原样透传（不解析状态，防抖）
@@ -291,13 +298,9 @@ func (r *continueReader) frame(payload string) {
 	}
 	deltaNonEmpty := false
 	rebuilt := false
-	bufferedToolFrame := false // 本帧只含工具调用且处于 toolOnly 段：入缓存不下发
 	if chs, ok := obj["choices"].([]any); ok && len(chs) > 0 {
 		if c, ok := chs[0].(map[string]any); ok {
 			if d, ok := c["delta"].(map[string]any); ok {
-				if r.toolOnly && !r.toolSeen && discardToolOnlyDelta(d) {
-					rebuilt = true
-				}
 				if s, ok := d["reasoning_content"].(string); ok && s != "" {
 					r.reason.WriteString(s)
 					// 续写段思考的接缝策略（两个子情形）：
@@ -323,12 +326,6 @@ func (r *continueReader) frame(payload string) {
 				if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
 					r.toolSeen = true
 					deltaNonEmpty = true
-					// 「只采纳工具调用」段：先攒着不下发——settleToolOnly 要拿它跟历史上
-					// 上一次执行过的调用比对，判为重发就整段丢弃（见那里的说明）。
-					if r.toolOnly {
-						r.captureToolCallDeltas(tcs)
-						bufferedToolFrame = true
-					}
 				}
 			}
 			if fr, ok := c["finish_reason"].(string); ok && fr != "" {
@@ -359,10 +356,6 @@ func (r *continueReader) frame(payload string) {
 	}
 	if hasUsage && !deltaNonEmpty {
 		return // 纯 usage 帧（已入账）：不再下发
-	}
-	if bufferedToolFrame {
-		r.toolCallBuf = append(r.toolCallBuf, payload)
-		return
 	}
 	r.emit(payload)
 }
@@ -461,8 +454,8 @@ func (r *continueReader) endSegment(sawDone bool) {
 	if r.cur != nil {
 		r.cur.Close()
 	}
-	// 安全续写段的裁决：拿到工具调用就采纳（继续正常收尾），否则回滚到首段终态。
-	r.settleToolOnly()
+	// 安全续写段的裁决：拿到完整工具调用就采纳（继续正常收尾），否则回滚到首段终态。
+	r.settleToolOnly(sawDone)
 	if r.tryStarvedRetry() {
 		return
 	}
