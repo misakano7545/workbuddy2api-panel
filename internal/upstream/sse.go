@@ -599,6 +599,8 @@ type streamOptions struct {
 	// 的 WARN 就不该记（线上实测过一次 pkill 客户端就刷出一条 WARN，进「错误汇总」
 	// 的未归类桶，把真正的上游断流盖掉）。
 	clientGone func() bool
+	// headKeepalive 首帧心跳间隔（见 headkeepalive.go）；0 = 关闭。
+	headKeepalive time.Duration
 }
 
 // WithClientGoneFn 注入「客户端是否已断开」的判定（可为 nil）。
@@ -656,6 +658,9 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 只有缓冲读空（下一次读会阻塞在 socket 上）才必须把已写内容推给客户端。
 	// 缓冲里只剩半行（没有换行符）也一样会阻塞，同样要 flush——否则上游若在此停顿，
 	// 客户端会一直等一个已经生成好的帧。
+	// 帧后的分隔空行不算「下一帧」：每帧写出时缓冲里通常正好剩它（"\n"），下一轮只是吞掉
+	// 这个空行，接着就阻塞在 socket 上。把它当成完整一行而跳过 flush，每一帧都要等到下一帧
+	// 到达才推给客户端（整条流慢一拍）。所以先跳过开头的空行字节，再看剩下的有没有完整一行。
 	flushIfDrained := func() {
 		if fl == nil || br == nil {
 			return
@@ -665,7 +670,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			fl.Flush()
 		case n < 8192:
 			// 帧很小（~200B），缓冲还有 8KB 以上时必然含完整帧，不必扫。
-			if p, _ := br.Peek(n); bytes.IndexByte(p, '\n') < 0 {
+			p, _ := br.Peek(n)
+			if bytes.IndexByte(bytes.TrimLeft(p, "\r\n"), '\n') < 0 {
 				fl.Flush()
 			}
 		}
@@ -692,6 +698,9 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	maxToolIdx := -1
 	toolFinishSent := false
 	finishSeen := false
+	// errorSent 本流已向客户端写出过 error 帧（上游 error 透传 / 流内失败帧）：error 帧本身
+	// 就是终态，流尾不得再补截断终态——客户端按最后一个终态判结果，「截断」会盖掉「失败」。
+	errorSent := false
 
 	// writeSSE 原样写出一帧并 flush。
 	writeSSE := func(payload string) error {
@@ -874,6 +883,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 		// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 		if _, hasErr := obj["error"]; hasErr {
+			errorSent = true
 			if werr := writeRaw(payload); werr != nil {
 				return 0, werr
 			}
@@ -884,6 +894,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		// 并留一行日志（此前这种帧完全无痕，策略拦截被误记成上游断流）。
 		if code, msg, ok := StreamErrorFrame(obj); ok {
 			log.Printf("WARN: [upstream] 流内失败帧（HTTP 200 内嵌）code=%d msg=%q → 如实透出为 error 帧", code, msg)
+			errorSent = true
 			if werr := writeRaw(streamErrorPayload(code, msg, payload)); werr != nil {
 				return 0, werr
 			}
@@ -908,9 +919,38 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 写出过 finish_reason）合起来判「这段流是不是被截断」：两者都没有 = 上游连接在
 	// 说一半时断了，既没有正常收尾也没给终态。
 	upstreamDone := false
+	// 首帧心跳（见 headkeepalive.go）：否决窗口开着时经辅助协程读行、本协程按节拍写注释帧；
+	// 窗口一关就直接读。注释帧不关闭否决窗口（它不是上游内容，首帧仍可能是 error 帧要换号）。
+	// 注释帧的写失败不在这里返回（此时辅助协程可能正在读）：只停掉心跳，真实帧的写会碰到
+	// 同一个错误并正常返回。
+	var hb *headHeartbeat
+	hbDead := false
+	if o.headKeepalive > 0 {
+		hb = newHeadHeartbeat(br, o.headKeepalive)
+		defer hb.stop()
+	}
+	heartbeat := func() {
+		if hbDead {
+			return
+		}
+		if _, werr := io.WriteString(w, ": keepalive\n\n"); werr != nil {
+			hbDead = true
+			return
+		}
+		// 只能直接 Flush：辅助协程此刻可能正在读 br，flushIfDrained 会去碰 br。
+		if fl != nil {
+			fl.Flush()
+		}
+	}
+	readLine := func() (string, error) {
+		if hb != nil && headOpen {
+			return hb.readLine(heartbeat)
+		}
+		return br.ReadString('\n')
+	}
 readLoop:
 	for {
-		line, err := br.ReadString('\n')
+		line, err := readLine()
 		trimmed := strings.TrimRight(line, "\r\n")
 		switch {
 		case strings.HasPrefix(trimmed, "data: [DONE]"):
@@ -1015,8 +1055,9 @@ readLoop:
 	// 表现就是「说到一半停了、也不报错」，只能人工接着催。这里补一帧截断终态：chat 侧看到
 	// finish_reason=length（TruncationFinishReason），responses 侧映射成
 	// incomplete(max_output_tokens)，由客户端自己决定续写/重试——网关不再把断流伪装成成功。
-	// 只在本层一个终态都没发过时补（否则两个 finish_reason，后一个会洗掉前一个）。
-	if !upstreamDone && !finishSeen && !toolFinishSent && validFrames > 0 {
+	// 只在本层一个终态都没发过时补（否则两个 finish_reason，后一个会洗掉前一个）；
+	// 已写出 error 帧同样算终态。
+	if !upstreamDone && !finishSeen && !toolFinishSent && !errorSent && validFrames > 0 {
 		// 客户端自己断开时上游只是被动跟随断连，这条不是上游故障——记 WARN 会把
 		// 真正的中断盖掉（错误汇总按类别聚合，噪音会挤掉信噪比）。归因交给 handler
 		// 的 interrupted 观测（499），这里只在客户端还在等时才告警。

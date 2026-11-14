@@ -1071,17 +1071,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// routeModel：映射请求显示真实路由名（别名 INFO 行已记录 客户端名 -> 真实名，
 	// 两行合看即全链路；流水行与账本/上游口径一致，运维排查不用做心算翻译）。
 	st := newChatStat(time.Now(), routeModel, peek.Stream, h.budget)
-	// 等上游首帧期间向客户端补 SSE 注释帧（见 headkeepalive.go）：大上下文 TTFB
+	// 等上游首帧期间向客户端补 SSE 注释帧（见 upstream/headkeepalive.go）：大上下文 TTFB
 	// 可达 3~6 秒，而 StreamHint 首帧否决窗口内一个字节都不写，客户端会把它当
 	// 「连接僵死」自行放弃（线上实测四次零内容中断全落在 3.46~4.09s）。
-	// 放在轮转循环之前：选号/建请求这段空窗也一起覆盖；写过注释后响应头已提交，
-	// 后续错误由 writeOpenAIError* 的「已提交」分支降级成协议内 error 帧。
+	// 心跳只在本账号上游已回 200 之后由 StreamHint 写（不能在选号之前起：一写就提交了
+	// 200，之后的 429/503/400 与 Retry-After、X-Wb-Account 全部失效）。这里只套一层
+	// 提交记录：心跳提交 200 后若首帧否决、换号又全部失败，末端错误由 writeOpenAIError*
+	// 的「已提交」分支降级成协议内 error 帧。
 	if h.cfg.HeadKeepalive > 0 && peek.Stream {
-		hk := newHeadKeepaliveWriter(r.Context(), w, h.cfg.HeadKeepalive)
-		if hk != nil {
-			w = hk
-			defer hk.stop()
-		}
+		w = &sseCommitWriter{ResponseWriter: w}
 	}
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
@@ -1718,8 +1716,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					// 排队本身是时间问题，不是账号问题：上游明说「N 秒后再来」。此前直接把
 					// 排队甩给客户端，等于让用户立刻看到失败——ZCode 这类客户端只按 HTTP
 					// 状态码/业务码判 retryable，不认识网关自造的 upstream_busy，整轮对话
-					// 当场死掉。这里按上游口径先等一轮再试一次：等待期间 head keepalive
-					// 照旧补 SSE 注释帧，客户端不会当成僵死连接；只等一次、不换号、不罚号。
+					// 当场死掉。这里按上游口径先等一轮再试一次：只等一次、不换号、不罚号。
+					// 等待期间不补注释帧：重试的状态还不知道，提前提交 200 会让再次排队时的
+					// 429 + Retry-After 变成「200 + error 帧」（首帧心跳只在上游回 200 之后起，
+					// 见 upstream/headkeepalive.go）。代价是这段等待对客户端是静默的。
 					// 等到还是排队就走末端 429 + Retry-After，交给客户端自己的退避策略。
 					if h.cfg.BusyRetry && !queueWaited && h.cfg.BusyWaitMax > 0 {
 						d := uerr.RetryAfter
@@ -1849,7 +1849,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				return h.hintContext(bareModel, reqHasImage)
 			}), upstream.WithMarkupRepair(repair), upstream.WithModelEcho(modelEcho),
 				// 客户端已断开时上游只是被动跟随，别把断流记成上游故障（日志归因）。
-				upstream.WithClientGoneFn(func() bool { return r.Context().Err() != nil }))
+				upstream.WithClientGoneFn(func() bool { return r.Context().Err() != nil }),
+				upstream.WithHeadKeepalive(h.cfg.HeadKeepalive))
 			// 首帧否决（见 upstream.HeadVetoError）：网关一个字节都没写出，这次尝试对
 			// 客户端完全无痕——按错误类型处置账号后换号，而不是把「HTTP 200 + error 帧」
 			// 透给客户端（SSE 发过字节就改不了状态码，此前只能这么兜底）。
@@ -2749,7 +2750,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
-	if k, ok := w.(*headKeepaliveWriter); ok && k.Committed() {
+	if k, ok := w.(*sseCommitWriter); ok && k.Committed() {
 		k.writeErrorFrame(status, "api_error", code, msg, "")
 		return
 	}
@@ -2773,7 +2774,7 @@ const wafCooldownBase = 60 * time.Second
 // error.gateway_hint（hint 为空串时不带字段——未覆盖形态不编造）。
 // message 仍是上游原文透传（hint 只做并列补充，绝不替换/包装 message）。
 func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint string) {
-	if k, ok := w.(*headKeepaliveWriter); ok && k.Committed() {
+	if k, ok := w.(*sseCommitWriter); ok && k.Committed() {
 		k.writeErrorFrame(status, "api_error", code, msg, hint)
 		return
 	}
@@ -2806,7 +2807,7 @@ func writeUpstreamBusyError(w http.ResponseWriter, retryAfterSec int, msg, hint 
 	if retryAfterSec > 0 {
 		extra["retry_after"] = retryAfterSec
 	}
-	if k, ok := w.(*headKeepaliveWriter); ok && k.Committed() {
+	if k, ok := w.(*sseCommitWriter); ok && k.Committed() {
 		k.writeErrorFrameExtra(http.StatusTooManyRequests, "rate_limit_error", "rate_limit_error", msg, hint, extra)
 		return
 	}
@@ -2817,7 +2818,7 @@ func writeUpstreamBusyError(w http.ResponseWriter, retryAfterSec int, msg, hint 
 // （OpenAI 自身 quota 错误的字段口径，客户端按 type 或 code 任一即可识别「不是限流、
 // 重试无意义」）。message 照旧装上游原文或自有文案。
 func writeOpenAIQuotaError(w http.ResponseWriter, msg, hint string) {
-	if k, ok := w.(*headKeepaliveWriter); ok && k.Committed() {
+	if k, ok := w.(*sseCommitWriter); ok && k.Committed() {
 		k.writeErrorFrame(http.StatusTooManyRequests, "insufficient_quota", "insufficient_quota", msg, hint)
 		return
 	}
@@ -2838,7 +2839,7 @@ func writeOpenAIQuotaError(w http.ResponseWriter, msg, hint string) {
 // 写成 "insufficient_quota" 字符串会让它既认不出配额也认不出业务码。
 // type 仍标 insufficient_quota：OpenAI 口径里这就是「别重试，去等额度」。
 func writeModelQuotaError(w http.ResponseWriter, code int, msg, hint string) {
-	if k, ok := w.(*headKeepaliveWriter); ok && k.Committed() {
+	if k, ok := w.(*sseCommitWriter); ok && k.Committed() {
 		k.writeErrorFrame(http.StatusTooManyRequests, "insufficient_quota", strconv.Itoa(code), msg, hint)
 		return
 	}
