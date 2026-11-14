@@ -643,6 +643,9 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 只有缓冲读空（下一次读会阻塞在 socket 上）才必须把已写内容推给客户端。
 	// 缓冲里只剩半行（没有换行符）也一样会阻塞，同样要 flush——否则上游若在此停顿，
 	// 客户端会一直等一个已经生成好的帧。
+	// 帧后的分隔空行不算「下一帧」：每帧写出时缓冲里通常正好剩它（"\n"），下一轮只是吞掉
+	// 这个空行，接着就阻塞在 socket 上。把它当成完整一行而跳过 flush，每一帧都要等到下一帧
+	// 到达才推给客户端（整条流慢一拍）。所以先跳过开头的空行字节，再看剩下的有没有完整一行。
 	flushIfDrained := func() {
 		if fl == nil || br == nil {
 			return
@@ -652,7 +655,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			fl.Flush()
 		case n < 8192:
 			// 帧很小（~200B），缓冲还有 8KB 以上时必然含完整帧，不必扫。
-			if p, _ := br.Peek(n); bytes.IndexByte(p, '\n') < 0 {
+			p, _ := br.Peek(n)
+			if bytes.IndexByte(bytes.TrimLeft(p, "\r\n"), '\n') < 0 {
 				fl.Flush()
 			}
 		}
