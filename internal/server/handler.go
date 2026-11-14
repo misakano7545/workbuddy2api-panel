@@ -246,7 +246,7 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
-	// restrict 11140 风控连坐保护（restrict.go）：同一窗口内多个账号被限制就全池暂停。
+	// restrict 11140 风控连坐保护（restrict.go）：同一域、同一窗口内多个账号被限制就暂停该域派发。
 	restrict    restrictionGate
 	taskMu      sync.Mutex
 	taskRunning map[string]bool
@@ -1117,9 +1117,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 11140 风控连坐暂停（restrict.go）：同一窗口里已经有多个账号被上游判「异常行为」，
+	// 11140 风控连坐暂停（restrict.go）：本域同一窗口里已经有多个账号被上游判「异常行为」，
 	// 说明这轮扫荡是冲设备/出口来的。此时再拿账号去试只会扩大损失，直接快速失败。
-	if d := h.restrict.remaining(); d > 0 {
+	if d := h.restrict.remaining(realm); d > 0 {
 		secs := int(d.Seconds() + 0.999)
 		w.Header().Set("Retry-After", strconv.Itoa(secs))
 		writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "account_restricted_hold",
@@ -1794,12 +1794,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
-			restricted := h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
 			// 11140 风控连坐（restrict.go）：上游判的是设备/出口而不是单个账号，换号等于
-			// 把下一个号也送进去 → 就地停手，并把这次限制喂给全池暂停判定。
-			if restricted {
-				h.restrict.note(acct.UID, h.cfg.RestrictionHold)
+			// 把下一个号也送进去 → 就地停手，并把这次限制喂给所属域的暂停判定。
+			if h.noteRestriction(acct, kind, string(respBody)) {
 				break
 			}
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
@@ -1872,6 +1871,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					lastErr = &upstream.Error{Kind: kind, Msg: hv.Payload}
 					log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame before first byte kind=%s payload=%s (rotating)",
 						logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(hv.Payload, 200))
+					// 11140 风控限制与 HTTP 路径同口径：就地停手，不把下一个号也送进去。
+					if h.noteRestriction(acct, kind, hv.Payload) {
+						break
+					}
 				}
 				if !rotateBackoff(i, r.Context()) {
 					break // ctx 取消：终止轮转（首帧否决换号退避）
@@ -2102,6 +2105,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "upstream_busy"
 			msg = "upstream queue is full; retry after a short wait"
+			if upstream.IsProviderOverloaded(ue.Msg) {
+				// 11134 不是排队：本地兜底文案（上游原文为空时才用得上）照实说供应商过载。
+				msg = "upstream model provider is temporarily overloaded; retry after a short wait or switch to another model"
+			}
 			if ue.RetryAfter > 0 {
 				if secs := int(math.Ceil(ue.RetryAfter.Seconds())); secs > 0 {
 					retryAfterSec = secs
@@ -2504,9 +2511,8 @@ func egressKey(a *auth.Auth) string {
 // 携带的模型名。uerr 是 ChatStreamContext 返回的分类信封（可携带 RetryAfter）；
 // 零值/防御路径下为 nil，冷却时长回落既有计算。
 //
-// 返回值 restricted 只在 11140（账号被判异常行为）时为 true：这一类错误的判据在上游
-// 是设备/出口级，调用方据此终止轮转（见 restrict.go）。
-func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) (restricted bool) {
+// 11140 账号限制的「停止换号 + 连坐计数」不在这里：由调用方随后调 noteRestriction（见 restrict.go）。
+func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) {
 	switch kind {
 	case upstream.ErrHardCredit:
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
@@ -2654,13 +2660,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 				return
 			}
 			h.cfg.Pool.Disable(uid, "account restricted by upstream (11140 request illegal); appeal in WorkBuddy (submit feedback) to lift the restriction")
-			return true
+			return
 		}
 		// 11140 的中文风控文书（"账号存在异常行为，已被限制使用" / "unusual activity"）：
 		// 与上面的英文形态同一个判据、同一处置——禁用该号 + 通知调用方停手（restrict.go）。
 		if upstream.IsRestricted(body) {
 			h.cfg.Pool.Disable(uid, "account restricted by upstream (11140 unusual activity); appeal in WorkBuddy (submit feedback) to lift the restriction")
-			return true
+			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
 	case upstream.ErrServer:
