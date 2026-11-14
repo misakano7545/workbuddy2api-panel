@@ -26,12 +26,38 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/cst"
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
+
+// estimatedExpiryWarnEvery 同一账号「到期日只能推算」WARN 的最小间隔。余额刷新每 5 分钟
+// 一轮，而这个状态由上游数据形态决定、短时间内不会变；不限频会让每个号每天刷 288 行
+// 同样的日志。变量供测试缩短。
+var estimatedExpiryWarnEvery = time.Hour
+
+var estimatedExpiryWarned sync.Map // uid -> time.Time（上次 WARN 的时刻）
+
+// estimatedExpiryWarnDue 返回该账号这次是否该写 WARN，并记下时刻。
+func estimatedExpiryWarnDue(uid string, now time.Time) bool {
+	// 多个刷新协程可能同时算同一账号：用 LoadOrStore + CompareAndSwap，
+	// 保证同一间隔内只有一个调用方拿到 true。
+	for {
+		v, loaded := estimatedExpiryWarned.LoadOrStore(uid, now)
+		if !loaded {
+			return true
+		}
+		if now.Sub(v.(time.Time)) < estimatedExpiryWarnEvery {
+			return false
+		}
+		if estimatedExpiryWarned.CompareAndSwap(uid, v, now) {
+			return true
+		}
+	}
+}
 
 const (
 	billingSummaryPath = "/billing/meter/get-user-resource-summary"
@@ -195,7 +221,7 @@ func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, t
 		}
 		merged[k] = pick{d: d, end: end, estimate: fromCycle}
 	}
-	if cycleFallback > 0 {
+	if cycleFallback > 0 && estimatedExpiryWarnDue(a.UID, now) {
 		// 日期是按计量周期末日推算的（缺 DeductionEndTime / ExpiredTime）。仍然计入，
 		// 但留一行 WARN：这个口径不对等于真实扣费截止，排障时别被它带偏。
 		log.Printf("WARN: [billing] %d 个积分类的到期日只能按计量周期（CycleEndTime）推算，非真实扣费截止（acct=%s）",

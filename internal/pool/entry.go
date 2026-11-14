@@ -73,6 +73,8 @@ type ExpiryBucket struct {
 	Date     string    `json:"date"`
 	ExpireAt time.Time `json:"expires_at,omitempty"`
 	Remain   int64     `json:"remain"`
+	// Estimated 与 upstream.ExpiryBucket.Estimated 同义：该日到期日是按计量周期推算的，面板据此标注。
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 // Status 单个账号对外暴露的状态（脱敏）。
