@@ -795,6 +795,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .rm-row input { flex: 1; }
 
 .acc td.fl { line-height: 1.35; }
+/* 余额趋势：已失效账号的行整体降权。
+   它们**不参与统计**（已从合计里剔除），只作为历史记录陈列 —— 视觉上必须退到
+   背景，否则历史残留的余额会和活号争抢注意力（前注意加工层面）。 */
+.bh-dead { opacity: .45; }
+.bh-dead td { filter: grayscale(1); }
+.bh-sep td { padding: 6px 10px; font-size: 11.5px; color: var(--ink-3);
+  background: var(--surface-2); border-top: 1px solid var(--line); }
 .acc td.fl .fl-row { display: block; font-variant-numeric: tabular-nums; }
 .acc td.fl .fl-sub { font-size: 11.5px; color: var(--ink-3); }
 .fl-v { color: var(--ink-2); }
