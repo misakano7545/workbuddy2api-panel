@@ -104,6 +104,14 @@ type Config struct {
 	// 0 = 关闭（回到「首帧否决窗口内零字节」的旧行为）。见 headkeepalive.go。
 	HeadKeepalive time.Duration
 
+	// BusyRetry 6020/6021 渠道排队时，先在网关内按上游 retry_after 等一轮再试一次
+	// （features.busy_retry，默认开）。见 chatCompletions 的 ErrUpstreamBusy 分支。
+	BusyRetry bool
+
+	// BusyWaitMax 单次排队等待上限（features.busy_wait_seconds，默认 60s）。
+	// <=0 = 不等，直接把排队交给客户端按 Retry-After 退避。
+	BusyWaitMax time.Duration
+
 	// RecordClientInfo 是否在请求日志里记录调用来源（客户端 IP / User-Agent）。
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
@@ -1129,6 +1137,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	var modelBlock pool.ModelBlockStatus
 	// busyWaited 本次请求是否已经为「模型繁忙」等过一轮（issue #46，见 acct==nil 分支）。
 	busyWaited := false
+	// queueWaited 本次请求是否已经为 6020/6021 渠道排队等过一轮（见 ErrUpstreamBusy 分支）。
+	queueWaited := false
 	// slotWaited 本次请求是否已经为「号都在途占满」等过一轮名额（issue #117）。
 	slotWaited := false
 
@@ -1704,6 +1714,27 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 排队请求多发几次（issue #125；embeddings 链路早已同口径 fail-fast）。
 				// 6021（队列满、无 retry_after）保留轮转：那是间歇空窗，换号有机会碰上。
 				if uerr.RetryAfter > 0 {
+					// 排队本身是时间问题，不是账号问题：上游明说「N 秒后再来」。此前直接把
+					// 排队甩给客户端，等于让用户立刻看到失败——ZCode 这类客户端只按 HTTP
+					// 状态码/业务码判 retryable，不认识网关自造的 upstream_busy，整轮对话
+					// 当场死掉。这里按上游口径先等一轮再试一次：等待期间 head keepalive
+					// 照旧补 SSE 注释帧，客户端不会当成僵死连接；只等一次、不换号、不罚号。
+					// 等到还是排队就走末端 429 + Retry-After，交给客户端自己的退避策略。
+					if h.cfg.BusyRetry && !queueWaited && h.cfg.BusyWaitMax > 0 {
+						d := uerr.RetryAfter
+						if d > h.cfg.BusyWaitMax {
+							d = h.cfg.BusyWaitMax
+						}
+						log.Printf("queue-wait: model=%s realm=%q upstream 6020 queued (retry_after=%s), waiting %s then retry once",
+							bareModel, realm, uerr.RetryAfter.Round(time.Millisecond), d.Round(time.Millisecond))
+						if !sleepCtx(r.Context(), d) {
+							break // 客户端已断连：不必再等
+						}
+						queueWaited = true
+						delete(tried, acct.UID) // 排队不是账号过错：等完允许再试同一个号
+						i--                     // 等待不算一次换号：槽位留给真正的尝试
+						continue
+					}
 					break
 				}
 				if !rotateBackoff(i, r.Context()) {
@@ -2215,6 +2246,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeModelQuotaError(w, quotaCode, msg, hint)
 	case quota:
 		writeOpenAIQuotaError(w, msg, hint)
+	case code == "upstream_busy":
+		// 排队错误：响应头已提交时写成客户端能识别的可重试形态，见 writeUpstreamBusyError。
+		writeUpstreamBusyError(w, retryAfterSec, msg, hint)
 	default:
 		writeOpenAIErrorHint(w, status, code, msg, hint)
 	}
@@ -2748,6 +2782,28 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 			"gateway_hint": hint,
 		},
 	})
+}
+
+// writeUpstreamBusyError 6020/6021 渠道排队错误出口。
+//
+// 未提交响应头：标准 429 JSON + Retry-After（调用点已设置），客户端按 OpenAI
+// 限流语义退避重试，语义最干净。
+//
+// 已提交响应头（head keepalive 注释帧已经写出 200）：只能在协议内写 error 帧，
+// 但必须把「可重试」说清楚——ZCode 等客户端只认 HTTP 状态码或已知业务码，
+// 不认识网关自造的 upstream_busy，会把整轮对话判死（retryable=false）。故帧内用
+// OpenAI 限流口径 type/code=rate_limit_error，并附 statusCode=429 与 retry_after
+// 秒数；上游原文仍在 message 里原样透传，gateway_hint 保留排队位置等信息。
+func writeUpstreamBusyError(w http.ResponseWriter, retryAfterSec int, msg, hint string) {
+	extra := map[string]any{"statusCode": http.StatusTooManyRequests}
+	if retryAfterSec > 0 {
+		extra["retry_after"] = retryAfterSec
+	}
+	if k, ok := w.(*headKeepaliveWriter); ok && k.Committed() {
+		k.writeErrorFrameExtra(http.StatusTooManyRequests, "rate_limit_error", "rate_limit_error", msg, hint, extra)
+		return
+	}
+	writeOpenAIErrorHint(w, http.StatusTooManyRequests, "upstream_busy", msg, hint)
 }
 
 // writeOpenAIQuotaError 积分耗尽专用响应：429 + type/code 同为 insufficient_quota
