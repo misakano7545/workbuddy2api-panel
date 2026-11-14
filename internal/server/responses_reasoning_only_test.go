@@ -85,6 +85,55 @@ func TestResponsesReasoningOnlyNotTriggeredByLength(t *testing.T) {
 	}
 }
 
+// TestResponsesReasoningOnlyKeepsHostedImage 网关代执行的托管出图（preItems 里的
+// image_generation_call）已经交付、也已经扣过积分；模型随后只想不说是正常收尾。
+// 判成 failed / 502 会让客户端重试，把已扣费的图再出一遍——流式与非流式都不能判。
+func TestResponsesReasoningOnlyKeepsHostedImage(t *testing.T) {
+	img := map[string]any{"id": "ig_1", "type": "image_generation_call", "status": "completed", "result": "aGk="}
+	const chatJSON = `{"id":"c1","object":"chat.completion","model":"glm-5.2","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"图已经出好了"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`
+	for _, stream := range []bool{true, false} {
+		rec := httptest.NewRecorder()
+		rw := &responsesWriter{ResponseWriter: rec, stream: stream, meta: &responsesMeta{preItems: []any{img}}}
+		rw.Header().Set("Content-Type", "text/event-stream")
+		if !stream {
+			rw.Header().Set("Content-Type", "application/json")
+		}
+		rw.WriteHeader(http.StatusOK)
+		if stream {
+			_, _ = rw.Write([]byte(sseReasoningOnly))
+		} else {
+			_, _ = rw.Write([]byte(chatJSON))
+		}
+		rw.finish()
+		s := rec.Body.String()
+		if strings.Contains(s, "empty_reasoning_only") || rec.Code != http.StatusOK {
+			t.Fatalf("stream=%v: 已交付托管出图不该判 reasoning-only（code=%d）:\n%s", stream, rec.Code, s)
+		}
+		if !strings.Contains(s, "image_generation_call") {
+			t.Fatalf("stream=%v: 回程应带出图项:\n%s", stream, s)
+		}
+		if stream {
+			types := sseTypes(s)
+			if n := countStr(types, "response.completed") + countStr(types, "response.failed") + countStr(types, "response.incomplete"); n != 1 {
+				t.Fatalf("终态事件应恰好 1 个，实际 %d：types=%v", n, types)
+			}
+			if !containsStr(types, "response.completed") {
+				t.Fatalf("应 completed：types=%v", types)
+			}
+		}
+	}
+}
+
+func countStr(xs []string, s string) int {
+	n := 0
+	for _, x := range xs {
+		if x == s {
+			n++
+		}
+	}
+	return n
+}
+
 // TestResponsesReasoningWithToolCallNotFailed 思考 + 工具调用是正常回合（模型想完就
 // 动手），不能在收尾时被判成「只有思考」。
 func TestResponsesReasoningWithToolCallNotFailed(t *testing.T) {
