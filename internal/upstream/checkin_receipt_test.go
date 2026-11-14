@@ -45,6 +45,9 @@ func TestCheckinReceiptClassifies(t *testing.T) {
 
 		// 「失败」是硬词，必须压过 already。
 		{"failed streak short", 200, `{"code":10001,"msg":"签到失败，已签到天数不足 7 天"}`, CheckinFailed, 0, false},
+		// HTTP 200 + code=0 的失败回执：没有 error，只能靠文案识别，不能当成签到成功或幂等成功。
+		{"failed code0 streak short", 200, `{"code":0,"msg":"签到失败，已签到天数不足 7 天"}`, CheckinFailed, 0, false},
+		{"failed code0 retry later", 200, `{"code":0,"msg":"签到失败，请稍后重试"}`, CheckinFailed, 0, false},
 		{"failed retry later", 400, `{"code":10001,"msg":"签到失败，请稍后重试"}`, CheckinFailed, 0, false},
 		{"failed activity off", 400, `{"code":10001,"msg":"check-in activity not started"}`, CheckinFailed, 0, false},
 		{"failed enterprise", 400, `{"code":10001,"msg":"企业账号不支持该操作"}`, CheckinFailed, 0, false},
@@ -89,6 +92,8 @@ func TestDailyCheckinErrorSemanticsUnchanged(t *testing.T) {
 		// 改造前 IsAlreadyCheckin 会把这条当幂等成功，面板因此显示「今日已签」；
 		// 语义其实是失败（含「失败」硬词），必须仍然报错。
 		{"failed streak short", 200, `{"code":10001,"msg":"签到失败，已签到天数不足 7 天"}`, true},
+		// code=0 的失败回执 HTTP 层没有错误：老调用方只看 error，必须补一个，否则被当成签到成功。
+		{"failed code0", 200, `{"code":0,"msg":"签到失败，已签到天数不足 7 天"}`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
