@@ -517,6 +517,8 @@ func main() {
 			log.Printf("WARN: task log archive: %v", err)
 		}
 	}
+	// 日志落盘在 Ring 的后台 goroutine 里做：退出前把排队的行写完（先于上面的 panelLogs.Close 执行）。
+	defer pn.Logs().Flush()
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 	// 成长任务队列排程的执行体在面板（队列逻辑唯一实现）：注入回调，避免 scheduler → panel 循环依赖。

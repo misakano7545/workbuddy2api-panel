@@ -46,7 +46,6 @@ func TestLogsExportDisabled(t *testing.T) {
 func TestLogsExportServesZip(t *testing.T) {
 	p, store := newExportPanel(t)
 	store.Append(LogEntry{TS: cst.Now().Add(-time.Minute), Ch: ChSys, Text: "export me"})
-	store.Flush()
 
 	rec := httptest.NewRecorder()
 	p.logsExportHandler(rec, httptest.NewRequest(http.MethodGet, "/panel/api/logs/export?days=1", nil))
@@ -97,7 +96,6 @@ func TestLogsExportClampsToRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Append(LogEntry{TS: cst.Now().Add(-time.Minute), Ch: ChSys, Text: "today"})
-	store.Flush()
 
 	// days=999 仍应成功（只是被钳到 3 天），不该因为参数越界直接报错。
 	rec := httptest.NewRecorder()
