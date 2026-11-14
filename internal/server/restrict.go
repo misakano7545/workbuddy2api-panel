@@ -108,7 +108,11 @@ func (g *restrictionGate) note(realm, uid string, hold time.Duration, healthy in
 	if len(st.hits) < need {
 		return false
 	}
-	// 连续触发按 2 倍退避，上限 min(配置, restrictionHoldMax)。
+	// 连续触发按 2 倍退避，上限 min(配置, restrictionHoldMax)。平静期后重新从基数起：
+	// 扫荡过去 30 分钟没有新限制，说明那一波结束了，不该继续拿上一波的 streak 加码。
+	if !st.last.IsZero() && now.Sub(st.last) > restrictionCalmReset {
+		st.streak = 0
+	}
 	st.streak++
 	st.last = now
 	pause := restrictionHoldBase
