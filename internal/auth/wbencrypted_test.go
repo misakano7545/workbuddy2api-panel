@@ -1,12 +1,15 @@
 package auth
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -183,4 +186,160 @@ func TestParseUnencryptedStillWorks(t *testing.T) {
 	if a.AccessToken != "at" || a.UID != "u1" || a.Realm() != "global" {
 		t.Fatalf("明文解析结果不对: %+v", a)
 	}
+}
+
+// mustSeal 测试里现场造信封（与 testdata 的参考向量互补：那份验证与参考实现兼容）。
+func mustSeal(t *testing.T, v any) map[string]any {
+	t.Helper()
+	env, err := sealWBValue(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return env
+}
+
+// saveRefreshed 把 raw 写进临时文件、解析、换上新 token 与到期时间后 SaveAtomic，返回写回的字节。
+func saveRefreshed(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "workbuddy-wb.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	a.FilePath = path
+	a.AccessToken, a.RefreshToken, a.ExpiresAt = "at-refreshed", "rt-refreshed", 1900000000
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("写回失败: %v", err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+			t.Errorf("凭证文件权限应为 0600: %v %v", st.Mode().Perm(), err)
+		}
+	}
+	return saved
+}
+
+// 加密来源的回写：扁平形同样不得出现明文 token；只要来源有任何字段是信封，凭据就一律封上；
+// 桌面端自己的字段（phoneNumber、uin 大整数）与原有形态（扁平/嵌套）原样保留；expiresAt
+// 按来源单位（毫秒）写回。
+func TestSaveAtomicEncryptedSourceKeepsShapeAndSecrets(t *testing.T) {
+	flat, _ := json.Marshal(map[string]any{
+		"accessToken":  mustSeal(t, "at-old"),
+		"refreshToken": mustSeal(t, "rt-old"),
+		"expiresAt":    json.Number("1800000000000"),
+		"uid":          "uid-flat",
+		"phoneNumber":  mustSeal(t, "13800000000"),
+		"uin":          json.Number("12345678901234567"),
+	})
+	// 凭据原本明文、别的字段是信封：回写时凭据也必须封上。数组里、键名带点的信封（同一文件里
+	// 别的账号的凭证）也要原样封回，不能因为以原文档为底回写而漏成明文。
+	mixed, _ := json.Marshal(map[string]any{
+		"auth":        map[string]any{"accessToken": "at-old", "refreshToken": "rt-old", "expiresAt": json.Number("1800000000000")},
+		"account":     map[string]any{"uid": "uid-mixed", "nickname": mustSeal(t, "小凛"), "uin": "10001"},
+		"allAccounts": []any{map[string]any{"accessToken": mustSeal(t, "at-other-account")}, mustSeal(t, "rt-other-account")},
+		"a.b":         mustSeal(t, "dotted-secret"),
+	})
+	vector, err := os.ReadFile(wbVectorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string][]byte{"flat": flat, "mixed": mixed, "vector": vector} {
+		saved := saveRefreshed(t, raw)
+		s := string(saved)
+		if strings.Contains(s, "at-refreshed") || strings.Contains(s, "rt-refreshed") || strings.Contains(s, "13800000000") ||
+			strings.Contains(s, "other-account") || strings.Contains(s, "dotted-secret") {
+			t.Errorf("%s: 写回文件里出现了明文机密:\n%s", name, s)
+		}
+		var back map[string]any
+		dec := json.NewDecoder(strings.NewReader(s))
+		dec.UseNumber()
+		if err := dec.Decode(&back); err != nil {
+			t.Fatalf("%s: 写回不是合法 JSON: %v", name, err)
+		}
+		creds, acc := back, back
+		if name != "flat" {
+			creds, acc = back["auth"].(map[string]any), back["account"].(map[string]any)
+		} else if _, nested := back["auth"]; nested {
+			t.Errorf("flat: 扁平形被改写成了嵌套形")
+		}
+		for _, k := range []string{"accessToken", "refreshToken"} {
+			if !isWBEnvelope(creds[k]) {
+				t.Errorf("%s: %s 应为信封，实际 %v", name, k, creds[k])
+			}
+		}
+		if name == "flat" {
+			if back["uin"] != json.Number("12345678901234567") || !isWBEnvelope(back["phoneNumber"]) {
+				t.Errorf("flat: 桌面端字段丢失或被改写: uin=%v phone=%v", back["uin"], back["phoneNumber"])
+			}
+		} else if acc["uin"] != "10001" {
+			t.Errorf("%s: account.uin 丢失: %v", name, acc["uin"])
+		}
+		if name != "vector" && creds["expiresAt"] != json.Number("1900000000000") {
+			t.Errorf("%s: expiresAt 应按毫秒写回，实际 %v", name, creds["expiresAt"])
+		}
+		again, err := Parse(saved)
+		if err != nil || again.AccessToken != "at-refreshed" || again.RefreshToken != "rt-refreshed" || again.ExpiresAt != 1900000000 {
+			t.Errorf("%s: 回写后读不回来: %v %+v", name, err, again)
+		}
+	}
+}
+
+// 数字形的字符串（昵称 "12345"、refreshToken "123"）写回后下次启动必须原样读回：类型一变，
+// Parse 整份报错，账号掉出池子。桌面端自己用 Buffer 包装存的数字形昵称同样要读成字符串。
+func TestWBEncryptedNumericStringsRoundTrip(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{
+		"auth": map[string]any{"accessToken": mustSeal(t, "at-old"), "refreshToken": mustSeal(t, "rt-old"), "realm": "cn"},
+		"account": map[string]any{"uid": "uid-num",
+			"nickname": mustSealPlain(t, `{"type":"Buffer","data":[49,50,51,52,53]}`)},
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "workbuddy-num.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Parse(raw)
+	if err != nil || a.Nickname != "12345" {
+		t.Fatalf("桌面端 Buffer 包装的数字形昵称应读成字符串: %v %+v", err, a)
+	}
+	a.FilePath = path
+	a.RefreshToken = "123"
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatal(err)
+	}
+	list, err := LoadDir(dir)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("写回后重新载入失败: %v n=%d", err, len(list))
+	}
+	if got := list[0]; got.Nickname != "12345" || got.RefreshToken != "123" || got.AccessToken != "at-old" {
+		t.Fatalf("写回后类型或值变了: %+v", got)
+	}
+}
+
+// mustSealPlain 用给定明文直接造信封（模拟桌面端写的明文形态）。
+func mustSealPlain(t *testing.T, plain string) map[string]any {
+	t.Helper()
+	key := sha256.Sum256([]byte(wbAtRestSecretKey))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	keyID := wbKeyID(key)
+	ct := gcm.Seal(nil, nonce, []byte(plain), wbFieldAAD(1, keyID))
+	env, _ := json.Marshal(map[string]any{"suite": 1, "keyId": keyID,
+		"nonce":      base64.StdEncoding.EncodeToString(nonce),
+		"authTag":    base64.StdEncoding.EncodeToString(ct[len(ct)-16:]),
+		"ciphertext": base64.StdEncoding.EncodeToString(ct[:len(ct)-16])})
+	return map[string]any{"$wbEncrypted": 1, "envelope": base64.StdEncoding.EncodeToString(env)}
 }
