@@ -187,11 +187,9 @@ func prepareBodyOpt(src []byte, sanitize, brandGlobal bool, efforts map[string][
 	//   - 空 text 段（11151）：客户端重试只会重放同一段历史，换号也救不回来；
 	//   - reasoning 镜像：Kimi/GLM/MiniMax 等按 `reasoning` 读历史，只看
 	//     reasoning_content 的话它们的多轮一致性校验会挂。
-	// 位置必须在 repack/cleanup 之后：那两步会把字符串 content 挪到别的消息上，
-	// 先补位再挪动等于漏掉被挪过去的那一段。
-	if msgs, ok := obj["messages"].([]any); ok {
-		guardEmptyTextParts(msgs)
-	}
+	// 位置必须在 repack/cleanup 之后（那两步会把字符串 content 挪到别的消息上，先补位
+	// 再挪动等于漏掉被挪过去的那一段），也必须在 sanitize 之后（只含指纹的 text 段会被
+	// 净化洗成空串，先补位的话出站仍带 ""，照样 11151）。
 	mirrorUpstreamReasoning(obj)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
@@ -200,6 +198,9 @@ func prepareBodyOpt(src []byte, sanitize, brandGlobal bool, efforts map[string][
 		// tools 是客户端自带的能力声明，描述由客户端作者撰写，同样会带身份句
 		// （上游 issue：只洗 messages 时整段工具描述原样出站）。issue #395 同类。
 		sanitizeTools(obj["tools"], brandGlobal)
+	}
+	if msgs, ok := obj["messages"].([]any); ok {
+		guardEmptyTextParts(msgs)
 	}
 	// 会话轮级字段（issue #51）：本轮已解析好的 map 就地补，与本函数的序列化合并；
 	// 旧实现是在 prepared body 上再 Unmarshal+Marshal 一次（100~500KB 的整树往返）。
