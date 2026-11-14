@@ -2,8 +2,8 @@
 // wb_window_probe.py）。
 //
 // 钉住四条处置路径：探针成功 → 清冷却 + 删记录；429 给更晚的重置 → 换墙钟；
-// 429 给同样/更早的时刻 → 计数 + 推后重试；连续失败到上限 → 放弃。
-// 外加两条边界：账号已删 → 直接丢弃；账号停用 → 不唤醒上游。
+// 429 给同样/更早的时刻 → 计数 + 推后重试；持续未放开到上限 → 放弃；其它错误只试一次。
+// 外加边界：账号已删 → 直接丢弃；停用/暂停/积分闸门拦下的号 → 不唤醒上游。
 package scheduler
 
 import (
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,10 +151,10 @@ func TestWindowProbe429NotYetOpen(t *testing.T) {
 	}
 }
 
-// TestWindowProbeGivesUp 连续失败到上限 → 删记录（下一次真实 429 会重新登记）。
+// TestWindowProbeGivesUp 持续「还没放开」到上限 → 删记录（下一次真实 429 会重新登记）。
 func TestWindowProbeGivesUp(t *testing.T) {
 	p, s, f := windowEnv(t, func(int) (int, string) {
-		return http.StatusInternalServerError, `{"code":500}`
+		return http.StatusTooManyRequests, `{"code":6004,"msg":"使用量已超出频率限制"}`
 	})
 	reset := dueWindow(t, p, "glm-5.3")
 	now := reset.Add(time.Second)
@@ -196,25 +197,102 @@ func TestWindowProbeDropsUnknownAccount(t *testing.T) {
 	}
 }
 
-// TestWindowProbeSkipsDisabledAccount 停用的号不该被自动唤醒：记录保留（等它被重新
-// 启用）、上游零调用。
-func TestWindowProbeSkipsDisabledAccount(t *testing.T) {
-	p, s, f := windowEnv(t, func(int) (int, string) { return http.StatusOK, "" })
-	reset := dueWindow(t, p, "glm-5.3")
-	p.Disable("w1", "手工停用")
+// TestWindowProbeBlockedAccountsNotWoken 探针是真实计费的对话请求，与选号同一套闸门：
+// 停用、暂停、触及保留积分、低于积分保底且模型收费的号都不该被探针唤醒，上游零调用；
+// 记录删掉（真实请求照常会开窗），不留着每 15 秒空转。
+func TestWindowProbeBlockedAccountsNotWoken(t *testing.T) {
+	cases := map[string]func(p *pool.Pool){
+		"disabled": func(p *pool.Pool) { p.Disable("w1", "手工停用") },
+		"paused":   func(p *pool.Pool) { p.Pause("w1") },
+		"reserve": func(p *pool.Pool) {
+			p.SetReserveCredits(100)
+			p.SetCredits("w1", 50, 1000)
+		},
+		"floor": func(p *pool.Pool) {
+			p.SetCreditFloor(100)
+			p.SetCredits("w1", 50, 1000)
+			p.SetModelRateOf(func(_, _ string) string { return "1.00" })
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, s, f := windowEnv(t, func(int) (int, string) { return http.StatusOK, "" })
+			reset := dueWindow(t, p, "glm-5.3")
+			setup(p)
 
-	if got := s.runWindowProbes(t.Context(), p.DueModelWindows(reset.Add(time.Second))); got != 0 {
-		t.Fatalf("停用账号不该发探针，got %d", got)
+			if got := s.runWindowProbes(t.Context(), p.DueModelWindows(reset.Add(time.Second))); got != 0 {
+				t.Fatalf("不该发探针，got %d", got)
+			}
+			if f.calls != 0 {
+				t.Fatalf("上游不该被调用，got %d", f.calls)
+			}
+			if w := p.ModelWindows(); len(w) != 0 {
+				t.Fatalf("记录应删除，got %+v", w)
+			}
+		})
 	}
-	if f.calls != 0 {
-		t.Fatalf("上游不该被调用，got %d", f.calls)
+}
+
+// TestWindowProbeOtherErrorsDoNotRetry 非限流的失败（5xx、200 流里的拦截帧）只试一次：
+// 探针每次都是计费请求，不该为它按 15 秒一次连打 20 次。拦截帧还不能算「打通」而清掉冷却。
+func TestWindowProbeOtherErrorsDoNotRetry(t *testing.T) {
+	cases := map[string]func(int) (int, string){
+		"5xx": func(int) (int, string) { return http.StatusInternalServerError, `{"code":500}` },
+		"200-error-frame": func(int) (int, string) {
+			return http.StatusOK, "data: {\"code\":11140,\"msg\":\"request illegal\"}\n\ndata: [DONE]\n\n"
+		},
 	}
-	w := p.ModelWindows()
-	if len(w) != 1 {
-		t.Fatalf("记录应保留，got %+v", w)
+	for name, reply := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, s, f := windowEnv(t, reply)
+			reset := dueWindow(t, p, "glm-5.3")
+			p.CooldownSoftForModel("w1", time.Minute, reset, "glm-5.3", "6004 rate limited")
+
+			s.runWindowProbes(t.Context(), p.DueModelWindows(reset.Add(time.Second)))
+			if f.calls != 1 {
+				t.Fatalf("应只试一次，got %d", f.calls)
+			}
+			if w := p.ModelWindows(); len(w) != 0 {
+				t.Fatalf("失败后应删记录，不再重试，got %+v", w)
+			}
+			if name == "200-error-frame" {
+				st, _ := p.Status("w1")
+				found := false
+				for _, m := range st.RateLimitedModels {
+					found = found || m.Model == "glm-5.3"
+				}
+				if !found {
+					t.Fatal("错误帧不是打通，不该清掉 6004 冷却")
+				}
+			}
+		})
 	}
-	if w[0].Attempts == 0 {
-		t.Fatal("应记账一次跳过，避免下一轮巡检立刻重试")
+}
+
+// TestWindowProbeLaterResetSurvivesLongBodyAndStreamFrame 重置时刻拿不到就会丢掉新一轮：
+// 429 的报文把重置文案排在 200 字节之后（*upstream.Error.Msg 已被截断），或者上游把 6004
+// 放进 HTTP 200 的错误帧里——两种形态都必须换成新墙钟，而不是计数重试后放弃。
+func TestWindowProbeLaterResetSurvivesLongBodyAndStreamFrame(t *testing.T) {
+	later := time.Now().Add(2 * time.Hour).In(cst.Loc).Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(`{"code":6004,"msg":"%s将在 %s UTC+8 重置"}`, strings.Repeat("x", 300), later)
+	frame := fmt.Sprintf("data: {\"code\":6004,\"msg\":\"使用量已超出频率限制，将在 %s UTC+8 重置\"}\n\n", later)
+	cases := map[string]func(int) (int, string){
+		"429-long-body": func(int) (int, string) { return http.StatusTooManyRequests, msg },
+		"200-frame":     func(int) (int, string) { return http.StatusOK, frame },
+	}
+	for name, reply := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, s, _ := windowEnv(t, reply)
+			reset := dueWindow(t, p, "glm-5.3")
+			s.runWindowProbes(t.Context(), p.DueModelWindows(reset.Add(time.Second)))
+			w := p.ModelWindows()
+			if len(w) != 1 {
+				t.Fatalf("窗口应保留等下一轮，got %+v", w)
+			}
+			if w[0].Attempts != 0 || !w[0].ResetAt.After(time.Now().Add(time.Hour)) {
+				t.Fatalf("应换成上游新给的重置时刻并清零计数，got %+v", w[0])
+			}
+		})
 	}
 }
 
