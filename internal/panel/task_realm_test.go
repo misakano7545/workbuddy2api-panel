@@ -68,7 +68,9 @@ func TestGlobalTaskReadReturnsCapabilitiesAndNormalizedIDs(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Realm != "global" || body.Capabilities["accept"] || body.Capabilities["claim"] || body.Capabilities["automate"] {
+	// 国际版任务现已放开接受/领奖/自动化（与国内版一致），故三能力均为 true；
+	// 但国际版任务列表走默认口径，不探测 MP 接口，仅 1 次上游读取。
+	if body.Realm != "global" || !body.Capabilities["accept"] || !body.Capabilities["claim"] || !body.Capabilities["automate"] {
 		t.Fatalf("realm/capabilities = %q/%v", body.Realm, body.Capabilities)
 	}
 	if len(body.Tasks) != 1 {
@@ -93,7 +95,7 @@ func TestGlobalTaskReadReturnsCapabilitiesAndNormalizedIDs(t *testing.T) {
 	}
 }
 
-func TestGlobalTaskWriteEndpointsDoNotCallUpstream(t *testing.T) {
+func TestGlobalTaskWriteEndpointsProceedAndCallUpstream(t *testing.T) {
 	useRealmForTest(t)
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,22 +119,13 @@ func TestGlobalTaskWriteEndpointsDoNotCallUpstream(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 		p.ServeHTTP(rec, req)
-		if rec.Code != http.StatusNotImplemented {
-			t.Errorf("%s status=%d body=%s, want 501", tc.path, rec.Code, rec.Body.String())
-		}
-		var response struct {
-			OK    bool   `json:"ok"`
-			Error string `json:"error"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode %s response: %v", tc.path, err)
-		}
-		if response.OK || response.Error != globalTaskWriteMessage {
-			t.Errorf("%s response=%+v", tc.path, response)
+		// 国际版任务现已放开：写端点应放行并向对应上游发起请求（不再 501）。
+		if rec.Code == http.StatusNotImplemented {
+			t.Errorf("%s status=%d body=%s, want non-501 (global tasks enabled)", tc.path, rec.Code, rec.Body.String())
 		}
 	}
-	if got := requests.Load(); got != 0 {
-		t.Fatalf("global write routes made %d upstream requests, want 0", got)
+	if got := requests.Load(); got == 0 {
+		t.Fatalf("global write routes made %d upstream requests, want >0 (global tasks enabled)", got)
 	}
 }
 
@@ -293,11 +286,11 @@ func TestTaskScanAndQueueExposeSkippedAccountsAndScanErrors(t *testing.T) {
 			if !strings.Contains(response["message"].(string), "扫描失败") {
 				t.Errorf("queue message does not explain scan failure: %v", response["message"])
 			}
-			if response["scan_error_count"] != float64(1) {
-				t.Errorf("scan_error_count=%v, want 1", response["scan_error_count"])
+			if response["scan_error_count"] != float64(2) {
+				t.Errorf("scan_error_count=%v, want 2 (cn + global both erroring)", response["scan_error_count"])
 			}
 		} else {
-			if response["pending_count"] != float64(0) || response["skipped_count"] != float64(1) || response["error_count"] != float64(1) {
+			if response["pending_count"] != float64(0) || response["skipped_count"] != float64(0) || response["error_count"] != float64(2) {
 				t.Errorf("scan counts = %v", response)
 			}
 		}
@@ -310,8 +303,10 @@ func TestTaskScanAndQueueExposeSkippedAccountsAndScanErrors(t *testing.T) {
 			row := value.(map[string]any)
 			byUID[row["uid"].(string)] = row
 		}
+		// 国际版任务现已纳入扫描：global 不再被 skip，而是与 cn 一样真实发起上游
+		// 请求（此处上游一律 500，所以表现为 growth_error）。
 		global := byUID["global-1"]
-		if global["realm"] != "global" || global["skipped"] != true || global["skip_reason"] == "" {
+		if global["realm"] != "global" || global["skipped"] != false || global["growth_error"] == "" {
 			t.Errorf("global scan row=%v", global)
 		}
 		cn := byUID["cn-1"]
@@ -319,7 +314,7 @@ func TestTaskScanAndQueueExposeSkippedAccountsAndScanErrors(t *testing.T) {
 			t.Errorf("CN scan row=%v", cn)
 		}
 	}
-	if got := requests.Load(); got != 4 {
-		t.Fatalf("upstream requests=%d, want two CN paths per scan and no global calls", got)
+	if got := requests.Load(); got != 8 {
+		t.Fatalf("upstream requests=%d, want two paths (ListTasks+ListTasksMP) per account per scan", got)
 	}
 }

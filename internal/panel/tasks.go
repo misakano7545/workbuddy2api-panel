@@ -51,24 +51,18 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	realm := a.Realm()
 	capabilities := map[string]bool{"accept": true, "claim": true, "automate": true}
 	response := map[string]any{"ok": true, "realm": realm, "capabilities": capabilities, "tasks": tasks}
-	if a.IsGlobal() {
-		// Global task data has a read-only schema with code/task_id/status but no
-		// verified accept, claim, or automation contract. Do not probe the MP API.
-		capabilities["accept"], capabilities["claim"], capabilities["automate"] = false, false, false
-		response["message"] = globalTaskWriteMessage
-	} else {
-		// 合并小程序口径任务（Sequential_Tasks_* 等仅在 mp 头列表下发）。
-		// mp 列表是默认口径的超集（实测含常规任务），按 task_code 去重；失败不影响默认任务。
-		if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
-			seen := map[string]bool{}
-			for _, t := range tasks {
+	// 国际版任务同样支持接受/领奖/自动化：合并小程序口径任务（Sequential_Tasks_* 等
+	// 仅在 mp 头列表下发）。mp 列表是默认口径的超集（实测含常规任务），按 task_code 去重；
+	// 失败不影响默认任务。
+	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
+		seen := map[string]bool{}
+		for _, t := range tasks {
+			seen[t.TaskCode] = true
+		}
+		for _, t := range mpTasks {
+			if !seen[t.TaskCode] {
+				tasks = append(tasks, t)
 				seen[t.TaskCode] = true
-			}
-			for _, t := range mpTasks {
-				if !seen[t.TaskCode] {
-					tasks = append(tasks, t)
-					seen[t.TaskCode] = true
-				}
 			}
 		}
 	}
@@ -87,10 +81,6 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 		// 静态 API Key 账号没有个人账号身份，成长任务端点在上游对它没有意义；
 		// 明确 422 而不是静默空跑，否则面板显示「0 个任务」会被误读成「都做完了」。
 		writeErr(w, http.StatusUnprocessableEntity, noPersonalTaskMessage)
-		return
-	}
-	if a.IsGlobal() {
-		writeErr(w, http.StatusNotImplemented, globalTaskWriteMessage)
 		return
 	}
 	var body struct {
@@ -124,10 +114,6 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 		// 静态 API Key 账号没有个人账号身份，成长任务端点在上游对它没有意义；
 		// 明确 422 而不是静默空跑，否则面板显示「0 个任务」会被误读成「都做完了」。
 		writeErr(w, http.StatusUnprocessableEntity, noPersonalTaskMessage)
-		return
-	}
-	if a.IsGlobal() {
-		writeErr(w, http.StatusNotImplemented, globalTaskWriteMessage)
 		return
 	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
@@ -201,10 +187,6 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 		// 静态 API Key 账号没有个人账号身份，成长任务端点在上游对它没有意义；
 		// 明确 422 而不是静默空跑，否则面板显示「0 个任务」会被误读成「都做完了」。
 		writeErr(w, http.StatusUnprocessableEntity, noPersonalTaskMessage)
-		return
-	}
-	if a.IsGlobal() {
-		writeErr(w, http.StatusNotImplemented, globalTaskWriteMessage)
 		return
 	}
 	var body struct {

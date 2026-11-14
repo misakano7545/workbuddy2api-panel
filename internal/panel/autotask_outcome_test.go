@@ -236,22 +236,23 @@ func TestAutoTaskGlobalWriteEntryPointsDoNotCallUpstream(t *testing.T) {
 	client.ChatBaseCN, client.WebBaseCN, client.BillingBaseCN = server.URL, server.URL, server.URL
 	p := New(Config{Pool: accounts, Upstream: client})
 
+	// 国际版任务现已放开：auto 入口不再 501，而是放行并向对应上游发起请求。
 	for _, handler := range []http.HandlerFunc{p.accountTaskAuto, p.accountTaskAutoAll} {
 		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"task_code":"chat_5"}`))
 		r.SetPathValue("uid", a.UID)
 		w := httptest.NewRecorder()
 		handler(w, r)
-		if w.Code != http.StatusNotImplemented || !strings.Contains(w.Body.String(), globalTaskWriteMessage) {
-			t.Fatalf("response = %d %s, want 501 with global task explanation", w.Code, w.Body.String())
+		if w.Code == http.StatusNotImplemented {
+			t.Fatalf("response = %d %s, want non-501 (global auto tasks enabled)", w.Code, w.Body.String())
 		}
 	}
 	results := p.runAutoAll(a)
-	if len(results) != 1 || results[0]["status"] != "error" {
-		t.Fatalf("runAutoAll(global) = %#v, want one guarded error", results)
+	if len(results) == 0 {
+		t.Fatalf("runAutoAll(global) = %#v, want non-empty results (global tasks enabled)", results)
 	}
 	_, _, requests := state.counters()
-	if requests != 0 {
-		t.Fatalf("upstream requests = %d, want 0", requests)
+	if requests == 0 {
+		t.Fatalf("upstream requests = %d, want >0 (global auto tasks enabled)", requests)
 	}
 }
 

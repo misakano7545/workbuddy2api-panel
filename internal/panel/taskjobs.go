@@ -203,9 +203,6 @@ func (p *Panel) StartAccountTaskJob(uid, trigger string) (TaskJob, bool, error) 
 	if a == nil {
 		return TaskJob{}, false, errTaskJobAccount
 	}
-	if a.IsGlobal() {
-		return TaskJob{}, false, errTaskJobGlobal
-	}
 	// 企业版 / 静态 API Key 无个人成长体系：成长任务端点上游 403，行为事件也不
 	// 计分。自动触发（新账号 / 每日）与手动 auto_all 都不该排作业，直接 422 说明
 	// 原因；单任务入口同样在 accountTaskAuto 里做了同一道门控。
@@ -296,7 +293,7 @@ func (p *Panel) StartNewAccountTasks(uid string) {
 		return
 	}
 	a := p.cfg.Pool.AuthByUID(uid)
-	if a == nil || a.IsGlobal() || !a.SupportsPersonalGrowth() {
+	if a == nil || !a.SupportsPersonalGrowth() {
 		return
 	}
 	if _, started, err := p.StartAccountTaskJob(uid, "new_account"); err != nil {
@@ -336,7 +333,7 @@ func (p *Panel) ResumeTaskJobs() {
 			continue
 		}
 		a := p.cfg.Pool.AuthByUID(uid)
-		if a == nil || a.IsGlobal() || !a.SupportsPersonalGrowth() || accountTaskUIDDisabled(p.cfg.Pool, uid) {
+		if a == nil || !a.SupportsPersonalGrowth() || accountTaskUIDDisabled(p.cfg.Pool, uid) {
 			continue
 		}
 		if !p.tryLockAccount(uid) {
@@ -466,8 +463,8 @@ func (m *taskJobManager) run(uid, jobID string, a *auth.Auth) {
 	}
 	// 等待执行期间可能重新登录过，开始时采用池中的最新凭证。
 	a = m.panel.cfg.Pool.AuthByUID(uid)
-	if a == nil || a.IsGlobal() {
-		m.finish(uid, jobID, "error", "账号不存在或不支持国区自动任务")
+	if a == nil {
+		m.finish(uid, jobID, "error", "账号不存在或不支持自动任务")
 		return
 	}
 	m.mu.Lock()

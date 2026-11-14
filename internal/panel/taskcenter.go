@@ -42,11 +42,7 @@ type scanAccountItem struct {
 // global 账号仅只读：不发起任何 CN 成长接口调用，直接标记跳过。
 func (p *Panel) scanAccountGrowth(a *auth.Auth) scanAccountItem {
 	it := scanAccountItem{UID: a.UID, Nickname: a.Nickname, Realm: a.Realm()}
-	if a.IsGlobal() {
-		it.Skipped = true
-		it.SkipReason = "国际区任务仅支持查询，不执行国内区成长任务"
-		return it
-	}
+	// 国际版任务同样纳入扫描（接受/领奖/自动化已放开）。
 	// 无个人账号体系的账号不发任何上游调用：企业版任务端点上游 403（「growth system
 	// is only available for personal users」）；静态 API Key 账号没有个人身份，
 	// 列表与领取同样无意义。
