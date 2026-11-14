@@ -159,6 +159,12 @@ type Panel struct {
 	// notifier 排程轮次结束后的汇总通知出口（main 装配期注入 alerting webhook；
 	// nil = 只落面板日志）。装配期设定、运行期只读，不需要锁。
 	notifier func(string)
+
+	// campaignMu 活动查询与领奖同一时刻只跑一轮（campaign.go）。
+	campaignMu sync.Mutex
+	// campaignCacheMu/campaignCache 活动进度查询的短时缓存（campaign.go）。
+	campaignCacheMu sync.Mutex
+	campaignCache   campaignCacheEntry
 }
 
 // SetGrowthConcurrency 设置排程轮次的账号间并发（1-4；<=0 视为默认 1）。面板保存配置时热改。
