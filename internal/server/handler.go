@@ -1715,8 +1715,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					// 排队本身是时间问题，不是账号问题：上游明说「N 秒后再来」。此前直接把
 					// 排队甩给客户端，等于让用户立刻看到失败——ZCode 这类客户端只按 HTTP
 					// 状态码/业务码判 retryable，不认识网关自造的 upstream_busy，整轮对话
-					// 当场死掉。这里按上游口径先等一轮再试一次：等待期间 head keepalive
-					// 照旧补 SSE 注释帧，客户端不会当成僵死连接；只等一次、不换号、不罚号。
+					// 当场死掉。这里按上游口径先等一轮再试一次：只等一次、不换号、不罚号。
+					// 等待期间不补注释帧：重试的状态还不知道，提前提交 200 会让再次排队时的
+					// 429 + Retry-After 变成「200 + error 帧」（首帧心跳只在上游回 200 之后起，
+					// 见 upstream/headkeepalive.go）。代价是这段等待对客户端是静默的。
 					// 等到还是排队就走末端 429 + Retry-After，交给客户端自己的退避策略。
 					if h.cfg.BusyRetry && !queueWaited && h.cfg.BusyWaitMax > 0 {
 						d := uerr.RetryAfter
@@ -1725,7 +1727,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						}
 						log.Printf("queue-wait: model=%s realm=%q upstream 6020 queued (retry_after=%s), waiting %s then retry once",
 							bareModel, realm, uerr.RetryAfter.Round(time.Millisecond), d.Round(time.Millisecond))
-						if !sleepWithKeepalive(r.Context(), w, d, h.cfg.HeadKeepalive) {
+						if !sleepCtx(r.Context(), d) {
 							break // 客户端已断连：不必再等
 						}
 						queueWaited = true

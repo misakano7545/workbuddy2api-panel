@@ -1,10 +1,8 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"time"
 )
 
 // sseCommitWriter 记录流式响应是否已经提交（写过字节或 flush 过）。
@@ -40,44 +38,6 @@ func (c *sseCommitWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter
 
 // Committed 报告响应头是否已提交（= 已经写过字节，不能再回非 200 + JSON）。
 func (c *sseCommitWriter) Committed() bool { return c.committed }
-
-// sleepWithKeepalive 在请求内等 d（6020 排队等待，见 handler 的 queue-wait 分支）：w 是开了心跳的
-// 流式响应时，等待期间每 every 补一条注释帧，客户端不会把几十秒的排队当成僵死连接。返回值同
-// sleepCtx（false = 客户端已断开）。
-//
-// 这是「主动选择在请求内等」的那一处，提交 200 是有意的：等完仍排队时由 writeUpstreamBusyError
-// 的已提交分支写可重试的 error 帧。写与改头都在 handler 协程里，与 StreamHint 不会并发。
-func sleepWithKeepalive(ctx context.Context, w http.ResponseWriter, d, every time.Duration) bool {
-	c, ok := w.(*sseCommitWriter)
-	if !ok || every <= 0 {
-		return sleepCtx(ctx, d)
-	}
-	deadline := time.Now().Add(d)
-	for {
-		left := time.Until(deadline)
-		if left <= 0 {
-			return ctx.Err() == nil
-		}
-		if !sleepCtx(ctx, min(left, every)) {
-			return false
-		}
-		if time.Until(deadline) <= 0 {
-			return true
-		}
-		if !c.committed {
-			// 注释帧会提交响应头：先补齐 SSE 头（之后再 Set 都无效）。
-			h := c.Header()
-			h.Set("Content-Type", "text/event-stream")
-			h.Set("Cache-Control", "no-cache")
-			h.Set("Connection", "keep-alive")
-			h.Set("X-Accel-Buffering", "no")
-		}
-		if _, err := c.Write([]byte(": keepalive\n\n")); err != nil {
-			return sleepCtx(ctx, time.Until(deadline))
-		}
-		c.Flush()
-	}
-}
 
 // writeErrorFrame 在响应头已提交（注释帧已写出）时把失败收敛成协议内错误：
 // 一条 error 帧 + 一条 [DONE]，与 StreamHint「已开流只能 200」的兜底同形态。
