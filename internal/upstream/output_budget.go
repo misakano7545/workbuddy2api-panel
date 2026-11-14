@@ -63,6 +63,33 @@ func MinOutputBudget(effort string) int64 {
 	return minBudgetByEffort[strings.ToLower(strings.TrimSpace(effort))]
 }
 
+// outputFloor 某档位在某模型上的输出预算下限（出站抬额度与续写/救援段共用这一处口径）：
+//   - 档位未知 → 0；
+//   - 模型不在目录里（目录还没拉到、或没给 maxOutputTokens）→ 0，不抬：不知道模型最多能写
+//     多少，按档位直接抬到 16384 可能超过它的上限、换来一个上游参数错误，宁可保留客户端自己的额度；
+//   - 目录值更小时以目录为准——不把额度抬到模型物理上写不了的值。
+func outputFloor(effort, model string, maxOut map[string]int64) int64 {
+	floor := MinOutputBudget(effort)
+	c, ok := maxOut[model]
+	if floor <= 0 || !ok || c <= 0 {
+		return 0
+	}
+	return min(floor, c)
+}
+
+// OutputBudgetFloor 本轮生效档位在该域该模型上的输出预算下限（已按目录 maxOutputTokens 封顶，
+// 口径见 outputFloor）。续写/救援段用它补 max_tokens，必须与出站时 ensureMinOutputBudget 抬到的
+// 值一致：只按档位取 MinOutputBudget 的话，目录上限更小的模型续写段会被抬到它写不了的额度。
+func (c *Client) OutputBudgetFloor(realm, model, effort string) int64 {
+	if MinOutputBudget(effort) <= 0 {
+		return 0
+	}
+	_, bare := SplitRealmPrefix(model)
+	c.effortsMu.RLock()
+	defer c.effortsMu.RUnlock()
+	return outputFloor(effort, bare, c.modelMaxOut[realmKey(realm)])
+}
+
 // EnsureMinBudget 把 obj 的 max_tokens 抬到不低于 floor（floor<=0 或当前额度是探活级
 // 时不动）。返回是否改动。
 func EnsureMinBudget(obj map[string]any, floor int64) bool {
@@ -79,10 +106,11 @@ func EnsureMinBudget(obj map[string]any, floor int64) bool {
 
 // ensureMinOutputBudget 在「客户端显式给了 max_tokens」且「低于该档下限」时抬到下限。
 //
-// 不动的四种情形（都不猜）：
+// 不动的情形（都不猜）：
 //   - 没有显式额度：injectCatalogMaxTokens 已按目录补了真实上限，无需再动；
 //   - 额度是探活级（< 16）；
 //   - 档位为空或关闭思考（thinking.type=disabled / effort=off）：没有思考要花钱；
+//   - 模型不在目录里（见 outputFloor）；
 //   - 已经不低于下限。
 //
 // 目录 maxOutputTokens 已知且更小时以目录为准——不把额度抬到模型物理上写不了的值。
@@ -91,19 +119,12 @@ func ensureMinOutputBudget(obj map[string]any, effort string, maxOut map[string]
 	if !ok || v <= 0 || v < minOutputBudgetProbe {
 		return
 	}
-	floor, has := minBudgetByEffort[strings.ToLower(strings.TrimSpace(effort))]
-	if !has {
-		return
-	}
 	if thinkingDisabled(obj) {
 		return
 	}
-	if model, _ := obj["model"].(string); len(maxOut) > 0 {
-		if cap, ok := maxOut[model]; ok && cap > 0 && floor > cap {
-			floor = cap
-		}
-	}
-	if v >= floor {
+	model, _ := obj["model"].(string)
+	floor := outputFloor(effort, model, maxOut)
+	if floor <= 0 || v >= floor {
 		return
 	}
 	obj["max_tokens"] = floor
