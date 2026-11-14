@@ -164,6 +164,11 @@ type continueReader struct {
 	switchable        int8
 	clientThinkingOff bool
 
+	// billed 各段 usage 的纯求和（记账口径）。续写、盲重试、各类救援每段都是一次单独计费的
+	// 上游调用，prompt 也是每段各算一次；客户端看到的 usage（见 mergeUsage）为了不虚报上下文
+	// 占用只取末段 prompt，记到账号 / 用量 / 预算上的必须是这一份。
+	billed map[string]any
+
 	done bool
 }
 
@@ -300,6 +305,7 @@ func (r *continueReader) frame(payload string) {
 	if u, ok := obj["usage"].(map[string]any); ok {
 		r.mergeUsage(u)
 		r.noteSegmentUsage(u)
+		r.billed = sumUsage(r.billed, u)
 		hasUsage = true
 	}
 	deltaNonEmpty := false
@@ -456,6 +462,18 @@ func (r *continueReader) parseThinking() {
 	}
 	t, _ := obj.Thinking["type"].(string)
 	r.clientThinkingOff = strings.EqualFold(strings.TrimSpace(t), "disabled")
+}
+
+// billedUsage 本请求各段 usage 的纯求和（记账口径，见 billed 字段）；没有任何 usage 时为 nil。
+func (r *continueReader) billedUsage() map[string]any { return r.billed }
+
+// sumUsage 把 u 的数字叶子逐项加进 acc 并返回（acc 为 nil 时新建，不改 u）。
+func sumUsage(acc, u map[string]any) map[string]any {
+	if acc == nil {
+		acc = map[string]any{}
+	}
+	sumInto(acc, u)
+	return acc
 }
 
 func (r *continueReader) emit(payload string) {
