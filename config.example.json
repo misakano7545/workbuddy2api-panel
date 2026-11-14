@@ -100,7 +100,11 @@
     "embeddings_enabled": false,
     "busy_retry": true,
     "busy_wait_seconds": 60,
-    "watermark_strip_enabled": false
+    "watermark_strip_enabled": false,
+    "_comment": "three_d_enabled: 混元 3D 总开关（默认 false）。打开后 /v1/3d/* 与 MCP 工具 generate_3d / get_3d_task 才可用。three_d_auto_token: 自动签发（默认 true）——用账号自己的 access token 调官方 /v2/api-keys 换 ck_t_ 临时云凭证，按账号缓存，上游拒绝时自动重签；显式 false 退回手工凭证表。three_d_temp_tokens: 手工覆盖表（键=账号 UID，\"*\" 兜底），填了的账号不再签发；静态 API Key 账号（ck_/pt_ 前缀）签不了。凭证只进内存，不会写日志或回显到面板。",
+    "three_d_enabled": false,
+    "three_d_temp_tokens": {},
+    "three_d_auto_token": true
   },
   "models": {
     "_comment": "hidden: 不对外暴露的模型黑名单。裸名=两域都藏；\"cn:xxx\"/\"global:xxx\"=只藏该域。/v1/models 列表过滤 + chat 点名拒绝，面板保存后热生效。allowed: 模型白名单（issue #68），条目语法同 hidden；空数组 = 不启用（默认放行全部）；非空时仅白名单内模型可列出与调用，与 hidden 共存取交集。",

@@ -75,7 +75,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；**运行日志按天落盘**（重启回填、按今日/3 天/7 天导出 ZIP）；**上游劣化滑窗告警**（5 分钟窗内 TTFB≥8s 占比≥30% 或 5xx≥10% 时打一条聚合 WARN——「全 200 但每个请求 20 秒」这种无告警停摆从此可见）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
-| 🎬 **媒体生成 + MCP** | 生图 / 改图 / 出视频（异步任务，可阻塞等结果）与 `POST /mcp`（MCP 工具：生成图片、改图、生成视频、查任务、列媒体模型）；记账、换号、错误策略与对话走同一条路径。另有**可选**的「裁掉右下角水印」后处理（默认关闭） |
+| 🎬 **媒体生成 + MCP** | 生图 / 改图 / 出视频（异步任务，可阻塞等结果）与 `POST /mcp`（MCP 工具：生成图片、改图、生成视频、查任务、列媒体模型）；记账、换号、错误策略与对话走同一条路径。另有**可选**的「裁掉右下角水印」后处理（默认关闭）。3D 生成（`/v1/3d/*` + `generate_3d` / `get_3d_task`）代码已就绪但**默认关闭**，打开后临时云凭证由网关用已登录账号自动签发（默认，无须手工收集；也可手工覆盖，见下） |
 | 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题），账号运维 / 模型档位查询 / 在线改配置（热生效）/ 运行日志 / 积分任务，见 [Web 管理面板](#-web-管理面板) |
 
 ## 🎬 媒体生成：生图 / 改图 / 出视频 / MCP
@@ -93,6 +93,9 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | GET | `/v1/videos/{task_id}` | 查任务（`queued` / `in_progress` / `completed` / `failed`） |
 | GET | `/v1/videos/{task_id}/content` | 取成品字节（流式转发签名直链，不落盘；任务没出片回 409） |
 | POST | `/v1/videos/tasks` | 查任务，body `{"task_id":"..."}`（给不方便用路径参数的客户端） |
+| POST | `/v1/3d/generations` | 文生 / 图生 3D；默认异步返回 `job_id`（需 `features.three_d_enabled`） |
+| POST | `/v1/3d/tasks` | 查 3D 任务，body `{"job_id":"..."}` |
+| GET | `/v1/3d/{job_id}` | 查 3D 任务 |
 | POST | `/v1/images/strip-watermark` | 裁掉底部纯白留白（顺带去水印），默认关闭；见「去水印」 |
 | POST | `/mcp` | MCP（JSON-RPC 2.0，Streamable HTTP 形态），见下 |
 
@@ -160,6 +163,60 @@ curl -s http://127.0.0.1:7863/v1/videos/1312831544-WandVideo-… \
 - **任务是账号级可见**：上游任务只对提交它的账号可见，账号结构里没有数字租户 id 可以反推，所以网关自己维护「task → 账号」台账；**台账在进程内存里**，重启后查询会退化成逐个账号试、命中即收养（此时若上游不再回 `usage`，这次查询就不带积分明细，但也不会重复扣费）。
 - **kling 慢一个量级**：MCP 默认 `wait=true`，客户端超时要给到 15 分钟以上；只想拿任务号就传 `wait=false`。
 
+### 生 3D（异步任务，默认关闭）
+
+> **状态说明（请先读）**：这条链路要的是官方签发的 `ck_t_` 形式**临时云凭证**，不是账号的 OAuth
+> access token。签发协议已从官方桌面客户端（5.9.3）静态提取并于 **2026-11-14 真机验证通过**：
+> 网关默认用已登录账号自己的 access token 调官方 `/v2/api-keys` 自动签发（与官方客户端
+> `connect_cloud_service` 同款行为），提交 → 轮询 → 终态 → 计费 → 产物下载全链路实测可用，
+> 约 30 积分/次（3.1 文生 + PBR），产物为 COS 签名直链。
+
+开启（`config.json`）——默认零配置，打开开关即可：
+
+```json
+{
+  "features": {
+    "three_d_enabled": true
+  }
+}
+```
+
+凭证怎么来（`features.three_d_auto_token`，默认 true）：
+
+- **自动签发**：网关拿提交账号的 access token 调 `POST /v2/api-keys`
+  （body `{name:"workbuddy-connect-cloud-service", expire_in_seconds:900, temporary:true}`）换
+  `ck_t_`，按账号缓存到过期前，上游 401/403 拒绝时自动重签；并发同账号只签一次。请求的 900s
+  TTL 上游并不严格执行（实测签发 27 分钟后仍有效）。静态 API Key 账号（`ck_`/`pt_` 前缀）没有
+  OAuth 身份，签不出来，该账号的 3D 请求回 503。
+- **手工覆盖**：`three_d_temp_tokens` 仍然可用，键是账号 UID、`"*"` 兜底；填了的账号直接用手工
+  凭证、不再签发。显式 `"three_d_auto_token": false` 可整体退回「只用手工凭证表」。
+- 凭证只进内存，不写日志、不回显到面板、不进错误信息。
+
+`three_d_temp_tokens` 的键是账号 UID，特殊键 `"*"` 作为兜底（不区分账号的凭证）。凭证只进内存，
+不写日志、不回显到面板、不进错误信息；官方 TTL 未证实，过期后上游会拒绝，换一份即可。
+
+```bash
+curl -s http://127.0.0.1:7863/v1/3d/generations \
+  -H "Authorization: Bearer $WB2API_KEY" -H 'Content-Type: application/json' \
+  -d '{"prompt":"Q版古代灯笼，PBR材质","model":"3.1","enable_pbr":true}'
+# → {"job_id":"…","status":"SUBMITTED"}
+
+curl -s http://127.0.0.1:7863/v1/3d/tasks \
+  -H "Authorization: Bearer $WB2API_KEY" -H 'Content-Type: application/json' \
+  -d '{"job_id":"…"}'
+```
+
+MCP 对应 `generate_3d` / `get_3d_task`（开关关闭时这两个工具不出现在 `tools/list` 里）。文本、`image_url`、`image_base64` 或 `multi_view_images` 至少给一种；支持 `model=3.0|3.1`、`enable_pbr`、`face_count`（10000～1500000）、`generate_type`、`polygon_type`、`result_format`。`LowPoly` 需要 3.0；`Sketch` 需要 prompt 加图片，不支持 3.1；`polygon_type` 仅用于 LowPoly。多视角需同时给单图 `image_url`/`image_base64`，不能与 prompt 同时提供；视角枚举为 `back`、`left`、`right`、`top`、`bottom`、`left_front`、`right_front`。默认 `wait=false`；`wait=true` 时每个进程最长等待 600 秒，`timeout_seconds` 只能把这段时间**缩短**、不能延长。
+
+几个边界要清楚：
+
+- **凭证缺失 / 开关关闭**：分别是 `503 three_d_credential_missing` 与 `403 three_d_disabled`，都不打上游。
+- **上游鉴权**：TC3-HMAC-SHA256，`Credential=hy-3d.<临时凭证>`，service `ai3d`、version `2025-05-13`、region `ap-guangzhou`；签名算法与凭证签发均已真机验证。
+- **查询回到提交账号**：任务台账在进程内存；**重启后**查询退化为有界探测（与视频同一套：负缓存 / 每分钟额度 / 换号），命中即收养。探测撞限流只暂停探测，不罚账号。
+- **记账**：查到终态且有 `ResultCreditConsumed` 时按积分记一次，重复查询、并发查询都只记一次；用量快照存在台账里，后续查询仍能看到 `usage.credit`。
+- **重启收养终态任务不补记账**：避免给重启前可能已经记过的任务重复计费；若从未观察过终态，重启后才查到 DONE 的任务可能漏记。
+- **单租户前提**：网关只有一个共享 API key，台账只记「提交账号」不记「调用方」——持有 key 即可查任意 `job_id`。这与视频功能是同一信任模型，多租户场景请勿直接暴露。
+
 ### MCP 端点（`POST /mcp`）
 
 MCP 端点走 **Streamable HTTP** 的纯 POST 形态（不提供 SSE 流、不维护 session）：客户端发一条 JSON-RPC 就回一条 JSON-RPC。鉴权与 REST 相同（`Authorization: Bearer <api_key>`）；`GET /mcp` 回 405 + `Allow: POST`（客户端据此退回纯 POST）。
@@ -170,7 +227,7 @@ curl -s http://127.0.0.1:7863/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"0"}}}'
 ```
 
-工具（5 个）：
+工具（7 个；`generate_3d` / `get_3d_task` 仅在 `features.three_d_enabled` 打开时出现，`strip_watermark` 仅在 `features.watermark_strip_enabled` 打开时出现）：
 
 | 工具 | 说明 |
 |---|---|
@@ -179,6 +236,8 @@ curl -s http://127.0.0.1:7863/mcp \
 | `edit_image` | 改图，参数 `prompt`（必填）、`image`（URL 或 `data:` URL，必填）、`model` |
 | `generate_video` | 出视频，参数 `prompt`（必填）、`model`、`seconds`、`resolution`、`aspect_ratio`、`negative_prompt`、`enable_audio`、`image`、`last_image`、`wait`（缺省 `true`） |
 | `get_video_task` | 查任务 / 收片，参数 `task_id` |
+| `generate_3d` | 文生 / 图生 3D，默认返回 `job_id`；支持模型版本、PBR、面数和多视角输入 |
+| `get_3d_task` | 查 3D 任务，参数 `job_id`；返回 GLB/OBJ 产物与实际积分用量 |
 
 客户端配置（Claude Code / DSH / 任何支持 HTTP MCP 的宿主）：
 
@@ -459,8 +518,9 @@ DMG 未公证，首次打开需要右键 →「打开」。
 | **账号备份 / 迁移（未实现，待做设计）** | 面板「添加账号 → 备份 / 迁移」：导出为自包含快照（凭据原文 + 备注 + realm + 企业 id + device token），支持**逐个勾选**子集；可选口令加密，**加密在浏览器侧完成**（PBKDF2-SHA256 200k + AES-GCM），口令与明文都不经过网关落盘与日志。导入两种模式取**白名单**（未知值一律 400，不静默回落）：`merge` **只增加**——池中已有的 uid 一个字节都不写（从别人的老备份导入不会用陈旧 token 打断本机活跃号）；`replace` 覆盖/新增，但**快照外的账号一律保留**（刻意不提供「整体替换」，删凭证不可逆）。判重三层：池内 uid → 文件内重复 uid → 规范化（trim + 小写）后重复。备份**不含**本机配置、模型黑名单、保留积分阈值、排程与告警设置，导出文件里用 `note` 写清这条。**当前 main 上没有这个实现**（全树无 PBKDF2 / AES-GCM / `crypto.subtle`，账号导入只有 cockpit 格式一条路），别按这行去面板里找按钮；眼下迁移账号用 `auths/` + `data/` 目录搬迁（见「账号管理」与「凭据管理（auths）」两节） |
 | **生图 / 改图端点** | `POST /v1/images/generations`、`POST /v1/images/edits`：目录里的 image 模型单列进 `/v1/models`（`image_generation=true`），上游 `/v2/images/generations`、`/v2/images/edits` 透传；`image` 支持公网 URL / `data:` URL / multipart；回执原样透传（含 `usage.credit`），不转存字节 |
 | **出视频端点** | `POST /v1/videos/generations`（上游 `/v2/videos/generations` 提交 → `/v2/videos/tasks` 轮询 → 透出签名直链）+ `GET /v1/videos/{task_id}` + `POST /v1/videos/tasks`。缺省 `wait=true` 阻塞到出片（实测 minimax 4s ≈124s、kling 4s ≈473s），`wait=false` 秒回 `task_id`；任务→账号台账进程内保存，带「已记账」标记与用量快照——重复查询既不重复记账、也不丢 `usage`（上游只回一次） |
+| **生 3D 端点（默认关闭）** | `POST /v1/3d/generations`、`POST /v1/3d/tasks`、`GET /v1/3d/{job_id}`（上游 `agenttool/v1/tcproxy`，TC3 签名）。凭证默认**自动签发**（`features.three_d_auto_token`，默认 true：账号 access token → 官方 `/v2/api-keys` 换 `ck_t_`，按账号缓存、拒绝自动重签；协议自官方客户端 5.9.3 提取并于 2026-11-14 真机验证），`features.three_d_temp_tokens` 作手工覆盖，开关默认关闭（`features.three_d_enabled`）；缺凭证回 503、关着回 403，都不打上游。任务→账号台账与视频同构（`wait` 最长 600s、有界探测自愈、记账只一次、用量快照）。**已做真实上游联通验证**（提交/DONE/计费/下载全链路） |
 | **水印裁切（可选）** | `POST /v1/images/strip-watermark` + MCP 工具 `strip_watermark`：把成品图底部的整条纯白留白裁掉，右下角「AI生成」水印随之消失（实测水印 111×51px、贴边 10px；白底上像素级不可见）。默认关闭（`features.watermark_strip_enabled`），纯 stdlib 实现（`internal/media`，逐行标准差找内容/留白分界），只做裁剪不做 inpainting，留白不足回 422 并给实测数字；图片地址限上游产物域，避免 SSRF |
-| **MCP 端点** | `POST /mcp`：JSON-RPC 2.0 纯 POST 形态（无 SSE、无 session），`initialize` / `ping` / `tools/list` / `tools/call` 齐全，工具 `list_generation_models`、`generate_image`、`edit_image`、`generate_video`、`get_video_task`。工具调用复用网关自己的 HTTP handler，换号/错误策略/记账/请求日志与 REST 同一路径 |
+| **MCP 端点** | `POST /mcp`：JSON-RPC 2.0 纯 POST 形态（无 SSE、无 session），`initialize` / `ping` / `tools/list` / `tools/call` 齐全，工具 `list_generation_models`、`generate_image`、`edit_image`、`generate_video`、`get_video_task`（另有条件出现的 `generate_3d` / `get_3d_task` / `strip_watermark`，随各自开关）。工具调用复用网关自己的 HTTP handler，换号/错误策略/记账/请求日志与 REST 同一路径 |
 | **6020/6021 排队请求内等待** | 上游 6020 给出 `retry_after` 时，先在原账号按该口径等待一轮再试（上限 `features.busy_wait_seconds`，默认 60 秒，最大 600；负数关闭等待）。等待不算换号、不罚账号，客户端取消立即停。仍排队回 429 + `Retry-After`；首帧保活已提交时以 `rate_limit_error` SSE 帧返回并带 `retry_after`。设 `features.busy_retry=false` 可恢复立即交回客户端的旧行为 |
 | **嵌入端点（实验）** | `POST /v1/embeddings`：OpenAI 兼容嵌入，默认关闭（`features.embeddings_enabled`）。上游 `POST /v2/embeddings` 与对话是两套注册表，实测只有 `bge-m3`（1024 维）；`11351` 映射成 404 `model_not_found`，回程补 `object`/`index`，条数不符 502。关闭时回 403 `embeddings_disabled` |
 | **补签卡每轮上限** | `schedule.makeup_cards_per_round`（默认 `0` = 不限，保持既有行为）。补签会改账号历史，保守部署设 `1` 即每轮只补一张，剩余漏签下一轮继续；面板保存后热生效 |

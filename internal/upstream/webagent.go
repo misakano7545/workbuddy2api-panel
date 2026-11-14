@@ -395,6 +395,7 @@ func (c *Client) RunWebAgentTurn(ctx context.Context, a *auth.Auth, id string, s
 	// 读 SSE：只统计，不解析 update 内容（打卡不关心说了什么）。
 	// 流结束（或 ctx 取消）时 goroutine 自然退出，不阻塞主流程。
 	done := make(chan struct{})
+	var events, chunks int
 	go func() {
 		defer close(done)
 		sc := bufio.NewScanner(stream.Body)
@@ -421,16 +422,21 @@ func (c *Client) RunWebAgentTurn(ctx context.Context, a *auth.Auth, id string, s
 			}
 			switch msg.Method {
 			case "session/update":
-				res.Events++
+				events++
 				if msg.Params.Update.SessionUpdate == "agent_message_chunk" {
-					res.Chunks++
+					chunks++
 				}
 			case "session/endTurn":
-				res.Events++
+				events++
 			}
 		}
 	}()
 
+	finish := func(result WebTurnResult, err error) (WebTurnResult, error) {
+		<-done
+		result.Events, result.Chunks = events, chunks
+		return result, err
+	}
 	rpc := func(rid int, method string, params any) error {
 		return c.acpPost(ctx, a, sess, connID, rid, method, params)
 	}
@@ -441,12 +447,12 @@ func (c *Client) RunWebAgentTurn(ctx context.Context, a *auth.Auth, id string, s
 			"terminal": false,
 		},
 	}); err != nil {
-		return res, fmt.Errorf("acp initialize: %w", err)
+		return finish(res, fmt.Errorf("acp initialize: %w", err))
 	}
 	if err := rpc(2, "session/load", map[string]any{
 		"sessionId": sess.SessionID, "cwd": sess.Cwd, "mcpServers": []any{},
 	}); err != nil {
-		return res, fmt.Errorf("acp session/load: %w", err)
+		return finish(res, fmt.Errorf("acp session/load: %w", err))
 	}
 	// session/set_model 是 ACP 扩展方法，**非致命**：失败时这一轮仍会跑完，只是
 	// 可能落到账号默认档（国际版默认 Auto，按付费模型计费）——所以失败要能看到
@@ -458,7 +464,7 @@ func (c *Client) RunWebAgentTurn(ctx context.Context, a *auth.Auth, id string, s
 		"sessionId": sess.SessionID,
 		"prompt":    []map[string]string{{"type": "text", "text": prompt}},
 	}); err != nil {
-		return res, fmt.Errorf("acp session/prompt: %w", err)
+		return finish(res, fmt.Errorf("acp session/prompt: %w", err))
 	}
 
 	// 轮询到 completed：上游跑完这一轮才会把状态从 working 改掉。
@@ -470,20 +476,20 @@ func (c *Client) RunWebAgentTurn(ctx context.Context, a *auth.Auth, id string, s
 			switch strings.ToLower(st) {
 			case "completed":
 				res.Elapsed = time.Since(started)
-				return res, nil
+				return finish(res, nil)
 			case "failed", "error", "deleted":
 				res.Elapsed = time.Since(started)
-				return res, fmt.Errorf("web conversation status=%s", st)
+				return finish(res, fmt.Errorf("web conversation status=%s", st))
 			}
 		}
 		if time.Now().After(deadline) {
 			res.Elapsed = time.Since(started)
-			return res, fmt.Errorf("web conversation 在 %s 内没有跑完（status=%s）", webTurnTimeout, res.Status)
+			return finish(res, fmt.Errorf("web conversation 在 %s 内没有跑完（status=%s）", webTurnTimeout, res.Status))
 		}
 		select {
 		case <-ctx.Done():
 			res.Elapsed = time.Since(started)
-			return res, ctx.Err()
+			return finish(res, ctx.Err())
 		case <-time.After(webPollInterval):
 		}
 	}

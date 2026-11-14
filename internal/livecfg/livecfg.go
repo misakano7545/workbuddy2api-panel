@@ -25,9 +25,12 @@ type Snapshot struct {
 	// WatermarkStripEnabled 实验特性「水印裁切」总开关（features.watermark_strip_enabled）；
 	// 默认 false，面板保存后热生效。
 	WatermarkStripEnabled bool
-	RecordClientInfo      bool                // 请求日志是否记录调用来源（客户端 IP / UA）
-	RecordContext         bool                // 请求事件是否记录会话上下文（system + messages）
-	HiddenModels          map[string]struct{} // 精确隐藏的模型 id（已归一化为 "cn:x"/"global:x" 全量形式）；nil = 不隐藏
+	// ThreeDEnabled 混元 3D 生成总开关（features.three_d_enabled）；默认 false。
+	// 关着时 /v1/3d/* 回 403、MCP 的 generate_3d / get_3d_task 不出现在工具面里。
+	ThreeDEnabled    bool
+	RecordClientInfo bool                // 请求日志是否记录调用来源（客户端 IP / UA）
+	RecordContext    bool                // 请求事件是否记录会话上下文（system + messages）
+	HiddenModels     map[string]struct{} // 精确隐藏的模型 id（已归一化为 "cn:x"/"global:x" 全量形式）；nil = 不隐藏
 	// AllowedModels 模型白名单（config models.allowed，issue #68）：已归一化为
 	// "cn:x"/"global:x" 全量形式的精确 id 集合；nil = 未启用（默认放行所有模型）。
 	// 与 HiddenModels 完全对称：Hidden 是「可见集合再剔除」，Allowed 是「可能可见」集合。

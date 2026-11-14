@@ -915,7 +915,7 @@ type Client struct {
 	exclusive map[string]map[string]bool
 	// paidByUID 各账号「是不是付费号」（billing summary 的 IsPaidUser）。只在拿到
 	// 该字段时写入（目前只有 global 的 summary 给）；缺条目 = 不知道。
-	paidMu   sync.RWMutex
+	paidMu    sync.RWMutex
 	paidByUID map[string]bool
 
 	// globalModels 缓存 global 模型目录探测结果（1h TTL + 5min 负缓存；
@@ -989,6 +989,11 @@ type Client struct {
 	// modelBusyUnsupported 上游 /v2/chat/busy 在该域不存在（国际版实测 404）。探到一次即置位，
 	// 本进程后续跳过探测（见 modelbusy.go）。atomic：并发调用只读+一次性写。
 	modelBusyUnsupported atomic.Bool
+
+	// ThreeDCredential 混元 3D 的 `ck_t_` 临时云凭证来源（见 three_d_credential.go）。
+	// nil = 拿不到凭证 → 3D 一律回 503，不发请求。启动期挂载；凭证内容不进日志、
+	// 不进错误串、不落盘。
+	ThreeDCredential ThreeDCredential
 }
 
 // CreditObserver 余额查询观察者：每次**真实查到**余额后回调（uid + 余额绝对值）。
