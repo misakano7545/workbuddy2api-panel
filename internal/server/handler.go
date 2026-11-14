@@ -2285,6 +2285,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		status = http.StatusBadRequest
 	}
+	// 模型规则兜底：池里有号、号也健康，但本域所有账号都被人工规则挡住了这个模型。
+	// 规则不会自愈（与模型级冷却不同），落到 no_healthy_account（503）会被客户端当成
+	// 上游抖动反复重试；这里回 400 + 可辨识 code，让调用方知道"换模型才有用"。
+	if code == "no_healthy_account" && h.cfg.Pool != nil {
+		if blocked, eligible := h.cfg.Pool.RulesBlockedForRealm(curModel, realm); eligible > 0 && blocked == eligible {
+			status, code = http.StatusBadRequest, "model_not_allowed"
+			quota, quotaCode = false, 0
+			msg = "this model is not allowed for any account in this group (model rules); try another model"
+			hint = fmt.Sprintf("model_rules: %d/%d account(s) blocked by model rules", blocked, eligible)
+		}
+	}
 	if proxypool.IsError(lastErr) {
 		status, code, msg, hint = http.StatusServiceUnavailable, "proxy_unavailable", lastErr.Error(), ""
 		retryAfterSec, quotaCode, quota = 0, 0, false

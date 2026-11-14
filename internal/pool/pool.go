@@ -15,6 +15,8 @@ import (
 type Pool struct {
 	mu    sync.RWMutex
 	byUID map[string]*entry
+	// rules 模型规则表（id → 规则）。面板「模型规则」页维护，随 state.json 落盘。
+	rules map[string]ModelRule
 	// parked 被账号目录热重载移出池的条目（uid → 原条目，见 ParkMany）。文件回来时原样复活，
 	// 禁用、暂停、分组、冷却都还在；随 state.json 的 parked_accounts 落盘，文件缺席期间重启也不丢。
 	parked  map[string]*entry
