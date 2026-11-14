@@ -1963,6 +1963,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.toks = toks
 			}
 			st.cacheHit, st.cacheMiss, st.hasCache = stats.Cache()
+			if bill.HasCacheTokens {
+				// 与 st.promptTokens（recordAttempt 按记账口径填的各段 prompt 之和）同口径，
+				// 否则缓存告警会拿「各段 prompt 之和」去比「末段 miss」。
+				st.cacheHit, st.cacheMiss, st.hasCache = int(bill.CacheHitTokens), int(bill.CacheMissTokens), true
+			}
 			// WARN 信号（issue #92 同步）：曾命中过的模型本次大前缀整段未命中 →
 			// 记一条可行动告警（上游前缀缓存重算，费用数倍放大）。
 			if st.hasCache {

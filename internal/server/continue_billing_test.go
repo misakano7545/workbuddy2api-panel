@@ -74,6 +74,11 @@ func (r ctxBlockReader) Read([]byte) (int, error) {
 func TestContinuationBillingSumsEverySegment(t *testing.T) {
 	// 续写段写出正文后连接被客户端掐断：上游这段既没有 finish 也没有 usage。
 	seg2Cut := `data: {"id":"cmpl-2","choices":[{"index":0,"delta":{"content":"继续"}}]}` + "\n\n"
+	// 同一段里 usage 出现在多帧（有的上游每帧都带）：段内按客户端可见合计的同一规则合并
+	// （prompt 取最新、输出求和），只有一段时记的与客户端看到的一致，不因记账改造翻倍 prompt。
+	multiUsageSeg := `data: {"id":"m","choices":[{"index":0,"delta":{"content":"一"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}` + "\n\n" +
+		`data: {"id":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}` + "\n\n" +
+		"data: [DONE]\n\n"
 	cases := []struct {
 		name   string
 		body   string
@@ -88,6 +93,12 @@ func TestContinuationBillingSumsEverySegment(t *testing.T) {
 			body:   `{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 			segs:   []string{testSeg1Text, testSeg2Text},
 			prompt: 10 + 20, compl: 5 + 7, total: 15 + 27,
+		},
+		{
+			name:   "单段多帧 usage",
+			body:   `{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+			segs:   []string{multiUsageSeg},
+			prompt: 10, compl: 5, total: 15,
 		},
 		{
 			name:   "非流式空截断救援",
