@@ -134,9 +134,13 @@ func TestRunURLDecoratesAuthURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("解析授权 URL 失败 %q: %v", got, err)
 	}
-	// 授权 URL 不再补 version（授权页 bundle 只读 platform/fromSource）。
-	if v := u.Query().Get("version"); v != "" {
-		t.Errorf("授权 URL 不该带 version：%q", got)
+	// 授权 URL 补 version（真机 GL 链接带 version=5.9.4），但不补 loginSessionId
+	// （官方只对 platform=workbuddy 追加）。
+	if v := u.Query().Get("version"); v != loginsite.ClientVersionWorkBuddyGL {
+		t.Errorf("授权 URL version=%q want %q：%q", v, loginsite.ClientVersionWorkBuddyGL, got)
+	}
+	if s := u.Query().Get("loginSessionId"); s != "" {
+		t.Errorf("国际版授权 URL 不该带 loginSessionId：%q", got)
 	}
 	if s := u.Query().Get("state"); s != "st-1" {
 		t.Errorf("state=%q want st-1", s)
