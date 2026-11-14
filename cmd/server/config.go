@@ -319,6 +319,9 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// ProxyExitLookup 代理健康探测时经该代理查一次出口画像（国家 / 住宅或机房 / ISP，
+		// proxypool/intel.go），缺省 false，热生效。每个节点每 6 小时一次第三方请求（ip-api 免费档仅明文 HTTP）。
+		ProxyExitLookup bool `json:"proxy_exit_lookup"`
 		// SanitizeBrandScope 身份类规则（品牌词）作用域："all" = 所有消息角色（默认，与上游既有行为一致）；
 		// "identity" = 仅 system/developer，其余角色按用户数据原样透传（features.sanitize_brand_scope）。
 		SanitizeBrandScope string `json:"sanitize_brand_scope"`
