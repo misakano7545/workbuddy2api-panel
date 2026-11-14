@@ -1,6 +1,44 @@
 package upstream
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+// summary 报文里没有 IsPaidUser 字段 = 不知道，不能落成「已知免费」：否则 exclusive 模型的
+// 免费号闸门会把付费号 / 未知号当成免费号排掉。显式 false / true 照实记录。
+func TestBillingSummaryPaidUserMissingIsUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name, field string
+		known, paid bool
+	}{
+		{"missing", ``, false, false},
+		{"false", `,"IsPaidUser":false`, true, false},
+		{"true", `,"IsPaidUser":true`, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/get-user-resource-summary") {
+					_, _ = w.Write([]byte(`{"code":0,"msg":"OK","data":{"Packages":[]` + tc.field + `}}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"code":0,"msg":"OK","data":{"Accounts":[],"TotalCount":0}}`))
+			}))
+			defer srv.Close()
+			c := &Client{HTTP: srv.Client(), BillingBaseGlobal: srv.URL, GlobalEnabled: true}
+			if _, _, _, _, _, _, err := c.UserResourceSnapshot(globalAuth(), 168*time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			paid, known := c.PaidUser(globalAuth().UID)
+			if known != tc.known || paid != tc.paid {
+				t.Fatalf("PaidUser = paid:%v known:%v, want paid:%v known:%v", paid, known, tc.paid, tc.known)
+			}
+		})
+	}
+}
 
 // accessMode=exclusive 才是「免费号调不通」的机器可读口径；CN 那条「订阅优先」只有文案，
 // 混成同一判据会把能用的国内模型错标成禁选（issue #235 的教训）。

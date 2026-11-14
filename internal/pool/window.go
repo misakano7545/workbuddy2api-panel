@@ -223,6 +223,32 @@ func (p *Pool) ClearQuotaCooldown(uid, model string, at time.Time) bool {
 	return true
 }
 
+// WindowProbeBlocked 该号此刻不该为 model 发窗口探针的原因；空串 = 可以发。
+//
+// 探针是一次真实的对话请求，会扣积分、在上游留下记录，所以与选号同一套人工与积分闸门：
+// 停用、暂停的号不自动唤醒；余额触及保留积分或积分保底、模型收费时不花这笔钱；
+// 已知免费号不碰订阅专属模型。冷却不在此列：到点时冷却正该过期，探针本身就是在问上游。
+func (p *Pool) WindowProbeBlocked(uid, model string) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	switch {
+	case !ok:
+		return "账号已不在池中"
+	case e.disabled:
+		return "账号已停用"
+	case e.paused:
+		return "账号已暂停"
+	case p.reserveBlocked(e, p.modelFreeOf(e, model)):
+		return "余额触及保留积分"
+	case p.floorBlockedForRealmModel(e, model, e.a.Realm(), time.Now()):
+		return "余额低于积分保底且模型收费"
+	case p.exclusiveBlockedForRealmModel(e, model, e.a.Realm()):
+		return "免费号调不通该模型"
+	}
+	return ""
+}
+
 // pruneWindowsLocked 丢弃过期太久的窗口（惰性清理，防 map 无限增长）。
 // 调用方必须已持有 p.mu 写锁。
 func (p *Pool) pruneWindowsLocked(now time.Time) {

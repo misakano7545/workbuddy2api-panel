@@ -96,6 +96,7 @@
   "features": {
     "sanitize_blacklist_fingerprints": true,
     "sanitize_brand_scope": "all",
+    "proxy_exit_lookup": false,
     "embeddings_enabled": false,
     "busy_retry": true,
     "busy_wait_seconds": 60,

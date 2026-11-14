@@ -235,8 +235,8 @@ func main() {
 	}
 	defer proxies.Close()
 	proxies.SetTLSOver(up.TLSOver) // 经代理的 HTTPS 与直连同一指纹、同一请求头顺序
-	// 出口画像（国家 / 住宅或机房 / ISP）：随健康探测顺手查，查不到就空着，不参与选号。
-	proxies.EnableExitLookup()
+	// 出口画像（国家 / 住宅或机房 / ISP）：缺省关闭，打开后随健康探测经该代理顺手查，不参与选号。
+	proxies.SetExitLookup(cfg.Features.ProxyExitLookup)
 	up.ProxyPool = proxies
 	up.SanitizeFingerprints.Store(cfg.Features.SanitizeBlacklistFingerprints)
 	up.SanitizeBrandScope.Store(cfg.Features.SanitizeBrandScope)
@@ -957,6 +957,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		ModelFallback:          newCfg.Pool.ModelFallback,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	if up.ProxyPool != nil {
+		up.ProxyPool.SetExitLookup(newCfg.Features.ProxyExitLookup)
+	}
 	up.SanitizeBrandScope.Store(newCfg.Features.SanitizeBrandScope)
 	up.KeepRecentRounds.Store(int64(newCfg.Prompt.KeepRecentRounds))
 	// 思考档位策略热生效：改默认档 / 切换客户端优先或作用域后，下一次 chat 即按新策略。

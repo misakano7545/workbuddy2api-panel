@@ -36,6 +36,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -156,8 +157,12 @@ func (c *Client) webJSON(ctx context.Context, a *auth.Auth, method, url string, 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// 网页通道的失败**不进 pool 冷却状态机**：它是每日活跃的旁路调用，与 chat
 		// 通道的账号健康无关（同 /v1/models 拉取失败不 NoteError 的理由）。故这里用
-		// 普通 error 而不是 *Error——后者会被上层当成账号级信号去做冷却/禁号。
-		return fmt.Errorf("web %s %s: HTTP %d: %s", method, url, resp.StatusCode, truncate(string(raw), 160))
+		// webCodeError 而不是 *Error——后者会被上层当成账号级信号去做冷却/禁号。
+		var env struct {
+			Code int `json:"code"`
+		}
+		_ = json.Unmarshal(raw, &env) // 非 2xx 的响应体也常带业务码；解不出就是 0
+		return &webCodeError{Code: env.Code, msg: fmt.Sprintf("web %s %s: HTTP %d: %s", method, url, resp.StatusCode, truncate(string(raw), 160))}
 	}
 	if out == nil {
 		return nil
@@ -171,7 +176,7 @@ func (c *Client) webJSON(ctx context.Context, a *auth.Auth, method, url string, 
 		return fmt.Errorf("web %s %s parse: %w", method, url, err)
 	}
 	if env.Code != 0 {
-		return fmt.Errorf("web %s %s: code=%d msg=%s", method, url, env.Code, env.Msg)
+		return &webCodeError{Code: env.Code, msg: fmt.Sprintf("web %s %s: code=%d msg=%s", method, url, env.Code, env.Msg)}
 	}
 	if len(env.Data) == 0 {
 		return nil
@@ -269,10 +274,21 @@ func (c *Client) DeleteWebConversation(ctx context.Context, a *auth.Auth, id str
 	return c.webConversationAction(ctx, a, id, "delete")
 }
 
+// webCodeError 网页通道的业务失败：信封 code != 0，或非 2xx 响应体里带的业务码（解不出为 0）。
+type webCodeError struct {
+	Code int
+	msg  string
+}
+
+func (e *webCodeError) Error() string { return e.msg }
+
 // IsWebConversationLimit 判定建会话被「活跃会话已达上限」拒绝（code 10105）。
 // 上游对单账号同时存在的活跃会话有硬上限（webActiveConversationLimit 条）。
+// 按业务码判，不在错误文本里找子串：URL、requestId、上游原文里出现 10105 都会误判，
+// 误判的代价是停掉账号上的活跃会话。
 func IsWebConversationLimit(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "10105")
+	var we *webCodeError
+	return errors.As(err, &we) && we.Code == 10105
 }
 
 // WebConversationRow 会话列表里的一条（只取清理要用的字段）。

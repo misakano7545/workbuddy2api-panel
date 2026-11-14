@@ -9,12 +9,16 @@
 // 几十分钟，那段时间的额度等于白扔。我们原来的处理只到「解除冷却」（允许请求进来），
 // 是被动的。
 //
-// 四种结果的处置：
-//   - 探针 2xx         → 窗口已开：清掉该 (账号,模型) 的 6004 冷却，删窗口记录；
-//   - 429 + 更晚的重置 → 上游确实开了新一轮，把 ResetAt 换成新的，计数归零；
-//   - 429 + 同样/更早   → 上游还没放开（服务端时钟/处理延迟），过一会儿重试；
-//   - 其它错误         → 同样按重试处理，连续 windowProbeMaxAttempts 次后放弃
-//     （删记录，下一次真实 429 会重新登记）。
+// 结果处置：
+//   - 首个有效帧是正常内容 → 窗口已开：清掉该 (账号,模型) 的 6004 冷却，删窗口记录；
+//   - 仍限流且给了更晚的重置时刻 → 上游确实开了新一轮，把 ResetAt 换成新的，计数归零；
+//   - 仍限流、时刻没变（服务端时钟/处理延迟）→ 过一会儿重试，连续 windowProbeMaxAttempts
+//     次后放弃（删记录，下一次真实 429 会重新登记）；
+//   - 其它错误（网络、鉴权、5xx、200 流里的非限流错误帧）→ 不重试，删记录：真实流量照常会
+//     开窗，探针是真实计费的对话请求，不值得为它反复打上游。
+//
+// 探针与选号同一套闸门（pool.WindowProbeBlocked）：停用、暂停、触及保留积分或积分保底、
+// 免费号碰订阅专属模型时不发，直接删记录。
 //
 // 刻意**不**做的事：主动扫描还没被限流的「账号 × 模型」配额线（hub 的
 // wb_quota_scan）。那是另一种功能：它要用探针去**发现**哪条线满了，请求量随
@@ -23,12 +27,14 @@
 package scheduler
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
@@ -151,73 +157,70 @@ func (s *Scheduler) runWindowProbes(ctx context.Context, due []pool.ModelWindow)
 }
 
 // probeWindow 处理单个窗口，返回是否真的发出了上游请求。
+// 每条路径都会删记录或把到点时刻推后，循环不会空转。
 func (s *Scheduler) probeWindow(ctx context.Context, w pool.ModelWindow) bool {
-	a := s.cfg.Pool.AuthFor(w.UID)
-	now := time.Now()
-	if a == nil {
-		// 账号已不在池中（被删/被替换）：记录留着只会每轮都被取出来，删掉。
-		s.cfg.Pool.DropModelWindow(w.UID, w.Model)
-		log.Printf("INFO: [window] 账号 %s 已不在池中，丢弃 %s 的窗口记录", shortUID(w.UID), w.Model)
-		return false
-	}
-	st, ok := s.cfg.Pool.Status(w.UID)
-	if ok && st.Disabled {
-		// 停用的号不该被自动唤醒：把 ResetAt 往后推一段，保留记录等它被重新启用。
-		s.cfg.Pool.RecordWindowProbe(w.UID, w.Model, now.Add(windowProbeRetryDelay),
-			w.Attempts+1, "账号已停用，暂不探针", now)
+	p := s.cfg.Pool
+	if why := p.WindowProbeBlocked(w.UID, w.Model); why != "" {
+		// 不发：记录留着只会每轮都被取出来。真实请求照常会开窗，所以直接删。
+		p.DropModelWindow(w.UID, w.Model)
+		log.Printf("INFO: [window] %s 的 %s 不探针（%s），等真实请求开窗", shortUID(w.UID), w.Model, why)
 		return false
 	}
 
-	ok2, resetAt, detail := s.fireWindowProbe(ctx, w)
-	now = time.Now()
-	if ok2 {
+	opened, limited, resetAt, detail := s.fireWindowProbe(ctx, w)
+	if ctx.Err() != nil {
+		// 停机打断的探针不代表任何上游结论：记录原样留给下次启动。
+		return true
+	}
+	now := time.Now()
+	switch {
+	case opened:
 		// 探针通了：这条额度线已经重置。清 6004 冷却 + 删窗口记录。
 		//
 		// 清冷却的对齐点是**这条窗口自己的 ResetAt**，不是现在：探针证明的是「这条
 		// 窗口对应的那轮限额已经过去」，只有 ResetAt 不晚于它的冷却才该被清。探针
 		// 期间若又撞上更新一轮的限额（ResetAt 更晚），那条是上游刚给的墙钟，不能被
 		// 这次成功抹掉。
-		cleared := s.cfg.Pool.ClearQuotaCooldown(w.UID, w.Model, w.ResetAt)
-		s.cfg.Pool.DropModelWindow(w.UID, w.Model)
+		cleared := p.ClearQuotaCooldown(w.UID, w.Model, w.ResetAt)
+		p.DropModelWindow(w.UID, w.Model)
 		log.Printf("INFO: [window] %s 的 %s 已开始新一轮计时（探针成功，清冷却=%v）",
 			shortUID(w.UID), w.Model, cleared)
-		return true
-	}
-	if !resetAt.IsZero() && resetAt.After(now.Add(windowProbeFreshMin)) {
+	case limited && resetAt.After(now.Add(windowProbeFreshMin)):
 		// 上游给了更晚的重置点：这条线确实进入了新的等待期，换成新墙钟、计数归零。
-		s.cfg.Pool.RecordWindowProbe(w.UID, w.Model, resetAt, 0, detail, now)
+		p.RecordWindowProbe(w.UID, w.Model, resetAt, 0, detail, now)
 		log.Printf("INFO: [window] %s 的 %s 仍在限流，下一轮重置 %s",
 			shortUID(w.UID), w.Model, resetAt.Format("2006-01-02 15:04:05"))
-		return true
-	}
-	attempts := w.Attempts + 1
-	if attempts >= windowProbeMaxAttempts {
-		s.cfg.Pool.DropModelWindow(w.UID, w.Model)
+	case limited && w.Attempts+1 < windowProbeMaxAttempts:
+		p.RecordWindowProbe(w.UID, w.Model, now.Add(windowProbeRetryDelay), w.Attempts+1, detail, now)
+		log.Printf("INFO: [window] %s 的 %s 尚未重置（%s），%s 后重试 (%d/%d)",
+			shortUID(w.UID), w.Model, orNone(detail), windowProbeRetryDelay, w.Attempts+1, windowProbeMaxAttempts)
+	case limited:
+		p.DropModelWindow(w.UID, w.Model)
 		log.Printf("WARN: [window] %s 的 %s 连续 %d 次未重置，放弃（下一次真实 429 会重新登记）",
-			shortUID(w.UID), w.Model, attempts)
-		return true
+			shortUID(w.UID), w.Model, windowProbeMaxAttempts)
+	default:
+		p.DropModelWindow(w.UID, w.Model)
+		log.Printf("WARN: [window] %s 的 %s 探针失败（%s），不再重试，等真实请求开窗",
+			shortUID(w.UID), w.Model, orNone(detail))
 	}
-	s.cfg.Pool.RecordWindowProbe(w.UID, w.Model, now.Add(windowProbeRetryDelay),
-		attempts, detail, now)
-	log.Printf("INFO: [window] %s 的 %s 尚未重置（%s），%s 后重试 (%d/%d)",
-		shortUID(w.UID), w.Model, orNone(detail), windowProbeRetryDelay, attempts, windowProbeMaxAttempts)
 	return true
 }
 
 // fireWindowProbe 发一次最小请求。
 //
-// 返回 (ok, resetAt, detail)：
-//   - ok=true       上游 2xx，该模型的额度窗口已重置；
-//   - resetAt 非零  上游又回了 429 并给出重置时刻；
+// 返回 (opened, limited, resetAt, detail)：
+//   - opened=true   首个有效帧是正常内容，该模型的额度窗口已重置；
+//   - limited=true  上游仍按限流拒绝（HTTP 429、报文带重置时刻或模型级限流码，含 200 流里
+//     的错误帧），resetAt 是报文里的重置时刻（可能为零）；
 //   - detail        失败原因（日志与窗口记录用）。
-func (s *Scheduler) fireWindowProbe(ctx context.Context, w pool.ModelWindow) (bool, time.Time, string) {
+func (s *Scheduler) fireWindowProbe(ctx context.Context, w pool.ModelWindow) (opened, limited bool, resetAt time.Time, detail string) {
 	a := s.cfg.Pool.AuthFor(w.UID)
 	if a == nil {
-		return false, time.Time{}, "账号已不在池中"
+		return false, false, time.Time{}, "账号已不在池中"
 	}
 	body, err := windowProbeBody(w.Model)
 	if err != nil {
-		return false, time.Time{}, "构造请求失败: " + err.Error()
+		return false, false, time.Time{}, "构造请求失败: " + err.Error()
 	}
 	pctx, cancel := context.WithTimeout(ctx, windowProbeTimeout)
 	defer cancel()
@@ -225,33 +228,65 @@ func (s *Scheduler) fireWindowProbe(ctx context.Context, w pool.ModelWindow) (bo
 	// web_search 的探测轮）。上游看到的仍是一个正常的 chat 请求。
 	rc, status, respBody, err := s.cfg.Upstream.ChatStreamContext(pctx, a, body, "",
 		upstream.ChatMeta{AgentType: upstream.AgentTypeAuxiliary}, nil)
-	if err != nil {
-		var ue *upstream.Error
-		if errors.As(err, &ue) {
-			// body 的重置文案优先（上游权威），其次看状态码。
-			if resetAt, ok := upstream.ParseRateReset(ue.Msg); ok {
-				return false, resetAt, clip(ue.Msg)
-			}
-			if ue.Status == 429 {
-				return false, time.Time{}, clip(ue.Msg)
-			}
-			return false, time.Time{}, "HTTP " + strconv.Itoa(ue.Status) + ": " + clip(ue.Msg)
-		}
-		return false, time.Time{}, clip(err.Error())
+	// ≥400 时 ChatStreamContext 同时返回 status、原始 respBody 和已分类的 *Error：限流判定按
+	// 状态码与原始报文——*Error.Msg 只留前 200 字节，重置时刻排在后面就会被截掉，
+	// 不能因为 err 非空就当成「其它错误」放弃。
+	var ue *upstream.Error
+	if errors.As(err, &ue) && status == 0 {
+		status = ue.Status
 	}
-	if rc != nil {
-		// 读干净再关：不读完的响应体不归还连接（net/http 语义），而这条连接后面
-		// 还要被真实请求复用。max_tokens=16 时这一步是毫秒级。
-		_, _ = io.Copy(io.Discard, rc)
-		_ = rc.Close()
+	if err != nil && status < 400 {
+		return false, false, time.Time{}, clip(err.Error())
 	}
 	if status >= 400 {
-		if resetAt, ok := upstream.ParseRateReset(string(respBody)); ok {
-			return false, resetAt, clip(string(respBody))
+		if len(respBody) == 0 && ue != nil {
+			respBody = []byte(ue.Msg)
 		}
-		return false, time.Time{}, "HTTP " + strconv.Itoa(status) + ": " + clip(string(respBody))
+		reset, ok := upstream.ParseRateReset(string(respBody))
+		return false, status == 429 || ok, reset, "HTTP " + strconv.Itoa(status) + ": " + clip(string(respBody))
 	}
-	return true, time.Time{}, ""
+	if rc == nil {
+		return true, false, time.Time{}, ""
+	}
+	defer rc.Close()
+	return scanProbeStream(rc)
+}
+
+// scanProbeStream 读到第一个有内容的帧为止：上游常把限流与拦截塞进 HTTP 200 的 SSE 帧里，
+// 只看状态码会把「仍在限流」当成打通，清掉冷却、钉错窗口起点。
+func scanProbeStream(r io.Reader) (opened, limited bool, resetAt time.Time, detail string) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 16<<10), 1<<20)
+	for sc.Scan() {
+		payload, ok := strings.CutPrefix(sc.Text(), "data:")
+		if !ok {
+			continue
+		}
+		payload = strings.TrimSpace(payload)
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var obj map[string]any
+		if json.Unmarshal([]byte(payload), &obj) != nil {
+			continue
+		}
+		_, isErr := obj["error"]
+		_, msg, embedded := upstream.StreamErrorFrame(obj)
+		if isErr || embedded {
+			if msg == "" {
+				msg = payload
+			}
+			reset, ok := upstream.ParseRateReset(payload)
+			return false, ok || upstream.IsModelRateLimit(payload), reset, clip(msg)
+		}
+		if _, has := obj["choices"]; has {
+			return true, false, time.Time{}, ""
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return false, false, time.Time{}, clip(err.Error())
+	}
+	return false, false, time.Time{}, "流结束前没有有效帧"
 }
 
 // shortUID 日志里的账号称呼：前 8 位，不落完整 UID（同 dump.go 口径）。

@@ -101,6 +101,10 @@ type Scheduler struct {
 	// stampMu 串行化补跑标记文件的读写（见 runstamps.go）。
 	stampMu sync.Mutex
 
+	// retryMu/retryPending 正在延后补签的账号（checkin_retry.go）：手动与排程签到各自排补签时去重。
+	retryMu      sync.Mutex
+	retryPending map[string]bool
+
 	// schedMu 保护排程参数（时点/开关）；Reconfigure 可在运行期热改（面板保存配置时调用）。
 	// rearmSchedule/rearmBalance/rearmSweep 是「排程已变，立即重算」通知：Run 与两个
 	// 分钟级循环各自消费，分别用独立 channel（同 channel 被多个 select 消费会丢信号）。

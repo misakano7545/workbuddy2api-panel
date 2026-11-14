@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,9 +59,52 @@ func newCheckinTestScheduler(t *testing.T, f *flakyCheckinUpstream) (*Scheduler,
 // shrinkRetryDelays 把补签节奏压到毫秒级（生产 10m/40m）。
 func shrinkRetryDelays(t *testing.T, ds ...time.Duration) {
 	t.Helper()
-	old := checkinRetryDelays
-	checkinRetryDelays = ds
-	t.Cleanup(func() { checkinRetryDelays = old })
+	old, oldGap := checkinRetryDelays, checkinRetryMinGap
+	checkinRetryDelays, checkinRetryMinGap = ds, 0
+	t.Cleanup(func() { checkinRetryDelays, checkinRetryMinGap = old, oldGap })
+}
+
+// 手动与排程签到各自排了补签：同一个号只补一次；同一轮里的多个号按间隔摊开，不在同一秒打上游。
+func TestCheckinRetryDedupesAndStaggers(t *testing.T) {
+	shrinkRetryDelays(t, 10*time.Millisecond)
+	checkinRetryMinGap = time.Second
+	var mu sync.Mutex
+	var at []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
+			mu.Lock()
+			at = append(at, time.Now())
+			mu.Unlock()
+			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/checkin-activity-status"):
+			w.Write([]byte(`{"code":0,"data":{"active":true,"todayCheckedIn":false}}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+	p := pool.New("")
+	for _, uid := range []string{"u1", "u2"} {
+		p.Add(&auth.Auth{UID: uid, AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	}
+	s := New(Config{Pool: p, Upstream: &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}})
+	ctx := t.Context()
+	s.startCheckinRetry(ctx, []string{"u1", "u2"}) // 排程那一批
+	s.startCheckinRetry(ctx, []string{"u1"})       // 手动那一批：u1 已在补签队列
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) && !(p.CheckinDoneToday("u1") && p.CheckinDoneToday("u2")) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(at) != 2 {
+		t.Fatalf("daily-checkin calls = %d, want 2 (one per account)", len(at))
+	}
+	if d := at[1].Sub(at[0]); d < 900*time.Millisecond {
+		t.Fatalf("two accounts retried %v apart, want >= the 1s min gap", d)
+	}
 }
 
 // 瞬时失败（500 + 10001「请稍后重试」）→ 主批失败后自动补签，补签成功落 checkin_done。
@@ -100,7 +144,7 @@ func TestCheckinRetrySkipsAlreadyDone(t *testing.T) {
 
 	s := New(Config{Pool: p, Upstream: &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}})
 	before := f.checkinNew.Load()
-	s.checkinRetryLoop(context.Background(), []string{"u1"})
+	s.checkinRetryLoop(context.Background(), []string{"u1"}, checkinRetryDelays, checkinRetryMinGap)
 	time.Sleep(120 * time.Millisecond)
 	if got := f.checkinNew.Load() - before; got != 0 {
 		t.Fatalf("已签账号被补签打了 %d 次上游", got)
@@ -120,7 +164,8 @@ func TestCheckinRetryStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := New(Config{Pool: p, Upstream: &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}})
 	done := make(chan struct{})
-	go func() { s.checkinRetryLoop(ctx, []string{"u1"}); close(done) }()
+	delays := checkinRetryDelays
+	go func() { s.checkinRetryLoop(ctx, []string{"u1"}, delays, 0); close(done) }()
 	time.Sleep(20 * time.Millisecond) // 让 goroutine 进到等待里
 	cancel()
 	select {
