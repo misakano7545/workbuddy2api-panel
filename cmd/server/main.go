@@ -14,9 +14,11 @@ import (
 	"net/http"
 	_ "net/http/pprof" // WB2API_PPROF 打开时提供 /debug/pprof（默认无监听）
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -584,6 +586,24 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// iOS 上 daemon 被外部杀死时进程内什么都不会留：没有 panic、没有 "bye"，
+	// server.log 只剩「上一次启动」和「这一次启动」两截。下面三件东西把它钉在时间轴上：
+	//   [launchd] 上次退出原因（launchctl 记着）   [alive] 每 30s 的 uptime/heap
+	//   [signal] 收到终止信号
+	// 判据：有 [signal] 且随后有 bye = 优雅关停；日志突然断在心跳之后、一行 [signal] 都没有
+	// = 被 SIGKILL（内存压力 / 外部 kill），此时 heap 值就是唯一线索。
+	startedAt := time.Now()
+	log.Printf("[boot] pid=%d ppid=%d ppath=%s cwd=%s", os.Getpid(), os.Getppid(), exePath(), cwdOrEmpty())
+	// 同一个 Label 的 job 不可能在 ThrottleInterval 内起两次；日志里出现 1 秒
+	// 间隔的两次启动，说明跑的是两个不同的 launchd job。这两行把身份问出来。
+	log.Printf("[boot] job label=%q xpc=%q", os.Getenv("LAUNCH_JOBKEY_LABEL"), os.Getenv("XPC_SERVICE_NAME"))
+	// 身份 + 内存天花板：过去只能猜「到底以谁的身份跑、上限是多少」，这两行把它钉死。
+	log.Printf("[boot] uid=%d euid=%d jetsam=%s", os.Getuid(), os.Geteuid(), applyProcessLimits())
+	go logBootMemory()
+	go logJetsamEvidence()
+	go startAliveLogger(ctx, startedAt)
+	go watchSignals(startedAt)
+	logJobExitReason()
 	proxyCtx, stopProxies := context.WithCancel(ctx)
 	proxyDone := make(chan struct{})
 	go func() {
@@ -704,7 +724,7 @@ func main() {
 		log.Printf("WARN: %s", warn)
 	}
 	log.Print(listenBanner(cfg.Listen, loadedFrom, cfg.APIKey))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := listenWithRetry(ctx, srv); err != nil && err != http.ErrServerClosed {
 		p.Flush() // 监听失败时信号路径不会跑：这里同样兜底落盘再退
 		log.Fatalf("http: %v", err)
 	}
@@ -712,6 +732,183 @@ func main() {
 		<-shutdownDone
 	}
 	log.Printf("bye")
+}
+
+// listenWithRetry 监听失败时退避重试，而不是让进程退出。
+//
+// 为什么：端口被另一个实例占住（同机再起一份 wb2api、或旧版 App 内嵌服务）时，
+// 原来的 log.Fatalf 会 os.Exit(1)。在 launchd 下 ThrottleInterval=10 会把
+// 「自杀 → 重拉」放大成端口反复易主：客户端在空窗期拿到 ECONNREFUSED，
+// 面板则在两个实例的 api_key 之间来回 401。这里改成常驻重试，端口一空立刻接管。
+//
+// 只有地址被占用（EADDRINUSE）才退避重试，其它错误照旧上抛——配置错、权限错
+// 重试一万次也不会好，必须让上层 log.Fatal 把原因打出来。
+func listenWithRetry(ctx context.Context, srv *http.Server) error {
+	backoff := time.Second
+	for {
+		err := srv.ListenAndServe()
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			return err
+		}
+		log.Printf("端口 %s 被占用，%s 后重试（进程保持存活，不退出）", srv.Addr, backoff)
+		select {
+		case <-ctx.Done():
+			return http.ErrServerClosed
+		case <-time.After(backoff):
+		}
+		if backoff < 15*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+// exePath / cwdOrEmpty 只用于启动那一行日志：被谁拉起、在哪个目录跑。
+// iOS 上 daemon 是 launchd 直接拉的，ppid 恒为 1，路径才是判断「是不是另一份实例」的关键。
+func exePath() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	// iOS 上 os.Executable() 可能拿不到（真机实测返回 error），退回 argv[0]。
+	if len(os.Args) > 0 && strings.HasPrefix(os.Args[0], "/") {
+		return os.Args[0]
+	}
+	return "?"
+}
+
+// jbrootGuess 反推 RootHide 的 jbroot（形如 .../.jbroot-XXXX）。
+// 不能依赖 os.Executable()：真机上它会失败。改用两条独立线索——
+// 当前工作目录（plist 的 WorkingDirectory 就在 <jbroot>/var/mobile/... 下）
+// 与可执行文件路径（能拿到时）。
+func jbrootCandidates() []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, d := range []string{cwdOrEmpty(), filepath.Dir(exePath())} {
+		p := filepath.Clean(d)
+		for i := 0; i < 8; i++ {
+			if strings.HasPrefix(filepath.Base(p), ".jbroot-") {
+				add(p)
+				break
+			}
+			parent := filepath.Dir(p)
+			if parent == p {
+				break
+			}
+			p = parent
+		}
+	}
+	add("/var/jb")
+	return out
+}
+
+func cwdOrEmpty() string {
+	d, err := os.Getwd()
+	if err != nil {
+		return "?"
+	}
+	return d
+}
+
+// startAliveLogger 每 10 秒打一行心跳，把「活着多久、堆多大」留在日志里。
+// 被 SIGKILL 的进程写不出遗言，这一行就是它最后的现场。
+func startAliveLogger(ctx context.Context, startedAt time.Time) {
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			// rss = 生命周期 RSS 峰值（getrusage）。heap/sys 是 Go 自己的账，
+			// rss 才是内核 jetsam 记的那个数 —— 判「是不是撞内存」只看它。
+			fp, wk := memSample()
+			log.Printf("[alive] pid=%d uptime=%s heap=%dMB sys=%dMB rss=%dMB fp=%dMB wk=%d goroutines=%d",
+				os.Getpid(), time.Since(startedAt).Round(time.Second), ms.HeapAlloc>>20, ms.Sys>>20,
+				maxRSSMB(), fp, wk, runtime.NumGoroutine())
+		}
+	}
+}
+
+// watchSignals 记录收到的终止信号。与 signal.NotifyContext 并列注册（signal.Notify
+// 是多播，不影响原有的优雅关停路径）。一条都没有就消失 = SIGKILL。
+func watchSignals(startedAt time.Time) {
+	ch := make(chan os.Signal, 4)
+	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT)
+	for s := range ch {
+		log.Printf("[signal] 收到 %v，uptime=%s", s, time.Since(startedAt).Round(time.Second))
+	}
+}
+
+// logJobExitReason 启动时把 launchd 记着的「上一次退出原因」抄进日志。
+// RootHide 的 bootstrap 路径是随机的，用可执行文件自身位置反推：
+// <jbroot>/usr/local/bin/wb2api → <jbroot>。取不到就安静跳过，绝不阻塞启动。
+func logJobExitReason() {
+	roots := jbrootCandidates()
+	if len(roots) == 0 {
+		log.Printf("[launchd] 无法反推 jbroot，跳过上次退出原因")
+		return
+	}
+	log.Printf("[launchd] jbroot 候选: %s", strings.Join(roots, " , "))
+	label := os.Getenv("LAUNCH_JOBKEY_LABEL")
+	if label == "" {
+		label = "com.gan.wb2api"
+	}
+	var cands []string
+	for _, jb := range roots {
+		for _, sub := range []string{"usr/bin/launchctl", "bin/launchctl", "usr/local/bin/launchctl"} {
+			cands = append(cands, filepath.Join(jb, sub))
+		}
+	}
+	for _, cand := range cands {
+		if _, err := os.Stat(cand); err != nil {
+			continue
+		}
+		log.Printf("[launchd] 使用 %s", cand)
+		// 先列全部 job：两套 job 跑同一个二进制时，这里会直接暴露另一个 label。
+		if out, err := exec.Command(cand, "list").CombinedOutput(); err == nil || len(out) > 0 {
+			n := 0
+			for _, line := range strings.Split(string(out), "\n") {
+				l := strings.TrimSpace(line)
+				if l == "" {
+					continue
+				}
+				if strings.Contains(l, "wb2api") || strings.Contains(l, "workbuddy") || strings.Contains(l, "gan.") {
+					log.Printf("[launchd] list: %s", l)
+					n++
+				}
+			}
+			log.Printf("[launchd] list 共 %d 行，匹配 %d 行", len(strings.Split(strings.TrimSpace(string(out)), "\n")), n)
+		} else {
+			log.Printf("[launchd] launchctl list 不可用: %v", err)
+		}
+		out, err := exec.Command(cand, "print", "system/"+label).CombinedOutput()
+		if err != nil && len(out) == 0 {
+			log.Printf("[launchd] %s print 失败: %v", cand, err)
+			return
+		}
+		// 不再静默过滤：原样倒。40 行时正好截在 trampolined —— 后面才是
+		// last exit reason / jetsam 相关字段，那些才是「上次为什么死」的答案。
+		for i, line := range strings.Split(string(out), "\n") {
+			if i >= 200 {
+				break
+			}
+			if l := strings.TrimSpace(line); l != "" {
+				log.Printf("[launchd] print: %s", l)
+			}
+		}
+		return
+	}
+	log.Printf("[launchd] %d 个候选路径里都没有 launchctl", len(cands))
 }
 
 // warmModelRates 启动预热各域模型积分倍率表（供积分保底的目录兜底判定）。

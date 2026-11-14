@@ -324,6 +324,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
+		// 根路径直达面板：面板 HTML 里的资源是同目录相对路径（theme.js / app.js），
+		// 直接把 HTML 挂在 "/" 会让它们解析成 /theme.js 而 404。所以这里 302 到
+		// /panel/，地址栏输入 http://127.0.0.1:7863 就够了。
+		h.mux.HandleFunc("GET /{$}", panelRootRedirect)
 	}
 	if cfg.AdminEnabled {
 		h.mux.HandleFunc("POST /admin/tasks/{name}/run",
@@ -333,6 +337,15 @@ func NewHandler(cfg Config) *Handler {
 		h.mux.HandleFunc("GET /metrics", h.withAuth(h.promMetrics))
 	}
 	return h
+}
+
+// panelRootRedirect 把根路径跳到面板目录，保留查询串（?minis=1 之类）。
+func panelRootRedirect(w http.ResponseWriter, r *http.Request) {
+	target := "/panel/"
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 // isChatEntry 四条入站协议路径：/v1/responses 与 /v1/messages（含 /messages 别名）
