@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -52,7 +53,7 @@ func TestSplitConcatenatedJSON(t *testing.T) {
 		{name: "空串", in: ``, parts: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := splitConcatenatedJSON(tc.in)
+			got := SplitConcatenatedJSON(tc.in)
 			if len(got) != tc.parts {
 				t.Fatalf("拆出 %d 份 want %d：%q", len(got), tc.parts, got)
 			}
@@ -69,7 +70,7 @@ func TestSplitConcatenatedJSON(t *testing.T) {
 
 // 端到端：上游把两个 chunk 粘在一行时，客户端必须收到两个**独立的** data 帧。
 //
-// 变异判据：去掉 writeFrame 里的 splitConcatenatedJSON 分支，本用例会退化成
+// 变异判据：去掉 writeFrame 里的 SplitConcatenatedJSON 分支，本用例会退化成
 // 一个 data 帧、且帧内是 `{a} {b}`——正是 issue #197 里客户端 JSON.parse 失败
 // 的那个形态。
 func TestStreamSplitsGluedFrames(t *testing.T) {
@@ -134,6 +135,44 @@ func TestStreamKeepsUnparsablePayload(t *testing.T) {
 	_ = StreamHint(rec, strings.NewReader(body), nil)
 	if !strings.Contains(rec.Body.String(), `data: {"broken":`) {
 		t.Fatalf("不可解析的帧必须原样透传：%q", rec.Body.String())
+	}
+}
+
+// 粘在首位的 error 帧（`{error} {chunk}`）必须触发首帧否决：不写任何字节、交上层换号，
+// 而不是整行当非 JSON 提交成 200 + error 帧。变异判据：去掉首帧探测里的拆分，本用例退化为
+// 返回 nil 且客户端收到 200 内容。
+func TestStreamHintGluedFirstErrorFrameVetoes(t *testing.T) {
+	errFrame := `{"error":{"message":"busy","code":"6021"}}`
+	chunk := `{"id":"a","choices":[{"index":0,"delta":{"content":"x"}}]}`
+	for name, body := range map[string]string{
+		"error 在前": "data: " + errFrame + " " + chunk + "\n\ndata: [DONE]\n\n",
+		"流内失败帧在前":  `data: {"code":11140,"msg":"blocked"} ` + chunk + "\n\ndata: [DONE]\n\n",
+	} {
+		rec := httptest.NewRecorder()
+		err := StreamHint(rec, strings.NewReader(body), nil)
+		var hv *HeadVetoError
+		if !errors.As(err, &hv) || rec.Body.Len() != 0 {
+			t.Fatalf("%s: 应首帧否决且零字节: err=%v body=%q", name, err, rec.Body.String())
+		}
+	}
+	// 内容帧在前、error 在后：首帧已是正文，不否决（与分开发送的形态一致）。
+	rec := httptest.NewRecorder()
+	if err := StreamHint(rec, strings.NewReader("data: "+chunk+" "+errFrame+"\n\ndata: [DONE]\n\n"), nil); err != nil {
+		t.Fatalf("正文在前不应否决: %v", err)
+	}
+}
+
+// 非流式聚合：粘帧里的两份内容都要并入，而不是整行被静默丢掉。
+func TestAggregateSplitsGluedFrames(t *testing.T) {
+	a := `{"id":"a","choices":[{"index":0,"delta":{"content":"你"}}]}`
+	b := `{"id":"a","choices":[{"index":0,"delta":{"content":"好"},"finish_reason":"stop"}]}`
+	resp, err := Aggregate(strings.NewReader("data: " + a + " " + b + "\n\ndata: [DONE]\n\n"))
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if msg["content"] != "你好" {
+		t.Fatalf("粘帧内容丢失，content=%q", msg["content"])
 	}
 }
 
