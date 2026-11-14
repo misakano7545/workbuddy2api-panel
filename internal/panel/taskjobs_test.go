@@ -178,27 +178,22 @@ func TestStartAccountTaskJobSharesExistingAccountLock(t *testing.T) {
 	}
 }
 
-func TestStartGlobalTaskJobDoesNotCallUpstream(t *testing.T) {
+func TestStartGlobalTaskJobProceedsWhenEnabled(t *testing.T) {
 	state := &taskJobServerState{firstCall: make(chan struct{}), release: make(chan struct{})}
 	p, _, _ := newTaskJobTestPanel(t, "task-job-global", "global", state)
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/panel/api/accounts/task-job-global/tasks/auto_all", nil)
 	p.ServeHTTP(w, r)
-	if w.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501; body=%s", w.Code, w.Body.String())
+	// 国际版任务现已放开：auto_all 不再 501，而是排队启动后台作业（202 Accepted）。
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", w.Code, w.Body.String())
 	}
-	if got := state.count(); got != 0 {
-		t.Fatalf("global task endpoint made %d upstream requests, want 0", got)
+	if _, _, err := p.StartAccountTaskJob("task-job-global", "daily"); err != nil {
+		t.Fatalf("global start error = %v, want nil (global tasks enabled)", err)
 	}
-	if _, _, err := p.StartAccountTaskJob("task-job-global", "daily"); !errors.Is(err, errTaskJobGlobal) {
-		t.Fatalf("global start error = %v, want errTaskJobGlobal", err)
-	}
-	p.StartNewAccountTasks("task-job-global") // Automatic global accounts are silently ignored.
-	if jobs := p.ListTaskJobs(); len(jobs) != 0 {
-		t.Fatalf("global auto-start created jobs: %+v", jobs)
-	}
-	if got := state.count(); got != 0 {
-		t.Fatalf("global job start made %d upstream requests, want 0", got)
+	p.StartNewAccountTasks("task-job-global") // 个人国际版账号现在会自动排任务。
+	if jobs := p.ListTaskJobs(); len(jobs) == 0 {
+		t.Fatalf("global auto-start created no jobs; want at least one")
 	}
 }
 

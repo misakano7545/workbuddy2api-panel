@@ -199,6 +199,33 @@ var autoActions = []autoAction{
 		Desc:     "体验灵感功能（预留，疑 PC 口径 +500c+5e）：accept → 灵感事件组（PC+mp 双形态）→ 领奖（判据待解锁验证）",
 		run:      runSequentialPlaybook,
 	},
+
+	// ── 国际版（global）任务：复用国内版已验证的事件链路 ──
+	// 国际版任务 code 与国内版不同（first_chat / skill_installed / template_used /
+	// expert_summoned / wechat_linked），底层活动（对话 / 装技能 / 用模板 / 召唤专家）
+	// 与上游 realm 无关。但国内 run* 内部写死了 chat_5 / skill_1 等国内 code 做进度查表，
+	// 国际账号没有这些任务会报「任务不存在」。故新增 runGlobal* 函数：事件链路与国内
+	// 完全一致，仅按国际版 task_code 查目标进度。wechat_linked 暂无脚本化动作，不登记。
+	{
+		TaskCode: "first_chat",
+		Desc:     "国际版：完成至少一次对话（复用国内 chat 活跃上报链路）",
+		run:      runGlobalChat,
+	},
+	{
+		TaskCode: "skill_installed",
+		Desc:     "国际版：安装至少一个技能（复用国内 skill_info 事件链路）",
+		run:      runGlobalSkill,
+	},
+	{
+		TaskCode: "template_used",
+		Desc:     "国际版：使用一次模板（复用国内 template_used 事件链路）",
+		run:      runGlobalTemplate,
+	},
+	{
+		TaskCode: "expert_summoned",
+		Desc:     "国际版：召唤并完成一次专家交互（复用国内 expert 召唤链路）",
+		run:      runGlobalExpert,
+	},
 }
 
 // autoActionFor 查任务对应的动作；无则返回 nil（不可自动化）。
@@ -752,10 +779,6 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	if a.IsGlobal() {
-		writeErr(w, http.StatusNotImplemented, globalTaskWriteMessage)
-		return
-	}
 	// 无个人成长体系的账号直接拒绝：企业版成长端点上游 403（「growth system is only
 	// available for personal users」）；静态 API Key 账号（ck_/pt_）根本没有个人
 	// 账号身份。两者执行任何成长任务都是零收益白跑。
@@ -853,9 +876,6 @@ func (p *Panel) executeAutoTask(a *auth.Auth, act *autoAction) (out autoTaskOutc
 	}()
 	if a == nil {
 		return autoTaskOutcome{Status: "error", Message: "账号凭证不可用"}
-	}
-	if a.IsGlobal() {
-		return autoTaskOutcome{Status: "error", Message: globalTaskWriteMessage}
 	}
 	if !a.SupportsPersonalGrowth() {
 		return autoTaskOutcome{Status: "skipped", Message: noPersonalTaskMessage}
@@ -1420,6 +1440,75 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 }
 
 // ---------------------------------------------------------------------------
+// 国际版（global）任务动作：事件链路与国内版 run* 完全一致（ReportChatActivity /
+// ReportDesktopEvent 按账号 realm 自适应指纹），仅把进度查表的 task_code 换成国际版
+// 的 first_chat / skill_installed / template_used / expert_summoned。国内 run* 内部
+// 写死了 chat_5 / skill_1 等国内 code，国际账号无这些任务会报「任务不存在」，故独立实现。
+// ---------------------------------------------------------------------------
+
+// runGlobalChat 完成国际版 first_chat（完成至少一次对话）。
+func runGlobalChat(p *Panel, a *auth.Auth) (string, error) {
+	t, err := p.taskByCode(a, "first_chat")
+	if err != nil {
+		return "", err
+	}
+	if t == nil {
+		return "", fmt.Errorf("任务不存在")
+	}
+	target := t.Target
+	if target <= 0 {
+		target = 1
+	}
+	need := target - t.Current
+	if need <= 0 {
+		return "进度已达标，无需上报", nil
+	}
+	for i := int64(0); i < need; i++ {
+		cid := session.NewConversationID()
+		if err := p.cfg.Upstream.ReportChatActivity(a, cid, ""); err != nil {
+			return "", fmt.Errorf("上报第 %d/%d 条对话失败: %w", i+1, need, err)
+		}
+		if i < need-1 {
+			time.Sleep(reportGap)
+		}
+	}
+	return fmt.Sprintf("已补报 %d 条对话事件（国际版 first_chat）", need), nil
+}
+
+// runGlobalSkill 完成国际版 skill_installed（安装至少一个技能）。判据与国内 skill_1
+// 同为 skill_info 事件，直接复用 runSkillFresh 的事件链路。
+func runGlobalSkill(p *Panel, a *auth.Auth) (string, error) {
+	if t, err := p.taskByCode(a, "skill_installed"); err != nil {
+		return "", err
+	} else if t == nil {
+		return "", fmt.Errorf("任务不存在")
+	}
+	return runSkillFresh(p, a)
+}
+
+// runGlobalTemplate 完成国际版 template_used（使用一次模板）。判据与国内 template_5
+// 同为 template_used 事件组，直接复用 runTemplateUse 的事件链路。
+func runGlobalTemplate(p *Panel, a *auth.Auth) (string, error) {
+	if t, err := p.taskByCode(a, "template_used"); err != nil {
+		return "", err
+	} else if t == nil {
+		return "", fmt.Errorf("任务不存在")
+	}
+	return runTemplateUse(p, a)
+}
+
+// runGlobalExpert 完成国际版 expert_summoned（召唤并完成一次专家交互）。判据与国内
+// expert_5 同为 召唤链 + actual_use 事件，直接复用 runExpertUse 的事件链路。
+func runGlobalExpert(p *Panel, a *auth.Auth) (string, error) {
+	if t, err := p.taskByCode(a, "expert_summoned"); err != nil {
+		return "", err
+	} else if t == nil {
+		return "", fmt.Errorf("任务不存在")
+	}
+	return runExpertUse(p, a)
+}
+
+// ---------------------------------------------------------------------------
 // 全量自动完成
 // ---------------------------------------------------------------------------
 
@@ -1453,9 +1542,6 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 	}
 	if a == nil {
 		return []map[string]any{{"task_code": "(全部)", "status": "error", "message": "账号凭证不可用"}}
-	}
-	if a.IsGlobal() {
-		return []map[string]any{{"task_code": "(全部)", "status": "error", "message": globalTaskWriteMessage}}
 	}
 	// 兜底门控：企业版 / 静态 API Key 无个人成长体系。正常情况下作业入口已拒绝，
 	// 但直接调用 runAutoAll 的路径也必须不发起任何上游请求。
@@ -1616,10 +1702,6 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
-		return
-	}
-	if a.IsGlobal() {
-		writeErr(w, http.StatusNotImplemented, globalTaskWriteMessage)
 		return
 	}
 	job, started, err := p.StartAccountTaskJob(uid, "manual")
