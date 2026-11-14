@@ -484,8 +484,9 @@ func TestContinueReaderSeamReasoningDropped(t *testing.T) {
 	}
 }
 
-// TestContinueReaderCapAtMaxSegments 连续截断封顶：每段都以 length 结束时，
-// 最多 1 次原生 + (maxContinueSegments-1) 次续写，不无限续。
+// TestContinueReaderCapAtMaxSegments 连续截断封顶：不带限额的请求每段都以 length 结束时，
+// 最多 1 次原生 + (noLimitContinueSegments-1) 次续写，不无限续（带限额的续写例外按
+// maxContinueSegments 封顶，见 TestContinueNoUsageFallsBackToSegmentCeiling）。
 func TestContinueReaderCapAtMaxSegments(t *testing.T) {
 	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg1Text })
 	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
@@ -494,8 +495,11 @@ func TestContinueReaderCapAtMaxSegments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if len(*reqs) != maxContinueSegments-1 {
-		t.Fatalf("续写请求数=%d want %d（封顶）", len(*reqs), maxContinueSegments-1)
+	if len(*reqs) != noLimitContinueSegments-1 {
+		t.Fatalf("续写请求数=%d want %d（封顶）", len(*reqs), noLimitContinueSegments-1)
+	}
+	if n := strings.Count(string(out), `"finish_reason"`); n != 1 {
+		t.Fatalf("封顶后应恰好一个终态（length），实际 %d 个:\n%s", n, out)
 	}
 	if !strings.Contains(string(out), `"finish_reason":"length"`) {
 		t.Fatalf("封顶后 length 终态应在场:\n%s", out)

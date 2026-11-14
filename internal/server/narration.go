@@ -257,7 +257,7 @@ func (r *continueReader) tryNarrationRetry() bool {
 		return false
 	case r.text.Len() == 0:
 		return false
-	case r.seg >= maxContinueSegments-1:
+	case r.atSegmentCap():
 		return false
 	}
 	txt := r.text.String()
