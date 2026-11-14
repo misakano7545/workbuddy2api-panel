@@ -374,7 +374,7 @@ func poolExpiryBuckets(in []upstream.ExpiryBucket) []pool.ExpiryBucket {
 	}
 	out := make([]pool.ExpiryBucket, len(in))
 	for i, b := range in {
-		out[i] = pool.ExpiryBucket{Date: b.Date, ExpireAt: b.ExpireAt, Remain: b.Remain}
+		out[i] = pool.ExpiryBucket{Date: b.Date, ExpireAt: b.ExpireAt, Remain: b.Remain, Estimated: b.Estimated}
 	}
 	return out
 }

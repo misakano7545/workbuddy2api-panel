@@ -1076,7 +1076,7 @@ if ($('accGroupActions')) {
     if (b.dataset.gact !== 'checkin' &&
         !confirm('对分组「' + accGroupFilter + '」的 ' + targets.length + ' 个账号执行「' + act.verb + '」？')) return;
     b.disabled = true;
-    let ok = 0, already = 0;
+    let ok = 0, already = 0, skippedN = 0;
     const bad = [];
     for (const s of targets) {
       const name = s.nickname || String(s.uid).slice(0, 8);
@@ -1084,10 +1084,12 @@ if ($('accGroupActions')) {
         const r = await api('accounts/' + encodeURIComponent(s.uid) + '/' + b.dataset.gact, { method: 'POST' });
         /* 签到端点对失败也回 200（错误在 body 里）：只按 HTTP 成功计数，会把「今天早就
            签过」和上游拒签一起算进「成功 N 个」——hub#875 那类误报的同一个根。
-           按 checkin_state 分开统计，already 单独报，不冒充新签到。 */
+           按 checkin_state 分开统计，already / 不适用（国际区号等）各自单独报，不冒充新签到。 */
         if (b.dataset.gact === 'checkin') {
-          if (r && r.checkin_state === 'already') { already++; continue; }
-          if (r && r.ok === false) { bad.push(name + '：' + (r.checkin_message || '未完成')); continue; }
+          const c = checkinBatchResult(r);
+          if (c.already) { already++; continue; }
+          if (c.skipped) { skippedN++; continue; }
+          if (!c.ok) { bad.push(name + '：' + c.text); continue; }
         }
         ok++;
       } catch (e) { bad.push(name + '：' + e.message); }
@@ -1095,7 +1097,7 @@ if ($('accGroupActions')) {
     b.disabled = false;
     const tail = bad.length ? '，失败 ' + bad.length + ' 个（' + bad[0] + '）' : '';
     toast(b.dataset.gact === 'checkin'
-      ? '组内签到：新签到 ' + ok + ' 个' + (already ? '，今日已签 ' + already + ' 个' : '') + tail
+      ? '组内签到：新签到 ' + ok + ' 个' + (already ? '，今日已签 ' + already + ' 个' : '') + (skippedN ? '，不适用 ' + skippedN + ' 个' : '') + tail
       : '组内' + act.verb + '：成功 ' + ok + ' 个' + tail,
       bad.length ? 'warn' : 'ok');
     loadOverview(true);
@@ -1341,8 +1343,16 @@ function mdAvailabilityOf(m, locks, recent) {
   // B 的「可用」标注也要由这条真实流量合成（2026-10-25 链路补齐）。
   // model_eff 记的是出站线协议原值（通常是裸名），而这里的 id 带域前缀，
   // 两种形态都要认——只比 id 会让 global 域的降级流量完全命中不了。
-  const ev = recent.find(e => e && (e.model === id || e.model === bare ||
-    e.model_eff === id || e.model_eff === bare));
+  // 裸名必须限定在 global 域的事件上：cn 与 global 有同名模型，不限域会把 cn 的流量
+  // 算成 global 模型的可用证据（事件的 realm 由网关按实际选中的账号写入）。
+  // 降级了的事件（model_eff 非空且与 model 不同）实际服务它的是 model_eff：只按 model_eff 认，
+  // 否则「请求 A 降级到 B 成功」会把根本没被服务的 A 标成可用（A 正是被限流才降级的）。
+  const hits = (e, name) => name === id || (e.realm === 'global' && name === bare);
+  const ev = recent.find(e => {
+    if (!e) return false;
+    if (e.model_eff && e.model_eff !== e.model) return hits(e, e.model_eff);
+    return hits(e, e.model);
+  });
   if (ev) {
     const status = Number(ev.status || 0);
     const when = ev.time ? new Date(ev.time).toLocaleString('zh-CN', { hour12: false }) : '';
@@ -2543,6 +2553,13 @@ function checkinResultNote(r) {
   const gain = typeof r.checkin_credit === 'number' ? '，+' + r.checkin_credit + ' 积分' : '';
   if (r.balance_error) return { message: '签到成功' + gain + '；余额刷新失败：' + r.balance_error, severity: 'err' };
   return { message: '签到成功' + gain + balance, severity: 'ok' };
+}
+// 批量签到里一个号的归类：只有本次真签到才算 ok；今天已签过 / 不适用签到（国际区、企业版、API Key）
+// 各自单独计数，处理中（pending）与失败都不算成功。
+function checkinBatchResult(r) {
+  const n = checkinResultNote(r);
+  const state = r.skipped ? 'skipped' : (r.checkin_state || (r.checkin_done ? 'checked' : 'failed'));
+  return { ok: state === 'checked', already: state === 'already', skipped: state === 'skipped', text: n.message };
 }
 
 function taskOutcomeStatus(item) {

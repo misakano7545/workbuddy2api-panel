@@ -21,8 +21,8 @@ func TestAppJSCheckinResultStates(t *testing.T) {
 const src=fs.readFileSync(process.argv[2],'utf8');
 const start=src.indexOf('function checkinResultNote('),end=src.indexOf('function taskOutcomeStatus(');
 assert(start>=0&&end>start,'checkinResultNote 未找到');
-const ctx={};vm.createContext(ctx);vm.runInContext(src.slice(start,end)+'\nthis.note=checkinResultNote;',ctx);
-const note=ctx.note;
+const ctx={};vm.createContext(ctx);vm.runInContext(src.slice(start,end)+'\nthis.note=checkinResultNote;this.batch=checkinBatchResult;',ctx);
+const note=ctx.note,batch=ctx.batch;
 
 const already=note({checkin_state:'already',checkin_done:true,checkin_message:'今天已签到，请明天再来',credits:350});
 assert.equal(already.severity,'');
@@ -49,6 +49,16 @@ assert.equal(pending.severity,'warn');
 assert.equal(note({checkin_done:true,credits:350}).severity,'ok');
 assert.equal(note({checkin_done:false,checkin_error:'活动未开启',credits:350}).severity,'err');
 assert.notEqual(note({skipped:true,skip_reason:'国际区不适用'}).severity,'ok');
+
+// 批量签到归类：只有本次真签到算 ok；already、不适用（国际区号后端回 ok:true+skipped）各自单独计，
+// pending / failed 都不能混进成功。
+const okOf=r=>{const c=batch(r);return [c.ok,c.already,c.skipped].map(Number).join('');};
+assert.equal(okOf({ok:true,checkin_state:'checked',checkin_done:true,checkin_credit:100}),'100');
+assert.equal(okOf({ok:true,checkin_state:'checked',checkin_done:true,balance_error:'timeout'}),'100','签到成功但余额刷新失败仍算签到成功');
+assert.equal(okOf({ok:true,checkin_state:'already',checkin_done:true}),'010');
+assert.equal(okOf({ok:true,skipped:true,skip_reason:'国际区账号不适用国内区签到'}),'001','ok:true 的 skipped 不能算新签到');
+assert.equal(okOf({ok:false,checkin_state:'pending'}),'000');
+assert.equal(okOf({ok:false,checkin_state:'failed',checkin_message:'签到失败'}),'000');
 console.log('checkin result states passed');`
 	path := filepath.Join(t.TempDir(), "checkin-note.cjs")
 	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
