@@ -612,16 +612,25 @@ func LoadDirReport(dir string) (LoadReport, error) {
 				logfmt.Label(a.UID, a.Nickname), prev.file, prev.eid, f, a.EnterpriseID)
 		}
 		seenUID[a.UID] = dupUID{file: f, eid: a.EnterpriseID}
-		if a.RealmStored() == "" {
-			if changed, r := a.BackfillRealm(); changed {
-				if err := a.SaveAtomic(); err != nil {
-					log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.Nickname), err)
-				} else if r == "global" {
-					log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.Nickname), a.Domain)
-				}
+		out = append(out, a)
+	}
+	// 只给每个 uid 胜出的那份（mtime 最新、最后载入）做 realm 迁移落盘：给落败的旧文件写盘会
+	// 刷新它的 mtime，下次启动它就成了「最新」，胜负来回翻。
+	winner := make(map[string]*Auth, len(out))
+	for _, a := range out {
+		winner[a.UID] = a
+	}
+	for _, a := range out {
+		if winner[a.UID] != a || a.RealmStored() != "" {
+			continue
+		}
+		if changed, r := a.BackfillRealm(); changed {
+			if err := a.SaveAtomic(); err != nil {
+				log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.Nickname), err)
+			} else if r == "global" {
+				log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.Nickname), a.Domain)
 			}
 		}
-		out = append(out, a)
 	}
 	report.Auths = out
 	return report, nil

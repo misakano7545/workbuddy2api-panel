@@ -226,8 +226,9 @@ func TestLoadDirBackfillWriteFailureDoesNotBlock(t *testing.T) {
 // 客户端会写 <name>.<ts>.<pid>.<uuid>.info 这类轮转备份，字典序可能让陈旧备份排在后面。
 func TestLoadDirNewestFileWinsForDuplicateUID(t *testing.T) {
 	dir := t.TempDir()
-	write := func(name, at string, mt time.Time) {
-		body := fmt.Sprintf(`{"auth":{"accessToken":%q,"refreshToken":"r","expiresAt":1800000000,"domain":"www.codebuddy.cn"},"account":{"uid":"u7"}}`, at)
+	write := func(name, at, realm string, mt time.Time) {
+		// 不带 realm 键的那份会在载入时触发 realm 迁移落盘，正是会刷新 mtime 的那一步。
+		body := fmt.Sprintf(`{"auth":{"accessToken":%q,"refreshToken":"r","expiresAt":1800000000,"domain":"www.codebuddy.cn","realm":%q},"account":{"uid":"u7"}}`, at, realm)
 		p := filepath.Join(dir, name)
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -237,18 +238,17 @@ func TestLoadDirNewestFileWinsForDuplicateUID(t *testing.T) {
 		}
 	}
 	// 字典序在后、但内容陈旧的那份故意命名 workbuddy-z-，mtime 设为 2020。
-	write("workbuddy-z-stale.json", "at-stale", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
-	write("workbuddy-a-fresh.json", "at-fresh", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-
-	list, err := LoadDir(dir)
-	if err != nil {
-		t.Fatalf("load err=%v", err)
-	}
-	if len(list) != 2 {
-		t.Fatalf("want 2 files loaded, got %d", len(list))
-	}
-	if got := list[len(list)-1].AccessToken; got != "at-fresh" {
-		t.Fatalf("最后一项应是 mtime 最新的凭证（pool 按后载入者胜出），实际 %q", got)
+	write("workbuddy-z-stale.json", "at-stale", "", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	write("workbuddy-a-fresh.json", "at-fresh", "cn", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	// 连续三次启动胜者不变：只给胜者做迁移落盘，落败的旧文件 mtime 不被刷新。
+	for run := 1; run <= 3; run++ {
+		list, err := LoadDir(dir)
+		if err != nil || len(list) != 2 {
+			t.Fatalf("第 %d 次 load err=%v n=%d", run, err, len(list))
+		}
+		if got := list[len(list)-1].AccessToken; got != "at-fresh" {
+			t.Fatalf("第 %d 次：最后一项应是 mtime 最新的凭证（pool 按后载入者胜出），实际 %q", run, got)
+		}
 	}
 }
 
