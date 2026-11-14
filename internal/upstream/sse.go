@@ -679,6 +679,9 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	maxToolIdx := -1
 	toolFinishSent := false
 	finishSeen := false
+	// errorSent 本流已向客户端写出过 error 帧（上游 error 透传 / 流内失败帧）：error 帧本身
+	// 就是终态，流尾不得再补截断终态——客户端按最后一个终态判结果，「截断」会盖掉「失败」。
+	errorSent := false
 
 	// writeSSE 原样写出一帧并 flush。
 	writeSSE := func(payload string) error {
@@ -861,6 +864,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 		// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 		if _, hasErr := obj["error"]; hasErr {
+			errorSent = true
 			if werr := writeRaw(payload); werr != nil {
 				return 0, werr
 			}
@@ -871,6 +875,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		// 并留一行日志（此前这种帧完全无痕，策略拦截被误记成上游断流）。
 		if code, msg, ok := StreamErrorFrame(obj); ok {
 			log.Printf("WARN: [upstream] 流内失败帧（HTTP 200 内嵌）code=%d msg=%q → 如实透出为 error 帧", code, msg)
+			errorSent = true
 			if werr := writeRaw(streamErrorPayload(code, msg, payload)); werr != nil {
 				return 0, werr
 			}
@@ -989,8 +994,9 @@ readLoop:
 	// 表现就是「说到一半停了、也不报错」，只能人工接着催。这里补一帧截断终态：chat 侧看到
 	// finish_reason=length（TruncationFinishReason），responses 侧映射成
 	// incomplete(max_output_tokens)，由客户端自己决定续写/重试——网关不再把断流伪装成成功。
-	// 只在本层一个终态都没发过时补（否则两个 finish_reason，后一个会洗掉前一个）。
-	if !upstreamDone && !finishSeen && !toolFinishSent && validFrames > 0 {
+	// 只在本层一个终态都没发过时补（否则两个 finish_reason，后一个会洗掉前一个）；
+	// 已写出 error 帧同样算终态。
+	if !upstreamDone && !finishSeen && !toolFinishSent && !errorSent && validFrames > 0 {
 		// 客户端自己断开时上游只是被动跟随断连，这条不是上游故障——记 WARN 会把
 		// 真正的中断盖掉（错误汇总按类别聚合，噪音会挤掉信噪比）。归因交给 handler
 		// 的 interrupted 观测（499），这里只在客户端还在等时才告警。
