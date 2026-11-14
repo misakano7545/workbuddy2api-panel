@@ -119,6 +119,7 @@ var (
 		Platform:  "workbuddy-ai",
 		UserAgent: "workbuddy-ai/" + ClientVersionWorkBuddyGL + " workbuddy-ai/" + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLI,
 		Domain:    "www.codebuddy.ai",
+		Version:   ClientVersionWorkBuddyGL,
 	}
 	siteWorkBuddy = Site{
 		ID: SiteWorkBuddy, Realm: RealmGlobal,
@@ -126,6 +127,7 @@ var (
 		Platform:  "workbuddy-ai",
 		UserAgent: "workbuddy-ai/" + ClientVersionWorkBuddyGL + " workbuddy-ai/" + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLI,
 		Domain:    "www.workbuddy.ai",
+		Version:   ClientVersionWorkBuddyGL,
 	}
 )
 
@@ -362,20 +364,20 @@ func CodeFatal(code int) bool {
 // DecorateAuthURL 按真机实测补齐授权链接参数（对应官方的 appendHostLoginJourneyParams /
 // appendAuthUrlParams / appendLoginPageHintParams）：
 //
-//	version=<site.Version>      官方写自己的包版本；CN 授权页会把它转给
-//	                            console/auth/risk-context 并编进回调地址
-//	loginSessionId=<id>         官方客户端本地生成的登录会话标识；授权页从 URL 读它，
-//	                            并原样带进 signin-callback
+//	version=<site.Version>      官方写自己的包版本（CN 5.9.3 / GL 5.9.4，与 UA 同源）；
+//	                            CN 授权页会把它转给 console/auth/risk-context 并编进回调
+//	loginSessionId=<id>         官方客户端本地生成的登录会话标识；只对 platform=workbuddy
+//	                            （CN）追加，授权页读它并原样带进 signin-callback
 //	ww_device_nonce=<nonce>     官方仅 platform=workbuddy 且拿到设备 nonce 时加
 //
-// 2026-11-14 对 CN 5.9.3 的真机链接实测（Chrome 地址栏原文，state/nonce 已脱敏）：
+// 2026-11-14 两侧真机链接原文（脱敏）：
 //
-//	/login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>
-//	      &traceparent=00-…-…-01&login_owner_id=<uuid>&ww_device_nonce=<nonce>
+//	CN : /login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>
+//	          &traceparent=00-…&login_owner_id=<uuid>&ww_device_nonce=<nonce>
+//	GL : /login/?platform=workbuddy-ai&state=…&version=5.9.4
 //
 // traceparent / login_owner_id 是客户端自己的链路与宿主标识，本仓没有等价物，
-// 不伪造（错值比缺值更容易被判异常）。旧的「不发 version」判断来自 workbuddy.ai
-// 的 bundle（那份确实没读），CN 这份读了——所以只有配了 Version 的站点才加。
+// 不伪造（错值比缺值更容易被判异常）。
 //
 // 本仓没有桌面端 Turing 设备 SDK，nonce 只能由部署侧提供；为空则不加。
 // raw 解析失败时原样返回。
@@ -388,7 +390,9 @@ func DecorateAuthURL(raw string, s Site, nonce, sessionID string) string {
 	if s.Version != "" && q.Get("version") == "" {
 		q.Set("version", s.Version)
 	}
-	if sessionID != "" && q.Get("loginSessionId") == "" {
+	// loginSessionId 与 nonce 同一道闸：官方 appendHostLoginJourneyParams 只对
+	// platform=workbuddy 生效，真机国际版链接（platform=workbuddy-ai&version=5.9.4）没有它。
+	if s.Platform == "workbuddy" && sessionID != "" && q.Get("loginSessionId") == "" {
 		q.Set("loginSessionId", sessionID)
 	}
 	if s.Platform == "workbuddy" && nonce != "" && q.Get("ww_device_nonce") == "" {

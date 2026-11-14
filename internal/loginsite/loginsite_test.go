@@ -129,15 +129,16 @@ func TestCodeSemantics(t *testing.T) {
 // TestDecorateAuthURL 覆盖授权链接参数补齐（对齐官方 appendHostLoginJourneyParams /
 // appendAuthUrlParams）：
 //
-//   - version：只有配了 Site.Version 的站点（目前 CN）才补——2026-11-14 实测 CN 授权页
-//     会读它并转给 console/auth/risk-context；workbuddy.ai 那份 bundle 不读，故不补。
-//   - loginSessionId：调用方给了就补（官方便是客户端本地生成后透传）。
+//   - version：所有已复核站点都补（CN 5.9.3 / GL 5.9.4）——真机两侧链接都带它；
+//     CN 授权页还会把它转给 console/auth/risk-context。
+//   - loginSessionId：与 nonce 同一道闸，只对 platform=workbuddy（CN）补；真机国际版
+//     链接（platform=workbuddy-ai）没有这个参数。
 //   - ww_device_nonce：只对 platform=workbuddy 的站点且 nonce 非空时补。
 func TestDecorateAuthURL(t *testing.T) {
 	const base = "https://example.com/login?platform=CLI&state=abc"
 	const sid = "caf6af35-8aa2-4037-89e8-c8a70ffbda5a"
 
-	// CN 补 version 与 loginSessionId；原有参数一律不动。
+	// CN 补 version + loginSessionId；原有参数一律不动。
 	got := DecorateAuthURL(base, For(SiteCN), "", sid)
 	if !containsParam(t, got, "version", ClientVersionWorkBuddyCN) {
 		t.Errorf("cn 站未补 version: %s", got)
@@ -145,18 +146,18 @@ func TestDecorateAuthURL(t *testing.T) {
 	if !containsParam(t, got, "loginSessionId", sid) {
 		t.Errorf("cn 站未补 loginSessionId: %s", got)
 	}
-	// 未配 Version 的站点不补 version（不拿错版本冒充）。
+	// 国际版：补 version（5.9.4），但不补 loginSessionId（真机链接里没有）。
 	for _, id := range []string{SiteIntl, SiteWorkBuddy} {
 		got := DecorateAuthURL(base, For(id), "", sid)
 		u, err := url.Parse(got)
 		if err != nil {
 			t.Fatalf("%s: parse %q: %v", id, got, err)
 		}
-		if v := u.Query().Get("version"); v != "" {
-			t.Errorf("%s 不该补 version，得到 %q", id, v)
+		if v := u.Query().Get("version"); v != ClientVersionWorkBuddyGL {
+			t.Errorf("%s version=%q want %q", id, v, ClientVersionWorkBuddyGL)
 		}
-		if !containsParam(t, got, "loginSessionId", sid) {
-			t.Errorf("%s 未补 loginSessionId: %s", id, got)
+		if containsParam(t, got, "loginSessionId", "") {
+			t.Errorf("%s 不该补 loginSessionId（真机 GL 链接没有）: %s", id, got)
 		}
 		if s := u.Query().Get("state"); s != "abc" {
 			t.Errorf("%s state=%q want abc（原有参数被破坏）", id, s)
