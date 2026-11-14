@@ -355,6 +355,10 @@ func TestChatProviderUnavailableDoesNotRotateOrUnbind(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "01a1b4d1b3f45f4b99c406eb04d68909") {
 		t.Errorf("429 body 应透传上游原文（含 requestId）: %s", rec.Body)
 	}
+	// 11134 不是排队：提示要指向「供应商过载 / 换模型」，不能说队列满。
+	if b := rec.Body.String(); !strings.Contains(b, "provider is temporarily overloaded") || strings.Contains(b, "queue is full") {
+		t.Errorf("11134 的提示应说供应商过载而不是队列满: %s", b)
+	}
 	if calls["Bearer at-deep1"] != 1 || calls["Bearer at-deep2"] != 0 {
 		t.Errorf("calls=%v want 只打粘性号一次（retry_after 在案时不轮转）", calls)
 	}
