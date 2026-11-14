@@ -2,6 +2,7 @@ package panel
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
@@ -114,8 +116,31 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var total, imported, skipped, creates, overwrites int
-	var errs []string
+	var errs, warnings []string
 	seenUID := map[string]string{} // uid -> 首次出现的文件，用于批内去重
+	var toVerify []importAcct      // 池里已有、要覆盖凭据的号：先求证再落盘
+	var committed []importAcct     // 已落盘入池的号：循环后做上游动作
+
+	// commit 落盘并入池；落盘在前、入池在后：入池后选号就会用新凭据，磁盘没跟上则重启后回到旧值。
+	// verified 表示新凭据刚被 refresh 求证过：上游已把文件里的 refresh token 轮换，池里原有的那份
+	// 多半随之作废（旧导出与池里是同一条登录链时），此时落盘失败也必须把新凭据放进内存，
+	// 否则这个号就真的只能重新登录了。调用方串行调用（求证回调自己持 mu）。
+	commit := func(ia importAcct, verified bool) {
+		if err := ia.a.SaveAtomic(); err != nil {
+			if !verified {
+				skipped++
+				errs = append(errs, fmt.Sprintf("%s: save auth failed: %v", ia.src, err))
+				return
+			}
+			log.Printf("WARN: panel: import uid=%s 新凭据已求证但落盘失败，仅放入内存: %v", ia.uid, err)
+			warnings = append(warnings, fmt.Sprintf("%s: uid=%s 凭据落盘失败（%v），新令牌只在内存里生效，请检查凭证目录后重新导入一次", ia.src, ia.uid, err))
+		}
+		p.cfg.Pool.Add(ia.a)
+		p.cfg.Pool.Revive(ia.uid)
+		committed = append(committed, ia)
+		imported++
+	}
+	var mu sync.Mutex // 保护 commit 及其计数：求证回调会并发进来
 
 	for i, acc := range accounts {
 		src := sources[i]
@@ -205,55 +230,40 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			imported++
 			continue
 		}
+		ia := importAcct{a: a, src: src, uid: uid, realm: realm, isNew: existing == nil}
 		if existing != nil {
-			verdict := p.cfg.Upstream.VerifySessionByRefresh(a)
-			if verdict != upstream.VerifyAlive {
-				skipped++
-				errs = append(errs, fmt.Sprintf("%s: 新凭据校验未通过（%s），保留原有凭据", src, verdict))
-				continue
-			}
-		}
-
-		if err := a.SaveAtomic(); err != nil {
-			skipped++
-			errs = append(errs, fmt.Sprintf("%s: save auth failed: %v", src, err))
+			toVerify = append(toVerify, ia) // 覆盖要先求证，统一在循环后有界并发地做
 			continue
 		}
+		commit(ia, false)
+	}
 
-		isNewAccount := existing == nil
-		p.cfg.Pool.Add(a)
-		p.cfg.Pool.Revive(uid)
+	// 覆盖前求证：有界并发 + 总时限（见 verifyImportOverwrites）。每个号求证完立刻落盘入池，
+	// 不等整批——求证已把文件里的 refresh token 轮换了，拖着不提交会让它只活在内存里。
+	if len(toVerify) > 0 {
+		ctx, cancel := context.WithTimeout(r.Context(), importVerifyBudget)
+		p.verifyImportOverwrites(ctx, toVerify, func(k int, verdict upstream.VerifyVerdict, ran bool) {
+			ia := toVerify[k]
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case ran && verdict == upstream.VerifyAlive:
+				commit(ia, true)
+			case !ran:
+				skipped++
+				errs = append(errs, fmt.Sprintf("%s: 批量求证超时（开工总限 %s）或请求已断开，保留原有凭据（uid=%s），请分批重试", ia.src, importVerifyBudget, ia.uid))
+			default:
+				skipped++
+				errs = append(errs, fmt.Sprintf("%s: 新凭据校验未通过（%s），保留原有凭据", ia.src, verdict))
+			}
+		})
+		cancel()
+	}
 
-		// 顺带签到/激活（幂等；失败仅记日志，不阻断导入）。
-		if realm == "global" {
-			if activated, err := p.cfg.Upstream.GlobalCompleteRegistration(a); err != nil {
-				log.Printf("panel: import global 注册激活 uid=%s: %v", uid, err)
-			} else if activated {
-				log.Printf("panel: import global 注册激活 uid=%s 完成", uid)
-			}
-			if claimed, err := p.cfg.Upstream.ClaimTrial(a); err != nil {
-				log.Printf("panel: import global trial uid=%s: %v", uid, err)
-			} else if claimed {
-				log.Printf("panel: import global trial uid=%s 已领", uid)
-			}
-		} else {
-			// 企业版 / 静态 API Key 无个人成长体系：CN 签到端点对企业号直接
-			// 400 code 10001「企业账号不支持该操作」。跳过签到，但下方余额查询
-			// 照常（企业额度走 get-enterprise-user-usage 口径）。
-			if !a.SupportsPersonalGrowth() {
-				log.Printf("panel: import 跳过签到 uid=%s（企业版/API Key 无个人成长体系）", uid)
-			} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
-				log.Printf("panel: import checkin uid=%s: %v", uid, err)
-			}
-		}
-		if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
-			p.cfg.Pool.ReenableIfCredits(uid, rm, tt)
-		}
-
-		if isNewAccount {
-			p.StartNewAccountTasks(uid)
-		}
-		imported++
+	// 上游动作（签到/激活/查余额）放在落盘之后统一做：它们每号几次往返，
+	// 不能夹在求证与落盘之间拖慢已轮换令牌的提交。
+	for _, ia := range committed {
+		p.importFollowUp(ia)
 	}
 
 	total = len(accounts)
@@ -273,7 +283,87 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		"creates":    creates,
 		"overwrites": overwrites,
 		"errors":     errs,
+		"warnings":   warnings, // 已入池但凭据没能落盘的号（新令牌只在内存里）
 	})
+}
+
+// importAcct 一个通过本地校验、待落盘的导入账号。
+type importAcct struct {
+	a        *auth.Auth
+	src, uid string
+	realm    string
+	isNew    bool // 池里原先没有：导入后启动新号任务
+}
+
+// importVerifyConcurrency 覆盖前求证（每号一次 refresh）的并发上限：串行时几百个已有号要等几十分钟，
+// 请求先被反向代理 / 浏览器掐断；并发太高又像批量刷 refresh 端点。
+// importVerifyBudget 是求证「开工」的总时限：到点后不再为没轮到的号发 refresh，它们一律保留原凭据、
+// 由人分批重试。已发出的 refresh 不打断（打断会丢掉已轮换的令牌），所以请求最坏要等
+// importVerifyBudget + 一次 refresh 的超时。两者是变量只为让测试不必真等 60 秒。
+var (
+	importVerifyConcurrency = 8
+	importVerifyBudget      = 60 * time.Second
+)
+
+// verifyImportOverwrites 用 refresh 求证导入的新凭据还活着，有界并发，开工受 ctx 约束。每号求证完立刻调
+// done（并发调用，调用方自己加锁）；没轮到的号也调一次（ran=false），保证每个号恰好一次回调。
+func (p *Panel) verifyImportOverwrites(ctx context.Context, list []importAcct, done func(k int, verdict upstream.VerifyVerdict, ran bool)) {
+	sem := make(chan struct{}, importVerifyConcurrency)
+	var wg sync.WaitGroup
+	k := 0
+loop:
+	for ; k < len(list); k++ {
+		// select 在两路都就绪时随机选一路，先判一次 ctx，已结束就一个也不再发。
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break loop
+		}
+		wg.Add(1)
+		go func(k int) {
+			defer func() { <-sem; wg.Done() }()
+			done(k, p.cfg.Upstream.VerifySessionByRefresh(list[k].a), true)
+		}(k)
+	}
+	for ; k < len(list); k++ {
+		done(k, upstream.VerifyInconclusive, false)
+	}
+	wg.Wait()
+}
+
+// importFollowUp 导入后顺带签到/激活（幂等；失败仅记日志，不阻断导入）。
+func (p *Panel) importFollowUp(ia importAcct) {
+	a, uid := ia.a, ia.uid
+	if ia.realm == "global" {
+		if activated, err := p.cfg.Upstream.GlobalCompleteRegistration(a); err != nil {
+			log.Printf("panel: import global 注册激活 uid=%s: %v", uid, err)
+		} else if activated {
+			log.Printf("panel: import global 注册激活 uid=%s 完成", uid)
+		}
+		if claimed, err := p.cfg.Upstream.ClaimTrial(a); err != nil {
+			log.Printf("panel: import global trial uid=%s: %v", uid, err)
+		} else if claimed {
+			log.Printf("panel: import global trial uid=%s 已领", uid)
+		}
+	} else {
+		// 企业版 / 静态 API Key 无个人成长体系：CN 签到端点对企业号直接
+		// 400 code 10001「企业账号不支持该操作」。跳过签到，但下方余额查询
+		// 照常（企业额度走 get-enterprise-user-usage 口径）。
+		if !a.SupportsPersonalGrowth() {
+			log.Printf("panel: import 跳过签到 uid=%s（企业版/API Key 无个人成长体系）", uid)
+		} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
+			log.Printf("panel: import checkin uid=%s: %v", uid, err)
+		}
+	}
+	if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
+		p.cfg.Pool.ReenableIfCredits(uid, rm, tt)
+	}
+	if ia.isNew {
+		p.StartNewAccountTasks(uid)
+	}
 }
 
 // validImportUID 校验导入 uid 是否可用于拼文件名（同 login.go validUID 口径）。
