@@ -13,8 +13,11 @@ import (
 )
 
 type Pool struct {
-	mu      sync.RWMutex
-	byUID   map[string]*entry
+	mu    sync.RWMutex
+	byUID map[string]*entry
+	// parked 被账号目录热重载移出池的条目（uid → 原条目，见 ParkMany）。文件回来时原样复活，
+	// 禁用、暂停、分组、冷却都还在；随 state.json 的 parked_accounts 落盘，文件缺席期间重启也不丢。
+	parked  map[string]*entry
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
 	// store 池状态快照镜像（redisstore.Store）；nil = 无需镜像（未配置 Redis / Noop 之外也可能 nil）。
@@ -596,7 +599,73 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 		e.a = a // 保留 credits/cooling 状态
 		return
 	}
+	if e, ok := p.parked[a.UID]; ok {
+		// 热重载移出过的号回来了：沿用原条目，人工设的禁用/暂停/分组不因文件挪开一阵就丢。
+		delete(p.parked, a.UID)
+		e.a = a
+		p.byUID[a.UID] = e
+		p.dirty.Store(true)
+		return
+	}
 	p.byUID[a.UID] = &entry{a: a}
+}
+
+// maxParked 暂存条目上限：外部脚本反复轮换大批账号时不让内存无界增长；满了就不再暂存（照旧删）。
+const maxParked = 4096
+
+// ReconcileResult Reconcile 对单个账号做了什么。
+type ReconcileResult int
+
+const (
+	ReconcileUnchanged ReconcileResult = iota // 池里已有且磁盘上的令牌不比内存新
+	ReconcileAdded                            // 新入池（含从暂存复活）
+	ReconcileUpdated                          // 池里已有，换上了磁盘上更新的令牌
+)
+
+// Reconcile 账号目录热重载的入池：新号加入；已在池的号只在磁盘令牌更新时原地更新
+// （auth.AdoptNewer），不换指针——换指针会把刚刷新的令牌盖回磁盘上的旧值。
+//
+// 原地更新在 p.mu 之外做：auth 的锁不嵌在池锁里，不引入新的锁序。
+func (p *Pool) Reconcile(a *auth.Auth) ReconcileResult {
+	p.mu.Lock()
+	e, ok := p.byUID[a.UID]
+	if !ok {
+		p.upsertLocked(a)
+		p.mu.Unlock()
+		return ReconcileAdded
+	}
+	cur := e.a
+	p.mu.Unlock()
+	if cur.AdoptNewer(a) {
+		return ReconcileUpdated
+	}
+	return ReconcileUnchanged
+}
+
+// ParkMany 把账号移出池并暂存其状态（热重载用），只落盘一次；返回实际移出的 uid。
+// 与 RemoveMany 的差别只在暂存：面板手动删除是「不要了」，热重载删除是「文件暂时不见了」。
+func (p *Pool) ParkMany(uids []string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var removed []string
+	for _, uid := range uids {
+		e, ok := p.byUID[uid]
+		if !ok {
+			continue
+		}
+		delete(p.byUID, uid)
+		if len(p.parked) < maxParked {
+			if p.parked == nil {
+				p.parked = map[string]*entry{}
+			}
+			p.parked[uid] = e
+		}
+		removed = append(removed, uid)
+	}
+	if len(removed) > 0 && !p.saveLocked() {
+		p.dirty.Store(true)
+	}
+	return removed
 }
 
 // Pick 返回 healthy 中积分最高的账号；无可用返回 nil。

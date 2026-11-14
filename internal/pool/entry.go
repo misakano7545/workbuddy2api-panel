@@ -644,6 +644,9 @@ type stateModelCost struct {
 // stateFile 持久化格式。
 type stateFile struct {
 	Accounts map[string]stateAccount `json:"accounts"`
+	// Parked 被账号目录热重载暂存的号（pool.go parked）。与 accounts 分开：它们不在池里，
+	// 文件回来时才重新入池，禁用/暂停/分组随之复活。缺省省略，旧文件照常读。
+	Parked map[string]stateAccount `json:"parked_accounts,omitempty"`
 	// Windows 额度窗口登记表（window.go）。放在顶层而不是每个 stateAccount 里：
 	// 它是排程语义（到点发探针），不是账号路由状态，跟着账号走会让「删号重加」
 	// 顺手把窗口也删掉——而额度窗口是上游侧的客观事实，与本地账号记录无关。
