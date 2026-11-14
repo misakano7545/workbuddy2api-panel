@@ -149,6 +149,8 @@ func TestWaitChildHealthy(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		return
 	}
+	updateProcessTestMu.Lock()
+	defer updateProcessTestMu.Unlock()
 
 	exited := exec.Command(os.Args[0], "-test.run", "^TestWaitChildHealthy$")
 	exited.Env = append(os.Environ(), "WB2API_UPDATER_CHILD=exit")

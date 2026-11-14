@@ -130,6 +130,10 @@ type Config struct {
 	// （features.watermark_strip_enabled，默认关闭）。同上：Live 非 nil 时以热快照为准。
 	WatermarkStripEnabled bool
 
+	// ThreeDEnabled 混元 3D 生成开关的静态回退（features.three_d_enabled，默认关闭）。
+	// 同上：Live 非 nil 时以热快照为准。
+	ThreeDEnabled bool
+
 	// MaxPayloadBytes 入站请求体安全上限（字节，server.max_payload_bytes，默认 64MiB）。
 	// 只挡「大到能把进程读死」的上传，不做大请求预拦截（见 bodylimit.go）。启动时读取。
 	MaxPayloadBytes int64
@@ -150,6 +154,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		SoftCooldown:          h.cfg.SoftCooldown,
 		EmbeddingsEnabled:     h.cfg.EmbeddingsEnabled,
 		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
+		ThreeDEnabled:         h.cfg.ThreeDEnabled,
 		RecordClientInfo:      h.cfg.RecordClientInfo,
 		RecordContext:         h.cfg.RecordContext,
 		HiddenModels:          livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
@@ -254,8 +259,11 @@ type Handler struct {
 	// 进程内（重启清空，查询时有界探测自愈），见 videos.go 文件头。
 	videoLedger *videoTaskStore
 	// videoProbe 台账里没有的任务的探测状态（负缓存 / 全局限速 / 暂停），见 videos_probe.go。
-	videoProbe videoProber
-	budget     *dailyBudget
+	videoProbe taskProber
+	// threeDLedger / threeDProbe 3D 任务台账与探测状态，语义同视频（见 three_d.go / probe.go）。
+	threeDLedger *threeDTaskStore
+	threeDProbe  taskProber
+	budget       *dailyBudget
 }
 
 // NewHandler 构建 handler。
@@ -273,11 +281,14 @@ func NewHandler(cfg Config) *Handler {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
 	h := &Handler{
-		cfg:         cfg,
-		mux:         http.NewServeMux(),
-		taskRunning: map[string]bool{},
-		videoLedger: newVideoTaskStore(),
-		budget:      newDailyBudget(cfg.BudgetLimit),
+		cfg:          cfg,
+		mux:          http.NewServeMux(),
+		taskRunning:  map[string]bool{},
+		videoLedger:  newVideoTaskStore(),
+		videoProbe:   newTaskProber(videoProbeConfig),
+		threeDLedger: newThreeDTaskStore(),
+		threeDProbe:  newTaskProber(threeDProbeConfig),
+		budget:       newDailyBudget(cfg.BudgetLimit),
 	}
 	h.budget.setGuards(cfg.BurstCreditLimit, cfg.CacheLowRate)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -296,6 +307,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/videos/tasks", h.withAuth(h.videoTasks))
 	h.mux.HandleFunc("GET /v1/videos/{task_id}/content", h.withAuth(h.videoContent))
 	h.mux.HandleFunc("GET /v1/videos/{task_id}", h.withAuth(h.videoTask))
+	h.mux.HandleFunc("POST /v1/3d/generations", h.withAuth(h.threeDGenerations))
+	h.mux.HandleFunc("POST /v1/3d/tasks", h.withAuth(h.threeDTasks))
+	h.mux.HandleFunc("GET /v1/3d/{job_id}", h.withAuth(h.threeDTasks))
 	// MCP（Streamable HTTP 子集，JSON-RPC 2.0）：把本网关的媒体能力做成工具面，见 mcp.go。
 	h.mux.HandleFunc("POST /mcp", h.withAuth(h.mcpPost))
 	h.mux.HandleFunc("GET /mcp", h.mcpMethodNotAllowed)
@@ -343,7 +357,7 @@ func isChatEntry(path string) bool {
 	switch path {
 	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages",
 		"/v1/images/generations", "/v1/images/edits",
-		"/v1/videos/generations", "/v1/videos/tasks":
+		"/v1/videos/generations", "/v1/videos/tasks", "/v1/3d/generations", "/v1/3d/tasks":
 		return true
 	}
 	return false

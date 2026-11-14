@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -110,6 +111,8 @@ func TestRestartFixtureProcess(t *testing.T) {
 	}
 }
 
+var updateProcessTestMu sync.Mutex
+
 func TestInstallReplacesRestartsAndRecovers(t *testing.T) {
 	if !New("2026.10.22.1823", "", "", Settings{}).Status().CanInstall {
 		t.Skip("native self-update unavailable on this deployment")
@@ -137,13 +140,20 @@ func TestInstallReplacesRestartsAndRecovers(t *testing.T) {
 			// helper 是独立进程，观察窗口只能经环境变量注入（见 updater.childGrace）。
 			// 缩到 400ms：真值 8s 会让这条用例每个分支多等 8 秒。
 			t.Setenv("WB2API_UPDATE_GRACE_MS", strconv.Itoa(fixtureGraceMS))
-			target := filepath.Join(dir, "wb2api"+filepath.Ext(executable))
+			target := filepath.Join(dir, "updater.test"+filepath.Ext(executable))
 			if err := os.WriteFile(target, original, 0700); err != nil {
 				t.Fatal(err)
 			}
 			var buf bytes.Buffer
 			zw := zip.NewWriter(&buf)
-			entry, err := zw.Create(filepath.Base(target))
+			// 发布包固定使用 wb2api 名称，不能用测试二进制的扩展名（Go 1.26 为 .test）。
+			binaryName := "wb2api"
+			if runtime.GOOS == "windows" {
+				binaryName += ".exe"
+			}
+			header := &zip.FileHeader{Name: binaryName, Method: zip.Deflate}
+			header.SetMode(0o700)
+			entry, err := zw.CreateHeader(header)
 			if err != nil {
 				t.Fatal(err)
 			}

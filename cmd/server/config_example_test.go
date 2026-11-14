@@ -45,4 +45,16 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if !c.Features.BusyRetry || c.Features.BusyWaitSeconds != 60 {
 		t.Errorf("features.busy_retry / busy_wait_seconds 示例应为 true / 60: %+v", c.Features)
 	}
+	// features.three_d_enabled / three_d_temp_tokens / three_d_auto_token：3D 默认关闭，
+	// 凭证表必须可见（空对象即可），否则用户既不知道有开关、也不知道凭证配在哪；
+	// 自动签发默认 true，示例必须显式体现（缺省行为要让用户看得到）。
+	if c.Features.ThreeDEnabled {
+		t.Error("features.three_d_enabled 示例值应为 false（默认关闭）")
+	}
+	if c.Features.ThreeDTempTokens == nil {
+		t.Error("features.three_d_temp_tokens 示例应存在（空对象即可）")
+	}
+	if !c.Features.ThreeDAutoToken {
+		t.Error("features.three_d_auto_token 示例值应为 true（自动签发默认开启）")
+	}
 }

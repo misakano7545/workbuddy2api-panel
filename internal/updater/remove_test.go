@@ -21,11 +21,10 @@ import (
 // 曾经用裸 os.Remove 的实测结果：首次必失败、50~150ms 后一次重试即成功。
 // 这条用例在旧实现下会稳定失败，所以它是根因的回归钉而不是风格测试。
 func TestRemoveFileRetryingDeletesJustExecutedExe(t *testing.T) {
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := os.ReadFile(self)
+	updateProcessTestMu.Lock()
+	defer updateProcessTestMu.Unlock()
+	// 上一条进程替换测试可能让 /proc/self/exe 暂指到 .old；复制启动时的测试二进制。
+	payload, err := os.ReadFile(os.Args[0])
 	if err != nil {
 		t.Fatal(err)
 	}
