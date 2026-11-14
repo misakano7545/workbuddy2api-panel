@@ -26,13 +26,13 @@ func postChatRestricted(h *Handler) *httptest.ResponseRecorder { return postChat
 // 单号反复命中不凑数；hold<=0 永不暂停；两个域互不牵连。
 func TestRestrictionGate(t *testing.T) {
 	var g restrictionGate
-	if g.note("cn", "a", time.Minute) || g.note("cn", "a", time.Minute) {
+	if g.note("cn", "a", time.Minute, 0) || g.note("cn", "a", time.Minute, 0) {
 		t.Fatal("同一个账号重复命中不该凑成第二个号")
 	}
-	if g.note("global", "b", time.Minute) {
+	if g.note("global", "b", time.Minute, 0) {
 		t.Fatal("另一个域的命中不该凑进 cn 的计数")
 	}
-	if !g.note("cn", "b", time.Minute) {
+	if !g.note("cn", "b", time.Minute, 0) {
 		t.Fatal("同域窗口内第 2 个不同账号被限制应触发暂停")
 	}
 	if d := g.remaining("cn"); d <= 0 || d > time.Minute {
@@ -44,7 +44,7 @@ func TestRestrictionGate(t *testing.T) {
 
 	var off restrictionGate
 	for _, uid := range []string{"a", "b", "c"} {
-		if off.note("cn", uid, 0) {
+		if off.note("cn", uid, 0, 0) {
 			t.Fatal("hold=0 时不该暂停")
 		}
 	}
