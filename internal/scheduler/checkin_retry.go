@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"log"
+	"math/rand/v2"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
@@ -23,6 +24,11 @@ import (
 //
 // 变量而非常量：测试要把它压到毫秒级，避免真等 40 分钟。
 var checkinRetryDelays = []time.Duration{10 * time.Minute, 40 * time.Minute}
+
+// checkinRetryMinGap 补签时账号之间的最小间隔（schedule.account_spread_min_gap_seconds 未配时用它）：
+// 与主循环一样不让一批号在同一秒打上游。实际间隔是 [gap, 2×gap) 里的随机值，等距也是可识别的节拍。
+// 变量：测试压到零。
+var checkinRetryMinGap = 2 * time.Second
 
 // checkinOne 对单个 CN 账号执行签到（不含余额查询）。返回 done 表示今天确实已签
 // （成功、上游显示已签、幂等拒绝三种都算），err 是真实失败原因供调用方判断可否重试。
@@ -70,25 +76,51 @@ func (s *Scheduler) checkinOne(a *auth.Auth, uid string) (bool, error) {
 // 不阻塞调用方（runCheckin 在排程 goroutine 里跑，摊开启用时 spreadRunning 标记要
 // 等它返回才清，阻塞会让下一个时点整批被跳过）；ctx 取消时立即退出，不拖住优雅停机。
 func (s *Scheduler) startCheckinRetry(ctx context.Context, uids []string) {
-	if len(uids) == 0 {
+	// 去重：手动签到与排程签到各自失败时会各排一次补签，同一个号不能被两条补签队列重复打。
+	s.retryMu.Lock()
+	if s.retryPending == nil {
+		s.retryPending = map[string]bool{}
+	}
+	var pending []string
+	for _, uid := range uids {
+		if !s.retryPending[uid] {
+			s.retryPending[uid] = true
+			pending = append(pending, uid)
+		}
+	}
+	s.retryMu.Unlock()
+	if len(pending) == 0 {
 		return
 	}
-	pending := append([]string(nil), uids...)
 	log.Printf("[checkin] %d 个账号本轮瞬时失败，将在 %s、%s 后各补签一次（期间 21:00 排程照常）",
 		len(pending), checkinRetryDelays[0], checkinRetryDelays[len(checkinRetryDelays)-1])
-	go s.checkinRetryLoop(ctx, pending)
+	// 节奏在这里快照、作参数传进 goroutine：不在后台循环里读包级变量。
+	go s.checkinRetryLoop(ctx, pending, checkinRetryDelays, checkinRetryMinGap)
 }
 
-func (s *Scheduler) checkinRetryLoop(ctx context.Context, pending []string) {
+func (s *Scheduler) checkinRetryLoop(ctx context.Context, pending []string, delays []time.Duration, minGap time.Duration) {
+	all := append([]string(nil), pending...) // 退出时整批出队（pending 会逐轮缩短）
+	defer func() {
+		s.retryMu.Lock()
+		for _, uid := range all {
+			delete(s.retryPending, uid)
+		}
+		s.retryMu.Unlock()
+	}()
 	prev := time.Duration(0)
-	for round := 0; round < len(checkinRetryDelays); round++ {
+	for round := 0; round < len(delays); round++ {
 		// 偏移是绝对的（10m、40m），所以这里睡的是与上一轮的差值。
-		if !sleepCtx(ctx, checkinRetryDelays[round]-prev) {
+		if !sleepCtx(ctx, delays[round]-prev) {
 			return // ctx 取消：停机，不补
 		}
-		prev = checkinRetryDelays[round]
+		prev = delays[round]
 
+		_, gap := s.spreadParams()
+		if gap <= 0 {
+			gap = minGap
+		}
 		var still []string
+		called := false
 		for _, uid := range pending {
 			if ctx.Err() != nil {
 				return
@@ -105,11 +137,15 @@ func (s *Scheduler) checkinRetryLoop(ctx context.Context, pending []string) {
 			if st, ok := s.cfg.Pool.Status(uid); ok && st.Disabled && !s.includeDisabledInTasks() {
 				continue
 			}
+			if called && gap > 0 && !sleepCtx(ctx, gap+rand.N(gap)) {
+				return
+			}
+			called = true
 			done, err := s.checkinOne(a, uid)
 			switch {
 			case done:
 				log.Printf("[checkin] 补签成功 %s（第 %d 轮 / 共 %d 轮）",
-					logfmt.Label(uid, a.Nickname), round+1, len(checkinRetryDelays))
+					logfmt.Label(uid, a.Nickname), round+1, len(delays))
 			case err != nil && upstream.IsTransientBilling(err):
 				still = append(still, uid)
 			default:
@@ -124,7 +160,7 @@ func (s *Scheduler) checkinRetryLoop(ctx context.Context, pending []string) {
 		}
 	}
 	log.Printf("WARN: [checkin] 补签 %d 轮后仍有 %d 个账号失败（等 21:00 排程再试）：%s",
-		len(checkinRetryDelays), len(pending), joinUIDs(pending))
+		len(delays), len(pending), joinUIDs(pending))
 }
 
 // joinUIDs 只打 uid 前 8 位：日志里出现完整 uuid 没有额外信息，短前缀与面板一致。
