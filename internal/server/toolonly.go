@@ -77,7 +77,66 @@ func toolOnlyLooksFinished(text string) bool {
 		return false
 	}
 	// narrationTailSuspends 对句末标点返回 false；冒号/逗号/未闭合代码块返回 true。
-	return !narrationTailSuspends(s)
+	if narrationTailSuspends(s) {
+		return false
+	}
+	// 「够长 + 句号收尾」在这两档里都会出现，靠最后一句的**意图**区分：
+	//   "我继续检查其他被错误替换的内容，例如 UnityManual.html 链接。"  ← 还没动手
+	//   "任务已全部完成，我来总结一下。"                                ← 真收尾（收尾词优先）
+	// 只看最后一句：前半段叙述里有"接下来"不代表结尾在预告下一步。
+	last := toolOnlyLastSentence(s)
+	if last == "" {
+		return true
+	}
+	for _, m := range toolOnlyClosingMarkers {
+		if strings.Contains(last, m) {
+			return true
+		}
+	}
+	low := strings.ToLower(last)
+	for _, m := range toolOnlyIntentMarkers {
+		if strings.Contains(low, m) {
+			return false
+		}
+	}
+	return true
+}
+
+// toolOnlyIntentMarkers 最后一句里出现这些词，说明模型在说「下一步要动手」而不是收尾。
+// 取自线上漏救样本（第 108/109 轮）与同类句式；**不收**"下面""接着"这类泛词——
+// "下面这些文件都已改好。" 是典型收尾，收进来就会误救。
+var toolOnlyIntentMarkers = []string{
+	"我继续", "接下来", "下一步", "我来", "现在开始", "现在修复", "再检查",
+	"next, i'll", "next i'll", "next i will", "let me", "now i'll", "i'll now",
+}
+
+// toolOnlyClosingMarkers 收尾词：最后一句里出现就一律当「已答完」，压过意图词。
+// 这条是意图词判据的对冲——"我来总结一下" 的意图词是"我来"，但整句是收尾。
+var toolOnlyClosingMarkers = []string{
+	"总结", "已完成", "全部完成", "已经完成", "完毕", "收尾", "到这里",
+}
+
+// toolOnlyLastSentence 取最后一个句末标点之后的那一句（去掉尾部标点）。
+// 只按句末标点切（不按逗号）："检查完了，我继续修下一个" 整句都算最后一句，
+// 切成半句反而会把意图词切走。
+func toolOnlyLastSentence(s string) string {
+	rs := []rune(strings.TrimRight(s, " \t\r\n"))
+	start, end := 0, len(rs)
+	for i := len(rs) - 1; i >= 0; i-- {
+		if !strings.ContainsRune("。！？!?.", rs[i]) {
+			continue
+		}
+		if i == end-1 {
+			end = i // 尾部标点本身不算内容，继续往前找分隔点
+			continue
+		}
+		start = i + 1
+		break
+	}
+	if start >= end {
+		return ""
+	}
+	return string(rs[start:end])
 }
 
 // toolOnlyNudge 安全续写的指令。必须点明「别再用文字解释」——否则模型会再写一段
