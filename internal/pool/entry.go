@@ -81,6 +81,12 @@ type Status struct {
 	Nickname     string `json:"nickname,omitempty"`
 	Credits      int64  `json:"credits"`
 	CreditsTotal int64  `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
+	// CreditsRaw 禁用前最后一次成功刷新的真实快照（**不是可用量**）。
+	//
+	// 为什么两个字段并存（20261116）：调度器的轮换用法要据此判断「下一个该启用谁」，
+	// 所以真实值必须保留；但 /status 的 credits 语义是「当前可用量」，禁用号必须报 0
+	// —— 否则面板顶部的积分总计会把死钱算进可用额度。两者都要，故分开。
+	CreditsRaw int64 `json:"credits_raw,omitempty"`
 	// ReserveBlocked 是否因「保留积分」停牌（余额已知且 <= 阈值）：账号仍在池中、
 	// 照常跑定时任务，只是不接单。阈值 0 / 余额未知 → false。
 	ReserveBlocked bool `json:"reserve_blocked,omitempty"`

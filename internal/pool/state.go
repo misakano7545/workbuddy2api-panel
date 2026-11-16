@@ -856,8 +856,9 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Enterprise:               e.a.IsEnterprise(),
 		APIKey:                   e.a.IsAPIKey(),
 		Nickname:                 e.a.Nickname,
-		Credits:                  e.credits,
-		CreditsTotal:             e.creditsTotal,
+		Credits:                  activeCredits(e.credits, e.disabled),
+		CreditsTotal:             activeCredits(e.creditsTotal, e.disabled),
+		CreditsRaw:               e.credits,
 		CreditsExpiring:          e.creditsExpiring,
 		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 		CreditsEarliestRemaining: e.creditsEarliestRemaining,
@@ -923,6 +924,21 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 
 // disabledAtRFC3339 把 entry.disabledAt 转成对外字符串（零值返回空，JSON 里省略）。
 // 单独抽出来是为了两处一致：实时 statusOf 与持久化恢复后都要同一口径。
+
+// activeCredits 返回对外报告的积分量：**禁用账号一律为 0**。
+//
+// 为什么（20261116 实测）：/status 的语义是「当前可用量」，而账号被封后余额是
+// 最后一次成功刷新时的**冻结快照** —— 实测有账号封禁三周仍显示 4,552，且其中
+// 2,700 的积分包早已过期。把快照当可用量会让「总额 / 积分保底 / 路由排序」全部
+// 基于死数据，而且这种错误不报错，只是给出看似合理的数字。
+//
+// 暂停号不受影响：它照常保号、余额仍会刷新，只是暂不接流量，积分是真的。
+func activeCredits(v int64, disabled bool) int64 {
+	if disabled {
+		return 0
+	}
+	return v
+}
 func disabledAtRFC3339(e *entry) string {
 	if e.disabledAt.IsZero() {
 		return ""
