@@ -379,6 +379,38 @@ func TestSearchCompatCardRewrite(t *testing.T) {
 	if got := rec.Body.String(); got != searchCardBody {
 		t.Fatalf("非 DSH 响应应逐字节透传，得到 %s", got)
 	}
+
+	// ⑤ 同一响应里两张卡片：占位链接必须互不相同。客户端（实测 dsh-free-search）
+	// 按 url 精确去重，两张卡片共用一个链接时后一条会被直接丢掉（线上 10 条少 1 张）。
+	// 只有一张卡片时不加 fragment，见 ①。
+	rec = postRaw(dshUA, `{"query":"宁德时代 股价 比亚迪 股价","results":[`+
+		`{"title":"A股行情指标","url":"","snippet":"a"},`+
+		`{"title":"港股行情指标","url":"","snippet":"b"},`+
+		`{"title":"网页","url":"https://x.example/1","snippet":"c"}],`+
+		`"total_results":3}`)
+	var twoCards struct {
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &twoCards); err != nil {
+		t.Fatalf("响应不是 JSON: %v (%s)", err, rec.Body.String())
+	}
+	base := cardSearchBase + url.QueryEscape("宁德时代 股价 比亚迪 股价")
+	if len(twoCards.Results) != 3 {
+		t.Fatalf("条数不应变化: %v", twoCards.Results)
+	}
+	if got, want := twoCards.Results[0]["url"], base+"#card-1"; got != want {
+		t.Fatalf("第一张卡片 url 应为 %q，得到 %v", want, got)
+	}
+	if got, want := twoCards.Results[1]["url"], base+"#card-2"; got != want {
+		t.Fatalf("第二张卡片 url 应为 %q，得到 %v", want, got)
+	}
+	if twoCards.Results[0]["url"] == twoCards.Results[1]["url"] {
+		t.Fatalf("两张卡片的占位链接不能相同: %v", twoCards.Results[0]["url"])
+	}
+	if twoCards.Results[2]["url"] != "https://x.example/1" {
+		t.Fatalf("正常条目的 url 不应被改: %v", twoCards.Results[2]["url"])
+	}
+	assertDSHAcceptsResults(t, rec.Body.Bytes())
 }
 
 // assertDSHAcceptsResults 用 DSH 官方插件（@deepseek-ai/dsh-web-deepseek-api）的校验
