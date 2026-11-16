@@ -26,6 +26,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"log"
 	"strings"
 	"unicode/utf8"
@@ -347,22 +348,18 @@ func (r *continueReader) tryNarrationRetry() bool {
 		return false
 	}
 	r.narrationTries++
-	rc, status, _, terr := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta, nil)
-	if terr != nil || status >= 400 || rc == nil {
-		if rc != nil {
-			rc.Close()
-		}
+	// 异步换段：等待期内客户端只会收到 keepalive（见 openSegmentAsync）。
+	return r.openSegmentAsync(body, func(rc io.ReadCloser) {
+		r.seg++
+		r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
+		r.finish, r.tail = "", nil
+		// 本段 usage 快照归零：下一段的思考/正文构成单独计量。
+		r.segCompletion, r.segThink = 0, 0
+		log.Printf("[narration] acct=%s model=%s seg=%d 正文停在预告句（%dB）→ 续写剩余内容  尾部=%q",
+			logfmt.Label(r.acct.UID, r.acct.Nickname), bareModelOf(r.body), r.seg, r.text.Len(),
+			trimForLog(tailOf(r.text.String(), 60), 60))
+	}, func(status int, terr error) {
 		log.Printf("WARN: [narration] acct=%s seg=%d 续写请求失败（status=%d err=%v）→ 按原样收尾",
 			logfmt.Label(r.acct.UID, r.acct.Nickname), r.seg+1, status, terr)
-		return false
-	}
-	r.seg++
-	r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
-	r.finish, r.tail = "", nil
-	// 本段 usage 快照归零：下一段的思考/正文构成单独计量。
-	r.segCompletion, r.segThink = 0, 0
-	log.Printf("[narration] acct=%s model=%s seg=%d 正文停在预告句（%dB）→ 续写剩余内容  尾部=%q",
-		logfmt.Label(r.acct.UID, r.acct.Nickname), bareModelOf(r.body), r.seg, r.text.Len(),
-		trimForLog(tailOf(r.text.String(), 60), 60))
-	return true
+	})
 }
