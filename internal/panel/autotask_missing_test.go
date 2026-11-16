@@ -18,11 +18,12 @@ import (
 // missingCodeFake 假上游：任务列表只下发 codes 里的 code，其余请求一律 200 空信封。
 // 记录所有请求的 path+body，供断言「没有为不存在的任务打上游」。
 type missingCodeFake struct {
-	codes  []string
-	accept string // 列表响应下发的 accept_status；空 = 不带该字段（进度未知）
-	mu     sync.Mutex
-	seen   []string
-	mpErr  bool // true = mp 口径任务列表回 500（列表拿不到 → 不筛选）
+	codes   []string
+	mpCodes []string // mp 口径单独下发的 code；nil = 与 codes 相同（多数用例两路一致）
+	accept  string   // 列表响应下发的 accept_status；空 = 不带该字段（进度未知）
+	mu      sync.Mutex
+	seen    []string
+	mpErr   bool // true = mp 口径任务列表回 500（列表拿不到 → 不筛选）
 }
 
 func (f *missingCodeFake) handler() http.HandlerFunc {
@@ -39,6 +40,11 @@ func (f *missingCodeFake) handler() http.HandlerFunc {
 		f.mu.Lock()
 		f.seen = append(f.seen, buf.String())
 		mp, mpErr := r.Header.Get("X-Client-Platform") != "", f.mpErr
+		codes := f.codes
+		if mp && len(f.mpCodes) > 0 {
+			codes = f.mpCodes
+		}
+		accept := f.accept
 		f.mu.Unlock()
 
 		if strings.Contains(r.URL.Path, "/growth/tasks") {
@@ -46,11 +52,11 @@ func (f *missingCodeFake) handler() http.HandlerFunc {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
-			tasks := make([]any, 0, len(f.codes))
-			for _, c := range f.codes {
+			tasks := make([]any, 0, len(codes))
+			for _, c := range codes {
 				t := map[string]any{"task_code": c, "current": 0, "target": 1}
-				if f.accept != "" {
-					t["accept_status"] = f.accept
+				if accept != "" {
+					t["accept_status"] = accept
 					t["current"], t["target"] = 1, 1
 				}
 				tasks = append(tasks, t)
@@ -210,4 +216,38 @@ func (f *claimedFake) listCalls() int {
 	f.mu2.Lock()
 	defer f.mu2.Unlock()
 	return f.lists
+}
+
+// TestRunAutoAllMergesBothTaskLists 默认与 mp 两份列表不一致时必须合并：上游任务中心
+// 改版后 mp 口径不再是默认口径的超集，只拿 mp 列表会把默认列表里的任务判成「该账号
+// 没有此任务」，一项都不做（issue #243 的 Library_read）。
+func TestRunAutoAllMergesBothTaskLists(t *testing.T) {
+	oldGap, oldPoll := reportGap, claimPollGap
+	reportGap, claimPollGap = 0, 0
+	t.Cleanup(func() { reportGap, claimPollGap = oldGap, oldPoll })
+
+	f := &missingCodeFake{codes: []string{"Library_read"}, mpCodes: []string{"Sequential_Tasks_1"}}
+	p, a := missingCodePanel(t, f)
+	res := p.runAutoAllObserved(nil, a, nil)
+
+	for _, r := range res {
+		if r["task_code"] == "Library_read" && r["message"] == "该账号没有此任务" {
+			t.Fatalf("只在默认列表下发的任务被当成不存在（两路列表没有合并）: %+v", res)
+		}
+	}
+}
+
+// TestTaskByCodeFallsBackToMPList 回读单个任务时默认列表未命中要再问 mp 口径：
+// 常规任务也可能只在 mp 列表下发，不回落会把存在且未完成的任务判成「没有此任务」。
+func TestTaskByCodeFallsBackToMPList(t *testing.T) {
+	f := &missingCodeFake{codes: []string{"chat_5"}, mpCodes: []string{"Library_read"}}
+	p, a := missingCodePanel(t, f)
+
+	got, err := p.taskByCode(a, "Library_read")
+	if err != nil {
+		t.Fatalf("taskByCode: %v", err)
+	}
+	if got == nil {
+		t.Fatal("默认列表未命中时应回落 mp 口径找到该任务")
+	}
 }

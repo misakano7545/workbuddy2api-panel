@@ -253,6 +253,10 @@ var mpTaskCodes = map[string]bool{
 	"Sequential_Tasks_5": true,
 	"Sequential_Tasks_6": true,
 	"Sequential_Tasks_7": true,
+	// 关注「腾讯 WorkBuddy」公众号满 24h（上游 growth 文档归 mp 专属，见
+	// upstream.ListTasksMP 注释）：进度由服务端计时发放，没有可上报的客户端动作，
+	// 只能等它自然达标后领奖；登记在此是为了 accept/claim 走 mp 口径（issue #243）。
+	"wb_wechat_oa_subscribe_task": true,
 }
 
 // isMPTaskCode 报告任务是否小程序口径专属（决定回读/接受/领奖走 mp 变体）。
@@ -358,10 +362,11 @@ func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
 			return &tasks[i], nil
 		}
 	}
-	if isMPTaskCode(code) {
-		return p.taskByCodeMP(a, code)
-	}
-	return nil, nil
+	// 默认列表没找到就再按 mp 口径找一次：改版后常规任务也可能只在 mp 列表下发
+	// （issue #243 的 Library_read 就是这样），不回落会把存在的任务判成「该账号没有此任务」。
+	// 每次未命中多一次列表调用，只在未命中时发生（runAutoAll 的 have 快照已先挡掉不存在
+	// 的任务，那里不会走到这）。
+	return p.taskByCodeMP(a, code)
 }
 
 // claimPollAttempts / claimPollGap 达标回读的有界轮询参数。
@@ -1466,25 +1471,32 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 		return out
 	}
 
-	// have 本账号任务 code 全集（取自 mp 口径，它是默认口径的超集，见 upstream.ListTasksMP）。
-	// nil = 列表没拿到 → 不筛选，全部照旧跑（宁可白跑也不能因为一次读失败把所有任务跳过）。
+	// have 本账号任务 code 全集，必须由默认 + mp 两份列表**合并**（去重）。上游任务中心
+	// 改版后 mp 口径已不再是默认口径的超集，只拿 mp 列表会把默认列表里的任务全判成
+	// 「该账号没有此任务」，一项都不做（issue #243 的 Library_read）。
+	// nil = 两份都没拿到 → 不筛选，全部照旧跑（宁可白跑也不能因为一次读失败把所有任务跳过）。
 	// done 同源：阶段 0 已确认「已领奖/已锁定/已完成」的 code，逐项阶段直接跳过，
 	// 不再让 executeAutoTask 每项重新拉一次列表（issue #149：17 个任务 24 次列表查询，
 	// 背靠背打出后撞 429）。只信「明确已完成」的判定，进度未知的照旧逐项回读。
 	var have, done map[string]bool
+	absorb := func(tasks []upstream.Task) {
+		if have == nil {
+			have = make(map[string]bool, len(tasks))
+			done = make(map[string]bool, len(tasks))
+		}
+		for _, t := range tasks {
+			have[t.TaskCode] = true
+			if t.Claimed || t.Locked {
+				done[t.TaskCode] = true
+			}
+		}
+	}
 
 	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
 	emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受)"})
 	if ctx.Err() == nil {
 		if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil && ctx.Err() == nil {
-			if done == nil {
-				done = make(map[string]bool, len(tasks))
-			}
-			for _, t := range tasks {
-				if t.Claimed || t.Locked {
-					done[t.TaskCode] = true
-				}
-			}
+			absorb(tasks)
 			codes := acceptPendingCodes(tasks)
 			if len(codes) > 0 && ctx.Err() == nil {
 				emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受)"})
@@ -1516,14 +1528,7 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 		emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受-mp)"})
 		if ctx.Err() == nil {
 			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil && ctx.Err() == nil {
-				have = make(map[string]bool, len(mpTasks))
-				done = make(map[string]bool, len(mpTasks))
-				for _, t := range mpTasks {
-					have[t.TaskCode] = true
-					if t.Claimed || t.Locked {
-						done[t.TaskCode] = true
-					}
-				}
+				absorb(mpTasks)
 				mpCodes := acceptPendingCodes(mpTasks)
 				if len(mpCodes) > 0 && ctx.Err() == nil {
 					emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受-mp)"})
