@@ -274,8 +274,8 @@ func TestClientUA(t *testing.T) {
 //
 // 三条端点的差异（x-domain / x-no-* / x-device-token / Bearer）见下面各自的子测试。
 func TestEndpointHeaders(t *testing.T) {
-	wantGLUA := "workbuddy-ai/" + ClientVersionWorkBuddyGL + " workbuddy-ai/" + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLI
-	wantCNUA := "WorkBuddy/" + ClientVersionWorkBuddyCN + " WorkBuddy/" + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLI
+	wantGLUA := "workbuddy-ai/" + ClientVersionWorkBuddyGL + " workbuddy-ai/" + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLIGL
+	wantCNUA := "WorkBuddy/" + ClientVersionWorkBuddyCN + " WorkBuddy/" + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLICN
 
 	cases := []struct {
 		site   Site

@@ -25,15 +25,15 @@ func globalAuth() *auth.Auth {
 // v3ProbeUACNForTest 国内版 /v3/config 实测 UA（默认 Client、CN 账号）。
 //
 // 2026-10-30 国内 5.9.3 抓包复核：真机 /v3/config 是**两段式**
-// `WorkBuddy/5.9.3 CLI/2.165.0`。同一账号同一 token 用三段 / 两段分别打，
+// （版本段跟当前分发包，现 5.11.3 / CLI 2.176.0）。同一账号同一 token 用三段 / 两段分别打，
 // 返回逐字节相同的 64866 字节（61 模型 / agents=cli:16）——UA 家族不再分流。
-const v3ProbeUACNForTest = "WorkBuddy/5.9.3 CLI/2.165.0"
+const v3ProbeUACNForTest = "WorkBuddy/5.11.3 CLI/2.176.0"
 
 // TestUARealmBrand 首段恒驼峰 WorkBuddy，只有第二段品牌随 realm 变。
 //
 // 2026-10-30 双版本真机抓包（chat 链 /v2/chat/completions）：
 //
-//	CN 5.9.3     → WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+//	CN 5.11.3    → WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0
 //	global 5.9.4 → WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0
 //
 // 关键：首段永远是驼峰 `WorkBuddy`——官方 chat 走 OpenAI SDK 的 buildUserAgent，
@@ -43,7 +43,7 @@ func TestUARealmBrand(t *testing.T) {
 	c := New()
 
 	cn := &auth.Auth{UID: "u-c", AccessToken: "at"}
-	if got, want := c.userAgent(cn), "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"; got != want {
+	if got, want := c.userAgent(cn), "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0"; got != want {
 		t.Errorf("CN UA=%q want %q", got, want)
 	}
 	if got, want := c.userAgent(globalAuth()), "WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0"; got != want {
@@ -61,7 +61,7 @@ func TestUARealmBrand(t *testing.T) {
 //
 // 2026-10-30 双版本真机 /v3/config UA **同一形态**（两段、单品牌）：
 //
-//	CN 5.9.3     → WorkBuddy/5.9.3 CLI/2.165.0
+//	CN 5.9.3     → WorkBuddy/5.11.3 CLI/2.176.0
 //	global 5.9.4 → WorkBuddy/5.9.4 CLI/2.165.0
 //
 // 旧实现给 CN 发三段重复品牌（5.8.3 时代的抓包结论），5.9.3 已不成立：同 token
@@ -71,14 +71,14 @@ func TestV3ProbeUAOfficial(t *testing.T) {
 	c := New()
 	cn := &auth.Auth{UID: "u-c", AccessToken: "at"}
 
-	if got, want := c.v3ProbeUA(cn), "WorkBuddy/5.9.3 CLI/2.165.0"; got != want {
+	if got, want := c.v3ProbeUA(cn), "WorkBuddy/5.11.3 CLI/2.176.0"; got != want {
 		t.Errorf("CN v3ProbeUA=%q want %q", got, want)
 	}
 	if got, want := c.v3ProbeUA(globalAuth()), "WorkBuddy/5.9.4 CLI/2.165.0"; got != want {
 		t.Errorf("global v3ProbeUA=%q want %q", got, want)
 	}
 	// 第二路与主路同串（真机只有这一种形态；双路只为沿用 global 的并集调用链）。
-	if got, want := c.v3ProbeUALite(cn), "WorkBuddy/5.9.3 CLI/2.165.0"; got != want {
+	if got, want := c.v3ProbeUALite(cn), "WorkBuddy/5.11.3 CLI/2.176.0"; got != want {
 		t.Errorf("CN v3ProbeUALite=%q want %q", got, want)
 	}
 	// 任何一路都不许再出现 CodeBuddy 字面量。
@@ -243,7 +243,7 @@ func TestDesktopReportDomainIsHost(t *testing.T) {
 //
 // 2026-10-20 双版本真机抓包（同一台机器）：
 //
-//	CN     ideVersion 5.9.3 commit d4692421… releaseDate 1793093056315，**带** qimei36
+//	CN     ideVersion 5.11.3 commit ecace0f7… releaseDate 1794502169764，**带** qimei36
 //	global ideVersion 5.8.4 commit 73952edb48da… releaseDate 1792063084107，**无** qimei36
 //
 // 键数差集恰好只有 qimei36（CN 28 键 / GL 27 键）。此前不分档、恒用 GL 的三元组，
@@ -258,7 +258,7 @@ func TestDesktopReportFingerprintPerRealm(t *testing.T) {
 		qimei   bool
 	}{
 		{"CN", &auth.Auth{UID: "u-c", AccessToken: "at", Nickname: "cn"},
-			"5.9.3", "d46924219e79332f49c37ccebf27292f87001b19", 1793093056315, true},
+			"5.11.3", "ecace0f7028166695994300182295329b8b95449", 1794502169764, true},
 		{"global", globalAuth(),
 			"5.9.4", "fa0a0901906addaa1a4259f6df347388a5563ded", 1793288804029, false},
 	}
@@ -295,7 +295,7 @@ func TestDesktopReportFingerprintPerRealm(t *testing.T) {
 // TestDesktopUAPerRealm 桌面端 UA 的品牌段与客户端版本都跟着 realm 走。
 func TestDesktopUAPerRealm(t *testing.T) {
 	cn := &auth.Auth{UID: "u-c", AccessToken: "at"}
-	if got, want := desktopUAFor(cn), "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"; got != want {
+	if got, want := desktopUAFor(cn), "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0"; got != want {
 		t.Errorf("CN desktop UA=%q want %q", got, want)
 	}
 	if got, want := desktopUAFor(globalAuth()), "workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0"; got != want {
@@ -305,7 +305,7 @@ func TestDesktopUAPerRealm(t *testing.T) {
 	if got, want := (&Client{}).rpcUAFor(globalAuth()), "workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0"; got != want {
 		t.Errorf("global rpc UA=%q want %q", got, want)
 	}
-	if got, want := (&Client{}).rpcUAFor(cn), "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"; got != want {
+	if got, want := (&Client{}).rpcUAFor(cn), "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0"; got != want {
 		t.Errorf("CN rpc UA=%q want %q（CN 下与 chat 同值）", got, want)
 	}
 }

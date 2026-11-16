@@ -21,7 +21,7 @@ const (
 	// 取值来源：官方分发包 resources/install-manifest.json（appVersion）+ cli/product.json
 	// （genieVersion）。
 	//
-	//	国内版 WorkBuddy      5.9.3（endpoint www.workbuddy.cn，DefaultModelOptimizationOff=false）
+	//	国内版 WorkBuddy      5.11.3（endpoint www.workbuddy.cn，DefaultModelOptimizationOff=false）
 	//	国际版 WorkBuddy AI   5.9.4（endpoint www.workbuddy.ai，isOversea=true）
 	//
 	// 5.9.4 国际版取值证据（2026-10-30 拆包 + 真机抓包）：
@@ -30,12 +30,14 @@ const (
 	//   - 真机 X-IDE-Version: 5.9.4，/v3/config UA = `WorkBuddy/5.9.4 CLI/2.165.0`
 	//
 	// config upstream.client_version 可覆盖（空 = 按 realm 取内置默认）。
-	defaultClientVersionCN     = "5.9.3"
+	defaultClientVersionCN     = "5.11.3"
 	defaultClientVersionGlobal = "5.9.4"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI **2.165.0**
-	// （cli/package.json 的 @genie/agent-cli version；5.9.3 真机 UA 实测同值）。
+	// defaultCliVersion* 出站 UA 中 `CLI/<ver>` 段版本 = 各分发包内置的 @genie/agent-cli，
+	// **随包走、不是一个全局值**：CN 5.11.3 包带 2.176.0，国际分发包最新仍停在 5.9.4
+	// （带 2.165.0；2026-11 Homebrew workbuddy-ai cask version 仍是 5.9.4.42593613）。
 	// config upstream.cli_version 可覆盖。
-	defaultCliVersion = "2.165.0"
+	defaultCliVersionCN     = "2.176.0"
+	defaultCliVersionGlobal = "2.165.0"
 
 	// originRefererCN / originRefererGlobal 只给**web 层**（渲染器/登录页那类浏览器语义
 	// 的请求）用，RPC 层不发（见 CommonHeaders 注释）。
@@ -59,7 +61,7 @@ func originRefererFor(a *auth.Auth) string {
 }
 
 // clientVersion 生效的 WorkBuddy 客户端版本：Client.ClientVersion 非空则取之，
-// 否则按 realm 取内置默认（CN 5.8.3 / global 5.8.4）。
+// 否则按 realm 取内置默认（CN 5.11.3 / global 5.9.4）。
 func (c *Client) clientVersion(a *auth.Auth) string {
 	if c != nil && c.ClientVersion != "" {
 		return c.ClientVersion
@@ -70,12 +72,20 @@ func (c *Client) clientVersion(a *auth.Auth) string {
 	return defaultClientVersionCN
 }
 
-// cliVersion 生效的 CLI 版本：Client.CliVersion 非空则取之，否则内置默认 defaultCliVersion。
-func (c *Client) cliVersion() string {
+// defaultCliVersionFor 按 realm 取内置 CLI 版本（分发包自带，两版不同档）。
+func defaultCliVersionFor(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		return defaultCliVersionGlobal
+	}
+	return defaultCliVersionCN
+}
+
+// cliVersion 生效的 CLI 版本：Client.CliVersion 非空则取之，否则按 realm 取内置默认。
+func (c *Client) cliVersion(a *auth.Auth) string {
 	if c != nil && c.CliVersion != "" {
 		return c.CliVersion
 	}
-	return defaultCliVersion
+	return defaultCliVersionFor(a)
 }
 
 // defaultWorkBuddyUAFor 组装默认客户端出站 UA（官方 `buildUserAgent` 形态）：
@@ -83,11 +93,11 @@ func (c *Client) cliVersion() string {
 //
 // 首段**恒为驼峰 `WorkBuddy`**，只有第二段随 realm 换品牌：
 //
-//	CN 5.9.3     → WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+//	CN 5.11.3    → WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0
 //	global 5.8.4 → WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.165.0
 //
 // 2026-10-28 国内版 **5.9.3** 真机抓包复核（/v2/chat/completions ×7）实测仍是上式，
-// 客户端与 CLI 版本段同步升到 5.9.3 / 2.165.0。
+// 客户端与 CLI 版本段同步升到 5.11.3 / 2.176.0。
 //
 // 2026-10-21 国际版 5.8.4 GUI 真机抓包（/v2/chat/completions，主对话 + 标题生成
 // 两条）实测即为上式：官方 chat 走 OpenAI SDK（请求带 x-stainless-* 头），SDK 的
@@ -100,7 +110,7 @@ func (c *Client) cliVersion() string {
 // 官方无任何 UA 随机化，故默认确定性。
 func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {
 	ver := c.clientVersion(a)
-	return "WorkBuddy/" + ver + " " + uaBrandFor(a) + "/" + ver + " CLI/" + c.cliVersion()
+	return "WorkBuddy/" + ver + " " + uaBrandFor(a) + "/" + ver + " CLI/" + c.cliVersion(a)
 }
 
 // uaBrandFor 出站 UA 的**第二段**品牌：按 realm 取，两版形态不同（不同分发包）。
@@ -134,7 +144,7 @@ func (c *Client) defaultWorkBuddyUA() string {
 //
 // 2026-10-30 双版本真机抓包（国际 5.9.4 / 国内 5.9.3）**两版同一形态**：
 //
-//	CN 5.9.3     → WorkBuddy/5.9.3 CLI/2.165.0
+//	CN 5.11.3    → WorkBuddy/5.11.3 CLI/2.176.0
 //	global 5.9.4 → WorkBuddy/5.9.4 CLI/2.165.0
 //
 // 都是两段、单品牌。旧实现在 CN 下发三段重复品牌（`WorkBuddy/<ver> WorkBuddy/<ver>
@@ -155,7 +165,7 @@ func (c *Client) v3ProbeUA(a *auth.Auth) string {
 // 退化为重复请求，无害）。**不要**据此认为存在「按 UA 分族的第三族模型」：
 // 2026-10-30 实测国内 5.9.3 两族返回完全相同，global 侧两路本来就同串。
 func (c *Client) v3ProbeUALite(a *auth.Auth) string {
-	return "WorkBuddy/" + c.clientVersion(a) + " CLI/" + c.cliVersion()
+	return "WorkBuddy/" + c.clientVersion(a) + " CLI/" + c.cliVersion(a)
 }
 
 // rpcUAFor 桌面端 **RPC/REST 层**出站 UA（不是 chat 那条 SDK 链）。
@@ -168,7 +178,7 @@ func (c *Client) v3ProbeUALite(a *auth.Auth) string {
 // RPC 族覆盖 /v2/report、/v2/chat/busy、/console/as/*、/v2/plugin/auth/token/refresh、
 // /v2/as/scheduler/tasks、/v2/user-asset/*、/portal/*：
 //
-//	CN 5.9.3     → WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+//	CN 5.11.3    → WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0
 //	global 5.9.4 → workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0
 //
 // CN 下与 userAgent() 同值（品牌段本来就是驼峰），只有 global 会分叉——旧实现让
@@ -179,7 +189,7 @@ func (c *Client) rpcUAFor(a *auth.Auth) string {
 	}
 	ver := c.clientVersion(a)
 	brand := uaBrandFor(a)
-	return brand + "/" + ver + " " + brand + "/" + ver + " CLI/" + c.cliVersion()
+	return brand + "/" + ver + " " + brand + "/" + ver + " CLI/" + c.cliVersion(a)
 }
 
 // userAgent 返回当前出站 UA（客户端出站路径：chat/refresh/FetchModels）。
@@ -472,7 +482,7 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	// `WorkBuddy/<ver>`，第二段才是品牌 slug——与 RPC/REST 层（首段即 slug，见
 	// rpcUAFor）不同。CommonHeaders 已按 RPC 形态设过，这里按 chat 形态覆盖。
 	//
-	//	CN 5.9.3     → WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+	//	CN 5.11.3    → WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0
 	//	global 5.9.4 → WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0
 	//
 	// 2026-10-30 双版本真机 /v2/chat/completions 实测即上式（同一会话里 RPC 族

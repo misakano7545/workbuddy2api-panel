@@ -4,6 +4,8 @@
 // 键集**固化成黄金值，再用生产代码真实构造请求逐条比对。任何一头多发/漏发都会红。
 //
 // 抓包环境：国内版 WorkBuddy 5.9.3（CLI 2.165.0），CN 账号，www.workbuddy.cn。
+// 头集与形态全部来自那次抓包；UA/版本段的取值随后续分发包上调（现 5.11.3 / 2.176.0），
+// 只跟常量走，不代表头集也来自新版抓包。
 // 每个路径取的是该路径全部样本的**交集**（排除客户端按场景才加的偶发头，如 auxiliary
 // 链才有的差异），再剔除三类与网关环境相关、不该进黄金集的键：
 //
@@ -62,9 +64,9 @@ var cnGoldenCases = []cnGolden{
 			"x-agent-runtime":     "local-agent",
 			"x-agent-type":        "main",
 			"x-codebuddy-request": "1",
-			"x-ide-version":       "5.9.3",
+			"x-ide-version":       "5.11.3",
 			"x-product":           "SaaS",
-			"user-agent":          "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0",
+			"user-agent":          "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0",
 		},
 		// 客户端 chat 从不上浏览器语义头（node fetch，无同源概念）。
 		absent: []string{"origin", "referer", "accept-language", "x-machine-id", "x-session-id"},
@@ -80,7 +82,7 @@ var cnGoldenCases = []cnGolden{
 			"accept":       "application/json, text/plain, */*",
 			"content-type": "application/json;charset=UTF-8",
 			"x-product":    "SaaS",
-			"user-agent":   "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0",
+			"user-agent":   "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0",
 		},
 		// 2026-10-30 复核：CN 5.9.3 全部 26 条 /v2/report（含登录前 2 条）**都没有**
 		// X-Requested-With。国际版那 10 条带它的样本属于 UA 首段驼峰的渲染器侧另一族，
@@ -98,7 +100,7 @@ var cnGoldenCases = []cnGolden{
 			"accept":       "application/json, text/plain, */*",
 			"content-type": "application/json",
 			"x-product":    "SaaS",
-			"user-agent":   "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0",
+			"user-agent":   "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0",
 		},
 		absent: []string{
 			"x-codebuddy-request", "x-conversation-id", "x-conversation-request-id",
@@ -120,7 +122,7 @@ var cnGoldenCases = []cnGolden{
 			"accept":                "application/json, text/plain, */*",
 			"x-auth-refresh-source": "plugin",
 			"x-product":             "SaaS",
-			"user-agent":            "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0",
+			"user-agent":            "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0",
 		},
 		absent: []string{"origin", "referer", "accept-language", "x-codebuddy-request", "x-requested-with"},
 	},
@@ -152,7 +154,7 @@ var cnGoldenCases = []cnGolden{
 			"accept":    "application/json, text/plain, */*",
 			"x-product": "SaaS",
 			// 2026-10-30 复核：真机 /v3/config 是两段单品牌（同 token 三段/两段返回相同）。
-			"user-agent": "WorkBuddy/5.9.3 CLI/2.165.0",
+			"user-agent": "WorkBuddy/5.11.3 CLI/2.176.0",
 		},
 		absent: []string{"origin", "referer", "accept-language", "x-codebuddy-request", "x-requested-with"},
 	},

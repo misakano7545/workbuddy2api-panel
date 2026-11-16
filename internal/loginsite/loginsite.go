@@ -27,7 +27,7 @@ const ClientVersion = "2.176.0"
 
 // ClientUA 设备授权链路的 User-Agent（CodeBuddy CLI 家族形态）。
 //
-// 仅作**未复核站点**的兜底：WorkBuddy 桌面端（5.9.3 国内 / 5.9.4 国际）的设备码
+// 仅作**未复核站点**的兜底：WorkBuddy 桌面端（5.11.3 国内 / 5.9.4 国际）的设备码
 // 三端点实测发的是桌面端 RPC 族 UA，见 Site.UserAgent。
 const ClientUA = "CLI/" + ClientVersion + " CodeBuddy/" + ClientVersion
 
@@ -35,11 +35,13 @@ const ClientUA = "CLI/" + ClientVersion + " CodeBuddy/" + ClientVersion
 //
 // 2026-10-30 拆包：cli/product.json genieVersion / package.json version
 // + resources/install-manifest.json appVersion 三处一致。
-// CLI 段恒 2.165.0（cli/package.json 的 @genie/agent-cli），与业务链路同一个值。
+// CLI 段 = 该包 cli/package.json 的 @genie/agent-cli，**随包走**：CN 5.11.3 带
+// 2.176.0，国际分发包最新仍停在 5.9.4（带 2.165.0）。
 const (
-	ClientVersionWorkBuddyCN  = "5.9.3"
+	ClientVersionWorkBuddyCN  = "5.11.3"
 	ClientVersionWorkBuddyGL  = "5.9.4"
-	ClientVersionBuiltinCLI   = "2.165.0"
+	ClientVersionBuiltinCLICN = "2.176.0"
+	ClientVersionBuiltinCLIGL = "2.165.0"
 )
 
 // 站点标识（对外 API 取值）。
@@ -69,7 +71,7 @@ type Site struct {
 	// 2026-10-30 真机实测：这三条走的是桌面端 **RPC 族** UA，与业务链路同源，
 	// 不是 `CLI/<ver> CodeBuddy/<ver>`：
 	//
-	//	CN 5.9.3   WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+	//	CN 5.11.3  WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0
 	//	GL 5.9.4   workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0
 	//
 	// 空 = 保留 ClientUA（CodeBuddy CLI 家族），仅供未复核的站点兜底。
@@ -96,7 +98,7 @@ type Site struct {
 // authentication.attributes.platform（**不是** 顶层 platform 字段，那个是 "CLI"）。
 // 2026-10-30 真机实测：
 //
-//	CN 5.9.3   POST /v2/plugin/auth/state?platform=workbuddy
+//	CN 5.11.3  POST /v2/plugin/auth/state?platform=workbuddy
 //	GL 5.9.4   POST /v2/plugin/auth/state?platform=workbuddy-ai
 //
 // 旧实现一律发 platform=CLI —— 取了顶层字段，两个真机形态都不符。
@@ -105,7 +107,7 @@ var (
 		ID: SiteCN, Realm: RealmCN,
 		API: "https://copilot.tencent.com", Origin: "https://www.codebuddy.cn",
 		Platform:  "workbuddy",
-		UserAgent: "WorkBuddy/" + ClientVersionWorkBuddyCN + " WorkBuddy/" + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLI,
+		UserAgent: "WorkBuddy/" + ClientVersionWorkBuddyCN + " WorkBuddy/" + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLICN,
 		Domain:    "www.workbuddy.cn",
 		Version:   ClientVersionWorkBuddyCN,
 	}
@@ -117,7 +119,7 @@ var (
 		// workbuddy.ai 站点的真机口径，而不是退回 CodeBuddy CLI 家族：
 		// 该包 externalDomain 里 codebuddy.ai 与 workbuddy.ai 并列，同一份 auth 属性。
 		Platform:  "workbuddy-ai",
-		UserAgent: "workbuddy-ai/" + ClientVersionWorkBuddyGL + " workbuddy-ai/" + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLI,
+		UserAgent: "workbuddy-ai/" + ClientVersionWorkBuddyGL + " workbuddy-ai/" + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLIGL,
 		Domain:    "www.codebuddy.ai",
 		Version:   ClientVersionWorkBuddyGL,
 	}
@@ -125,7 +127,7 @@ var (
 		ID: SiteWorkBuddy, Realm: RealmGlobal,
 		API: "https://www.workbuddy.ai", Origin: "https://www.workbuddy.ai",
 		Platform:  "workbuddy-ai",
-		UserAgent: "workbuddy-ai/" + ClientVersionWorkBuddyGL + " workbuddy-ai/" + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLI,
+		UserAgent: "workbuddy-ai/" + ClientVersionWorkBuddyGL + " workbuddy-ai/" + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLIGL,
 		Domain:    "www.workbuddy.ai",
 		Version:   ClientVersionWorkBuddyGL,
 	}
@@ -364,7 +366,7 @@ func CodeFatal(code int) bool {
 // DecorateAuthURL 按真机实测补齐授权链接参数（对应官方的 appendHostLoginJourneyParams /
 // appendAuthUrlParams / appendLoginPageHintParams）：
 //
-//	version=<site.Version>      官方写自己的包版本（CN 5.9.3 / GL 5.9.4，与 UA 同源）；
+//	version=<site.Version>      官方写自己的包版本（CN 5.11.3 / GL 5.9.4，与 UA 同源）；
 //	                            CN 授权页会把它转给 console/auth/risk-context 并编进回调
 //	loginSessionId=<id>         官方客户端本地生成的登录会话标识；只对 platform=workbuddy
 //	                            （CN）追加，授权页读它并原样带进 signin-callback
@@ -372,7 +374,7 @@ func CodeFatal(code int) bool {
 //
 // 2026-11-14 两侧真机链接原文（脱敏）：
 //
-//	CN : /login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>
+//	CN : /login?platform=workbuddy&state=…&version=5.11.3&loginSessionId=<uuid>
 //	          &traceparent=00-…&login_owner_id=<uuid>&ww_device_nonce=<nonce>
 //	GL : /login/?platform=workbuddy-ai&state=…&version=5.9.4
 //

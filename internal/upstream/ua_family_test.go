@@ -29,7 +29,7 @@ func TestRPCUAFirstSegmentIsSlug(t *testing.T) {
 		t.Errorf("国际 RPC UA=%q want %q", got, want)
 	}
 	// CN 下 RPC 与 chat 同值（品牌段本来就是驼峰），这是唯一允许相等的组合。
-	if got, want := c.rpcUAFor(cn), "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"; got != want {
+	if got, want := c.rpcUAFor(cn), "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0"; got != want {
 		t.Errorf("国内 RPC UA=%q want %q", got, want)
 	}
 

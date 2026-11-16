@@ -44,7 +44,7 @@ func TestNormalizeHeaderSpelling(t *testing.T) {
 	req.Header.Set("X-Request-Id", "r1")
 	req.Header.Set("X-Ide-Version", "5.9.3")
 	req.Header.Set("X-Trace-Id", "t1")
-	req.Header.Set("User-Agent", "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0")
+	req.Header.Set("User-Agent", "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0")
 	req.Header.Set("Accept-Encoding", "gzip, compress, deflate, br")
 	req.Header.Set("X-Enterprise-Id", "ent-1") // 表外，应原样保留
 
@@ -63,7 +63,7 @@ func TestNormalizeHeaderSpelling(t *testing.T) {
 		"X-Request-ID":          "r1",
 		"X-IDE-Version":         "5.9.3",
 		"X-Trace-ID":            "t1",
-		"User-Agent":            "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0",
+		"User-Agent":            "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0",
 		"Accept-Encoding":       "gzip, compress, deflate, br",
 		"X-Enterprise-Id":       "ent-1",
 	}

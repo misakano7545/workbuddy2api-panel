@@ -22,7 +22,8 @@ func (t uaCaptureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 // TestUserAgentDefaultEmptyKeepsClientUA 默认（UserAgent/client_name 空）行为：
 // chat/refresh 路径 UA=默认 WorkBuddy 三段式；activities 上报（/v2/report）自
 // 2026-10-28 起改走 **chatBase**，UA 也随之变成同样的三段式——5.9.3 真机 /v2/report
-// 实测 UA 是 `WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0`，不是 billing 的 axios。
+// 实测就是三段式（版本段跟当前分发包，现 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`），
+// 不是 billing 的 axios。
 // 真正的 billing 端点（checkin / balance / 明细）仍走 axios/1.16.1（billingUA）。
 // 显式 client_name="SaaS" 才还原"billing 不设 UA"的旧行为。
 func TestUserAgentDefaultEmptyKeepsClientUA(t *testing.T) {
@@ -163,9 +164,9 @@ func TestFetchModelsUsesConfiguredUA(t *testing.T) {
 // --- A 段：UA 对齐官方 WorkBuddy 三段式 ---
 
 const (
-	defaultUAString      = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"
+	defaultUAString      = "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0"
 	explicitString       = "MyCustomAgent/3.1"
-	clientVerUAString    = "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.165.0"
+	clientVerUAString    = "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.176.0"
 	billingUAWorkBuddy   = "axios/1.16.1"
 	billingUACustomVer   = "axios/1.16.1"
 	billingUAAgentString = "BillingAgent/1"

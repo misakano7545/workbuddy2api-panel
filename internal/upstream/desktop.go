@@ -49,20 +49,24 @@ const (
 	// **按 realm 分开**（2026-10-30 双版本抓包实测）：两版上报的版本三元组不同，
 	// 且 commit/releaseDate 是打包期常量、无法从版本号推导：
 	//
-	//	CN 5.9.3     ideVersion 5.9.3 commit d4692421… releaseDate 1793093056315
+	//	CN 5.11.3    ideVersion 5.11.3 commit ecace0f7… releaseDate 1794502169764
 	//	global 5.9.4 ideVersion 5.9.4 commit fa0a0901… releaseDate 1793288804029
 	//
-	// CN 三元组在 2026-10-28 按 5.9.3 真机 /v2/report 重新采集（commit / releaseDate /
-	// ideVersion / extVersion 逐字取自 7 条上报事件，与分发包 cli/product.json 的
-	// commit + date 交叉一致）：
-	//   commit      = d46924219e79332f49c37ccebf27292f87001b19
-	//   releaseDate = 1793093056315
+	// CN 三元组 2026-11-16 按 5.11.3 分发包重采（来源同旧值口径：cli/product.json 的
+	// genieVersion / commit / date，与安装包文件名里的短 hash `ecace0f7` 交叉一致）：
+	//   genieVersion = 5.11.3
+	//   commit       = ecace0f7028166695994300182295329b8b95449
+	//   date         = 2026-11-12T16:49:29.764Z → 1794502169764
+	//
+	// 旧值（5.9.3：d4692421… / 1793093056315）来自真机 /v2/report 的 7 条事件，
+	// 与当时的 product.json 交叉一致；新值只有静态证据（未抓 5.11.3 的包上报），
+	// releaseDate 取 product.json 的 date 而非报告事件值，两者历史上相差 ~5s。
 	//
 	// 此前不分档、恒用 global 的三元组，等于给每个国内号都盖了国际版的包指纹
 	// （版本号与安装清单自相矛盾），是最容易被设备侧写识破的一处。
-	desktopVersionCN         = "5.9.3"
-	desktopCommitCN          = "d46924219e79332f49c37ccebf27292f87001b19"
-	desktopReleaseDateCN     = int64(1793093056315)
+	desktopVersionCN         = "5.11.3"
+	desktopCommitCN          = "ecace0f7028166695994300182295329b8b95449"
+	desktopReleaseDateCN     = int64(1794502169764)
 	// global 三元组按 5.9.4 国际分发包重采（2026-10-30 拆包）：
 	//   cli/product.json commit = fa0a0901906addaa1a4259f6df347388a5563ded
 	//   cli/product.json date   = 2026-10-29T15:46:44.029Z → 1793288804029
@@ -76,12 +80,12 @@ const (
 func (c *Client) desktopBase(a *auth.Auth) string { return c.chatBase(a) }
 
 // desktopUAFor 桌面端 UA：两段品牌一致（与业务链路同源，都是 SDK 的 buildUserAgent）。
-// CN 5.9.3 → `WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0`（真机实测）；
+// CN 5.11.3 → `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`；
 // global 5.9.4 → `workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`（真机实测）。
 func desktopUAFor(a *auth.Auth) string {
 	ver, _, _ := desktopTriple(a)
 	brand := uaBrandFor(a)
-	cli := defaultCliVersion
+	cli := defaultCliVersionFor(a)
 	return brand + "/" + ver + " " + brand + "/" + ver + " CLI/" + cli
 }
 
@@ -358,7 +362,7 @@ func DesktopAutomationCreateEvent(name string) DesktopEvent {
 //	Accept: application/json, text/plain, */*
 //	Content-Type: application/json;charset=UTF-8
 //	X-Request-ID / X-Product: SaaS
-//	User-Agent: WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+//	User-Agent: WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0
 //	Authorization / X-User-Id / X-Domain: www.workbuddy.cn
 //
 // **没有** sec-ch-ua / Sec-Fetch-* / Origin / Referer / x-client-platform。
