@@ -119,8 +119,11 @@ type continueReader struct {
 
 	starvedTried bool // 空截断救援已用（每请求一次；见 tryStarvedRetry）
 
-	// narrationTried 预告式收尾的救援续写已用（每请求一次；见 tryNarrationRetry）。
-	narrationTried bool
+	// narrationTries 预告式收尾的救援续写已用次数（上限 narrationMaxRescues；
+	// 见 tryNarrationRetry）。上限 2 而不是 1：长正文的模型常常连写两段预告
+	// （"我先说明结论，然后我将开始修改…"，再停一次），只给一次机会等于第二段
+	// 又回到客户端手上——issue #245 的真实形态。总量仍由 outputCap 兜底。
+	narrationTries int
 
 	// toolOnlyTried 安全续写（只采纳工具调用）已用（每请求一次；见 tryToolOnlyRescue）。
 	toolOnlyTried bool
@@ -613,7 +616,7 @@ func (r *continueReader) endSegment(sawDone bool) {
 	// 救援效果的可观测性：本次命中的是「预告句收尾」时，记录续写后到底拿到了什么。
 	// 没有这行就分不清「救回来是工具调用（回合继续）」和「只是多打了一段正文」——
 	// 线上实测命中率能到请求量的三成，必须能算清楚收益再决定判据要不要收。
-	if r.narrationTried {
+	if r.narrationTries > 0 {
 		log.Printf("[narration] acct=%s model=%s 结果：共 %d 段，工具调用=%v，正文合计=%dB",
 			logfmt.Label(r.acct.UID, r.acct.Nickname), bareModelOf(r.body), r.seg+1, r.toolSeen, r.text.Len())
 	}

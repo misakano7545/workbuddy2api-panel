@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"log"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
@@ -36,6 +37,12 @@ import (
 // 强调不要重复；这条针对「自己以为说完了」，必须点明「你停在一句预告上」，
 // 否则模型会以为任务已完成而再重复一遍结论。
 const narrationNudge = "你上一条回复停在一句预告（例如以冒号结尾的「……：」）上就结束了，剩余内容还没写。请紧接着把剩下的部分写完：需要查看文件、执行命令或调用工具就直接调用，不要重复已经写过的内容，不要重新开头，不要道歉或解释。"
+
+// narrationPromiseNudge 尾部是「我将…/我会…」这类承诺句时用这条。
+//
+// 不能复用上一句：那条说「停在冒号上」，而承诺句既没有冒号也不是预告排版，模型会
+// 反过来跟你争「上一条并未中断」（真机实测原话），争论也会一并写进客户端正文。
+const narrationPromiseNudge = "你上一条回复最后停在「我将…」「我会…」这类承诺句上就结束了，承诺的动作没有执行。请直接执行它：需要查看文件、执行命令或调用工具就直接调用，不要解释为什么停下，不要重复已经写过的内容，不要重新开头。"
 
 // toolCallMarkupMarkers 模型把工具调用写成**文本标记**时用到的特征串。
 //
@@ -125,7 +132,25 @@ var userYieldMarkersEN = []string{
 	"awaiting your", "waiting for your", "confirm before", "shall i ",
 }
 
-// textYieldsToUser 报告这段正文是否在「等用户回话」：以问号收尾，或含请确认类措辞。
+// yieldTailBytes 判「等用户回话」时最多扫末尾这么长的窗口（最后一句过长时兜底）。
+const yieldTailBytes = 200
+
+// yieldTail 取「最后一次句读之后」的窗口：交回控制权总是最后一句里的事，中段甚至
+// 紧邻尾部的「是否需要」都可能是技术叙述（真实样本：结尾是「…为是否需要更换提供量化
+// 支撑。\n\n---\n\n我将开始修改 check.go」，含 200B 窗口也挡掉了救援）。
+// 按最后一句判，承诺句那一段里没有措辞就照常救。
+func yieldTail(s string) string {
+	// 先剥掉末尾的句读：末句完整结束（"…请确认后我再发送。"）时，最后那个句号后面
+	// 是空的，按它切会切出空串，等于放弃判据。
+	s = strings.TrimRight(s, "。！？!?\n ")
+	if i := strings.LastIndexAny(s, "。！？!?\n"); i >= 0 {
+		_, n := utf8.DecodeRuneInString(s[i:])
+		s = s[i+n:]
+	}
+	return tailOf(strings.TrimSpace(s), yieldTailBytes)
+}
+
+// textYieldsToUser 报告这段正文是否在「等用户回话」：以问号收尾，或末句含请确认类措辞。
 //
 // 注意问号收尾在 narrationTailSuspends 里被判为「说完了」（句末标点），所以这条判据
 // 必须独立成立——它挡的是「模型主动提问后停下」这个正确行为，而不是「话没说完」。
@@ -137,12 +162,13 @@ func textYieldsToUser(text string) bool {
 	if strings.HasSuffix(t, "？") || strings.HasSuffix(t, "?") {
 		return true
 	}
+	tail := yieldTail(t)
 	for _, m := range userYieldMarkers {
-		if strings.Contains(t, m) {
+		if strings.Contains(tail, m) {
 			return true
 		}
 	}
-	low := strings.ToLower(t)
+	low := strings.ToLower(tail)
 	for _, m := range userYieldMarkersEN {
 		if strings.Contains(low, m) {
 			return true
@@ -259,7 +285,14 @@ func bodyToolShape(body []byte) (declared, toolTurn bool) {
 	return declared, false
 }
 
-// tryNarrationRetry 预告式收尾的救援续写（每请求一次）。
+// narrationMaxRescues 每个请求最多救几次预告式收尾。
+//
+// 2 而不是 1：长正文的模型常常连写两段预告（"我先说明结论，然后我将开始修改…"），
+// 只给一次机会时第二段又原样回到客户端。上限仍存在——不设上限会让「反复预告」的
+// 模型把一条请求拖成无限续写，且每次续写都把整个上下文重发一遍（费用翻倍）。
+const narrationMaxRescues = 2
+
+// tryNarrationRetry 预告式收尾的救援续写（每请求最多 narrationMaxRescues 次）。
 //
 // 与另外两条救援的分工：
 //   - tryStarvedRetry：本轮正文 0B（思考吃光/思考完直接收尾）；
@@ -269,7 +302,7 @@ func bodyToolShape(body []byte) (declared, toolTurn bool) {
 // 返回 true 表示已换到新段继续读，调用方直接 return。
 func (r *continueReader) tryNarrationRetry() bool {
 	switch {
-	case r.narrationTried, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
+	case r.narrationTries >= narrationMaxRescues, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
 		return false
 	case r.finish != "stop":
 		return false
@@ -295,15 +328,25 @@ func (r *continueReader) tryNarrationRetry() bool {
 	if !narrationTailSuspends(txt) {
 		return false
 	}
+	// 结构未闭合（截断的调用标记 / 未闭合代码块）只补一次：残缺标记留在前缀里，
+	// 追加正文补不完它（续写段写多少都还是半截），再救也只是白花一次上游调用。
+	if narrationTailStructurallyOpen(txt) && r.narrationTries >= 1 {
+		return false
+	}
 	declared, toolTurn := bodyToolShape(r.body)
 	if !declared || !toolTurn {
 		return false
 	}
-	body, err := r.continuationBodyWithNudge(narrationNudge)
+	nudge := narrationNudge
+	if !narrationTailPunctuated(txt) {
+		// 无标点悬停（承诺句）用另一条指令：说成「停在冒号上」模型会反过来争辩。
+		nudge = narrationPromiseNudge
+	}
+	body, err := r.continuationBodyWithNudge(nudge)
 	if err != nil {
 		return false
 	}
-	r.narrationTried = true
+	r.narrationTries++
 	rc, status, _, terr := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta, nil)
 	if terr != nil || status >= 400 || rc == nil {
 		if rc != nil {

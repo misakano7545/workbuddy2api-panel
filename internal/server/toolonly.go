@@ -166,7 +166,7 @@ func lastMessageIsToolResult(body []byte) bool {
 // tryToolOnlyRescue 安全续写：只采纳工具调用，正文一律丢弃。
 func (r *continueReader) tryToolOnlyRescue() bool {
 	switch {
-	case r.toolOnlyTried, r.narrationTried, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
+	case r.toolOnlyTried, r.narrationTries > 0, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
 		return false
 	case r.finish != "stop":
 		return false
