@@ -169,6 +169,24 @@ func narrationTailStructurallyOpen(text string) bool {
 	return strings.Count(strings.TrimRight(text, " \t\r\n"), "```")%2 == 1
 }
 
+// tailHangPunct 标点型悬停的收尾符（后面必然还有东西）。
+const tailHangPunct = "：:，,、—–…（(【["
+
+// narrationTailPunctuated 尾部是否「标点型悬停」：停在冒号/逗号/顿号/破折号/省略号/
+// 左括号上。这类形态是排版习惯（「说明 + 列表：」几乎总以冒号收尾，issue #209），
+// 只有它们才受 narrationMaxBytes 约束——正文越长越可能是正常排版。
+//
+// 与之相对的无标点悬停（"我将开始修改…"、"我会…"）是句子被掐断，与正文长度无关，
+// 长会话里恰好最常见；按整段长度挡掉等于一条都不救（issue #245）。
+func narrationTailPunctuated(text string) bool {
+	t := strings.TrimRight(text, " \t\r\n")
+	if t == "" {
+		return false
+	}
+	rs := []rune(t)
+	return strings.ContainsRune(tailHangPunct, rs[len(rs)-1])
+}
+
 // narrationTailSuspends 正文尾部是否「话没说完」。
 //
 // 只认结构性的收尾符，不猜测语义：
@@ -202,7 +220,7 @@ func narrationTailSuspends(text string) bool {
 	}
 	rs := []rune(t)
 	last := rs[len(rs)-1]
-	if strings.ContainsRune("：:，,、—–…（(【[", last) {
+	if strings.ContainsRune(tailHangPunct, last) {
 		return true
 	}
 	// 句末标点与收尾符：正常说完的形态。
@@ -267,9 +285,11 @@ func (r *continueReader) tryNarrationRetry() bool {
 	if textYieldsToUser(txt) {
 		return false
 	}
-	// 长度闸门：预告句实测 40~200B，400B 已覆盖；再长的「停在冒号上」多半是正常排版。
-	// 结构上确实没写完的（未闭合代码块 / 截断的调用标记）不受此限。
-	if !narrationTailStructurallyOpen(txt) && len(txt) > narrationMaxBytes {
+	// 长度闸门只约束「标点型悬停」：那是排版习惯（说明 + 列表以冒号收尾，issue #209），
+	// 整段越长越可能是正常排版。无标点悬停是句子被掐断（"我将…"/"我会…"），与正文
+	// 长度无关——长会话里恰好最常见，按整段长度挡掉会导致一条都不救（issue #245）。
+	// 结构上确实没写完的（未闭合代码块 / 截断的调用标记）同样不受此限。
+	if narrationTailPunctuated(txt) && !narrationTailStructurallyOpen(txt) && len(txt) > narrationMaxBytes {
 		return false
 	}
 	if !narrationTailSuspends(txt) {

@@ -252,3 +252,30 @@ func TestNarrationShortLeadInStillRescued(t *testing.T) {
 		t.Fatalf("短预告应救一次，实际 %d 次", len(*reqs))
 	}
 }
+
+// issue #245：长正文 + 无标点悬停必须救。长度闸门只该约束标点型悬停（"说明+列表："），
+// 无标点是句子被掐断（"我将开始修改…"/"我会…"），与正文长度无关——长会话里恰恰最常见，
+// 原先按整段长度挡掉是一条都不救。
+func TestNarrationLongBareSuspenseStillRescued(t *testing.T) {
+	long := strings.Repeat("我把三处改动逐行过了一遍，其中两点需要单独说明。", 40) // ≈1.6KB
+	text := long + "现在我确认完了，我将开始修改 internal/server/continue.go 里的续写闸门"
+	if len(text) <= narrationMaxBytes {
+		t.Fatalf("样本不够长：%d", len(text))
+	}
+	if narrationTailPunctuated(text) || !narrationTailSuspends(text) {
+		t.Fatalf("前提失败：该样本应判为无标点悬停（punctuated=%v suspends=%v）",
+			narrationTailPunctuated(text), narrationTailSuspends(text))
+	}
+	raw, _ := json.Marshal(text)
+	seg := `data: {"id":"n4","choices":[{"index":0,"delta":{"content":` + string(raw) + `}}]}` + "\n\n" +
+		`data: {"id":"n4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":301000,"completion_tokens":500,"total_tokens":301500}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, segToolOnlyText })
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("长正文停在无标点断句上应救一次，实际 %d 次", len(*reqs))
+	}
+}
