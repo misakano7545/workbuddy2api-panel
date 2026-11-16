@@ -349,15 +349,23 @@ func NewHandler(cfg Config) *Handler {
 	return h
 }
 
-// isChatEntry 四条入站协议路径：/v1/responses 与 /v1/messages（含 /messages 别名）
-// 经 r.Clone 转进 chatCompletions 内核，与直连的 /v1/chat/completions 共用同一套
-// 行日志/归档/来源采集/X-Request-Id——四者一视同仁，别再按单路径放行（Codex 走
+// isChatEntry 需要挂 requestTrace 的入站路径（/v1/responses 与 /v1/messages（含 /messages
+// 别名）经 r.Clone 转进 chatCompletions 内核，与直连的 /v1/chat/completions 共用同一套
+// 行日志/归档/来源采集/X-Request-Id——一视同仁，别再按单路径放行（Codex 走
 // /v1/responses，曾因此整类请求无来源、不入归档）。
+//
+// 出图/出视频/3D 也在表里：它们不扣 chat 的 token，但同样按上游回执扣积分，
+// 不进台账就等于面板拿不到这笔钱（issue #249）——POST /v1/videos 与
+// /v1/videos/generations 是同一个 handler，曾只登记了后者。
+//
+// GET 的查询路径（/v1/videos/{id}、/content）刻意不在表里：ServeHTTP 只对 POST 挂
+// trace，轮询不扣费，进归档只会把一次生成摊成 N 条 0 积分记录。
 func isChatEntry(path string) bool {
 	switch path {
 	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages",
 		"/v1/images/generations", "/v1/images/edits",
-		"/v1/videos/generations", "/v1/videos/tasks", "/v1/3d/generations", "/v1/3d/tasks":
+		"/v1/videos", "/v1/videos/generations", "/v1/videos/tasks",
+		"/v1/3d/generations", "/v1/3d/tasks":
 		return true
 	}
 	return false

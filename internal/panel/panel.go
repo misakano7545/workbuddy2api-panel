@@ -1446,6 +1446,10 @@ func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 // balanceAll 手动全量刷新余额：并发查上游、写回池内 credits（含解冻语义），
 // 完成后返回——面板紧接着拉 overview 即是最新值。账号量小（个位数），
 // 同步等待（上限受短 RPC 超时约束）比"触发后盲刷"体验更确定。
+//
+// 日志带调用来源：这条路径**只能**由面板 refresh 按钮触发，运维看到「没人点也刷新了」
+// 时无从判断是谁打的（issue #249），把 RemoteAddr/UA 打出来即可区分浏览器误触、
+// 开着旧标签页的机器、或持有面板 key 的脚本。
 func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 	if !p.tryStartBatch(w, "全量余额刷新") {
 		return
@@ -1457,7 +1461,7 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 	}
 	p.cfg.Scheduler.RunBalanceRefreshNow()
 	p.syncNicknames()
-	log.Printf("panel: 手动全量余额刷新完成")
+	log.Printf("panel: 手动全量余额刷新完成 src=%s ua=%q", r.RemoteAddr, r.UserAgent())
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
 }
 
