@@ -17,6 +17,16 @@ import (
 )
 
 // dayTS 指定自然日的某个时刻（CST）。
+// dayAgo 返回「相对今天 N 天前」的日期字符串（YYYY-MM-DD，CST）。
+//
+// 为什么不用绝对日期（20261116 修复）：这些用例此前写死 2026-11-08 / -09，
+// 而 NewLogStore 会按保留期 cleanup 掉更早的文件 —— 写死的日期一旦越过保留期，
+// 用例就会永久失败（实测 11-16 起 TestLogStoreBackfillNewestFirst 必挂）。
+// 凡是与「保留期 / 清理」相关的断言，日期都必须相对当下。
+func dayAgo(n int) string {
+	return cst.Now().AddDate(0, 0, -n).Format("2006-01-02")
+}
+
 func dayTS(day string, hour int) time.Time {
 	t, err := time.ParseInLocation("2006-01-02 15", day+" "+string(rune('0'+hour/10))+string(rune('0'+hour%10)), cst.Loc)
 	if err != nil {
@@ -33,19 +43,19 @@ func TestLogStoreWritesPerDayFiles(t *testing.T) {
 		t.Fatal("NewLogStore 返回 nil")
 	}
 	defer s.Close()
-	s.Append(LogEntry{TS: dayTS("2026-11-08", 23), Ch: ChChat, Text: "row-a"})
-	s.Append(LogEntry{TS: dayTS("2026-11-09", 1), Ch: ChSys, Text: "row-b"})
+	s.Append(LogEntry{TS: dayTS(dayAgo(2), 23), Ch: ChChat, Text: "row-a"})
+	s.Append(LogEntry{TS: dayTS(dayAgo(1), 1), Ch: ChSys, Text: "row-b"})
 
-	for _, day := range []string{"2026-11-08", "2026-11-09"} {
+	for _, day := range []string{dayAgo(2), dayAgo(1)} {
 		path := filepath.Join(dir, "panel-"+day+".jsonl")
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("%s 未落盘: %v", day, err)
 		}
 	}
 	// 读回来确认内容与频道都在（导出的可读性依赖这两个字段）。
-	got := readLogFile(filepath.Join(dir, "panel-2026-11-09.jsonl"))
+	got := readLogFile(filepath.Join(dir, "panel-"+dayAgo(1)+".jsonl"))
 	if len(got) != 1 || got[0].Text != "row-b" || got[0].Ch != ChSys {
-		t.Fatalf("11-09 文件内容 = %+v", got)
+		t.Fatalf("前一天文件内容 = %+v", got)
 	}
 }
 
@@ -59,14 +69,15 @@ func TestLogStoreRotatesOnMaxBytes(t *testing.T) {
 	// 这里绕过构造函数手工给一个小上限。
 	s := &LogStore{dir: dir, retentionDays: 7, maxBytes: 200}
 	s.cleanup()
-	ts := dayTS("2026-11-09", 12)
+	ts := dayTS(dayAgo(1), 12)
 	for i := 0; i < 20; i++ {
 		s.Append(LogEntry{TS: ts, Ch: ChSys, Text: "0123456789012345678901234567890123456789"})
 	}
 	s.Close()
 
-	first := filepath.Join(dir, "panel-2026-11-09.jsonl")
-	second := filepath.Join(dir, "panel-2026-11-09.2.jsonl")
+	day := dayAgo(1)
+	first := filepath.Join(dir, "panel-"+day+".jsonl")
+	second := filepath.Join(dir, "panel-"+day+".2.jsonl")
 	if _, err := os.Stat(first); err != nil {
 		t.Fatalf("首个文件缺失: %v", err)
 	}
@@ -75,7 +86,7 @@ func TestLogStoreRotatesOnMaxBytes(t *testing.T) {
 	}
 	// 上限是 200 字节（约 2 行），20 条会摊到多个序号文件里——统计**全部**匹配
 	// 文件，断言一条都没丢。丢日志等于丢事故现场，这是这条用例唯一的重点。
-	all, err := filepath.Glob(filepath.Join(dir, "panel-2026-11-09*.jsonl"))
+	all, err := filepath.Glob(filepath.Join(dir, "panel-"+day+"*.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,13 +105,11 @@ func TestLogStoreBackfillNewestFirst(t *testing.T) {
 	s := NewLogStore(dir, 7, 0)
 	// 日期相对今天：重开时 NewLogStore 按真实时钟清理保留期外的文件，写死绝对日期
 	// 会在保留期过期的第一天就变红（2026-11-16 起 CI 一直红的就是这条）。
-	oldDay := cst.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	newDay := cst.Now().Format("2006-01-02")
 	for i := 0; i < 5; i++ {
-		s.Append(LogEntry{TS: dayTS(oldDay, 10).Add(time.Duration(i) * time.Minute), Ch: ChSys, Text: "old-" + string(rune('0'+i))})
+		s.Append(LogEntry{TS: dayTS(dayAgo(2), 10).Add(time.Duration(i) * time.Minute), Ch: ChSys, Text: "old-" + string(rune('0'+i))})
 	}
 	for i := 0; i < 3; i++ {
-		s.Append(LogEntry{TS: dayTS(newDay, 10).Add(time.Duration(i) * time.Minute), Ch: ChSys, Text: "new-" + string(rune('0'+i))})
+		s.Append(LogEntry{TS: dayTS(dayAgo(1), 10).Add(time.Duration(i) * time.Minute), Ch: ChSys, Text: "new-" + string(rune('0'+i))})
 	}
 	s.Close()
 
@@ -126,11 +135,11 @@ func TestLogStoreExportFiltersByRange(t *testing.T) {
 	dir := t.TempDir()
 	s := NewLogStore(dir, 7, 0)
 	defer s.Close() // 不关会一直占着文件句柄，TempDir 清理在 Windows 上会失败
-	base := dayTS("2026-11-09", 8)
+	base := dayTS(dayAgo(1), 8)
 	for i := 0; i < 6; i++ {
 		s.Append(LogEntry{TS: base.Add(time.Duration(i) * time.Hour), Ch: ChSys, Text: "line-" + string(rune('0'+i))})
 	}
-	s.Append(LogEntry{TS: dayTS("2026-11-07", 8), Ch: ChSys, Text: "too-old"})
+	s.Append(LogEntry{TS: dayTS(dayAgo(9), 8), Ch: ChSys, Text: "too-old"})
 
 	tmp, err := os.CreateTemp(t.TempDir(), "export-*.zip")
 	if err != nil {
