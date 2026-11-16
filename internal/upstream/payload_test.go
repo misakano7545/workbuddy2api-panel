@@ -775,3 +775,115 @@ func TestPrepareBodyPrefixedModelUsesBareForCatalogAndEffort(t *testing.T) {
 		t.Fatalf("effort = %q, want high", effort)
 	}
 }
+
+// TestNormalizeToolParameters11129 验证工具 schema 深度规整，彻底杜绝上游 11129 报错。
+// 覆盖：无参工具空参数补齐、缺失 parameters 补齐、嵌套 nil 元数据剥除、
+// Python 非标类型别名映射、required 异常清洗、数组 items tuple 解包。
+func TestNormalizeToolParameters11129(t *testing.T) {
+	t.Run("empty parameters inflated to object with empty properties", func(t *testing.T) {
+		body := `{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{}}}]}`
+		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(out), &obj); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		tools := obj["tools"].([]any)
+		fn := tools[0].(map[string]any)["function"].(map[string]any)
+		params := fn["parameters"].(map[string]any)
+		if params["type"] != "object" {
+			t.Errorf("type = %v, want object", params["type"])
+		}
+		if _, ok := params["properties"].(map[string]any); !ok {
+			t.Errorf("properties not a map: %v", params["properties"])
+		}
+	})
+
+	t.Run("nil fields removed and python types normalized", func(t *testing.T) {
+		body := `{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","description":null,"properties":{"name":{"type":"str","description":null},"count":{"type":"int"},"tags":{"type":"list","items":null},"meta":{"type":"dict","title":null}},"required":["name",null,""]}}}]}`
+		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(out), &obj); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		tools := obj["tools"].([]any)
+		fn := tools[0].(map[string]any)["function"].(map[string]any)
+		params := fn["parameters"].(map[string]any)
+		if _, exists := params["description"]; exists {
+			t.Errorf("nil description should be removed")
+		}
+		props := params["properties"].(map[string]any)
+		nameProp := props["name"].(map[string]any)
+		if nameProp["type"] != "string" {
+			t.Errorf("name type = %v, want string", nameProp["type"])
+		}
+		if _, exists := nameProp["description"]; exists {
+			t.Errorf("nested nil description should be removed")
+		}
+		countProp := props["count"].(map[string]any)
+		if countProp["type"] != "integer" {
+			t.Errorf("count type = %v, want integer", countProp["type"])
+		}
+		tagsProp := props["tags"].(map[string]any)
+		if tagsProp["type"] != "array" {
+			t.Errorf("tags type = %v, want array", tagsProp["type"])
+		}
+		if _, exists := tagsProp["items"]; exists {
+			t.Errorf("nil items should be removed")
+		}
+		metaProp := props["meta"].(map[string]any)
+		if metaProp["type"] != "object" {
+			t.Errorf("meta type = %v, want object", metaProp["type"])
+		}
+		if _, exists := metaProp["title"]; exists {
+			t.Errorf("nil title should be removed")
+		}
+		req := params["required"].([]any)
+		if len(req) != 1 || req[0] != "name" {
+			t.Errorf("required = %v, want [name]", req)
+		}
+	})
+
+	t.Run("property named required is preserved in container", func(t *testing.T) {
+		body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"required":{"type":"boolean","description":"是否必需"},"other":{"type":"string"}}}}}]}`
+		out := string(PrepareBodyOpt([]byte(body), false))
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(out), &obj); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		tools := obj["tools"].([]any)
+		fn := tools[0].(map[string]any)["function"].(map[string]any)
+		params := fn["parameters"].(map[string]any)
+		props := params["properties"].(map[string]any)
+		if _, exists := props["required"]; !exists {
+			t.Fatalf("property 'required' was erroneously removed from properties container: %v", props)
+		}
+		reqProp := props["required"].(map[string]any)
+		if reqProp["type"] != "boolean" {
+			t.Errorf("required.type = %v, want boolean", reqProp["type"])
+		}
+		if reqProp["description"] != "是否必需" {
+			t.Errorf("required.description = %v, want '是否必需'", reqProp["description"])
+		}
+	})
+
+	t.Run("tuple array items unpacked", func(t *testing.T) {
+		body := `{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"list":{"type":"array","items":[{"type":"str"}]}}}}}]}`
+		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(out), &obj); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		tools := obj["tools"].([]any)
+		fn := tools[0].(map[string]any)["function"].(map[string]any)
+		params := fn["parameters"].(map[string]any)
+		props := params["properties"].(map[string]any)
+		listProp := props["list"].(map[string]any)
+		items, ok := listProp["items"].(map[string]any)
+		if !ok {
+			t.Fatalf("items not unpacked to map: %T", listProp["items"])
+		}
+		if items["type"] != "string" {
+			t.Errorf("items type = %v, want string", items["type"])
+		}
+	})
+}

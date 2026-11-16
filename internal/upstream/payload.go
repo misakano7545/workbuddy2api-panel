@@ -707,19 +707,144 @@ func normalizeToolPatterns(obj map[string]any) {
 		}
 		// OpenAI 形态 tools[].function.parameters；裸 tools[].parameters 兼容。
 		if fn, ok := tool["function"].(map[string]any); ok {
-			normalizeSchemaTree(fn["parameters"])
+			fn["parameters"] = normalizeToolParameters(fn["parameters"])
 		}
-		normalizeSchemaTree(tool["parameters"])
+		if _, ok := tool["parameters"]; ok {
+			tool["parameters"] = normalizeToolParameters(tool["parameters"])
+		}
 	}
 }
 
+// normalizeToolParameters 归一化工具顶层参数定义（补齐 type: object、补齐 properties: {} 等），
+// 并递归规整深层 Schema 树，彻底根除 11129 invalid_function_call_parameters。
+func normalizeToolParameters(node any) any {
+	if node == nil {
+		return map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+	params, ok := node.(map[string]any)
+	if !ok {
+		return map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+	t, ok := params["type"].(string)
+	if !ok || strings.TrimSpace(t) == "" {
+		params["type"] = "object"
+	} else {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "str":
+			params["type"] = "string"
+		case "int":
+			params["type"] = "integer"
+		case "float":
+			params["type"] = "number"
+		case "bool":
+			params["type"] = "boolean"
+		case "dict":
+			params["type"] = "object"
+		case "list":
+			params["type"] = "array"
+		}
+	}
+	if params["type"] == "object" {
+		if _, hasProps := params["properties"].(map[string]any); !hasProps {
+			params["properties"] = map[string]any{}
+		}
+	}
+	normalizeSchemaTree(params)
+	return params
+}
+
+// schemaContainerKeys 定义了 JSON Schema 规范中的容器级 map。
+// 容器自身的键是属性名/定义名（用户数据），绝不能当做 Schema 关键字进行判定；
+// 递归时仅遍历其子 Schema 节点。
+var schemaContainerKeys = map[string]bool{
+	"properties":        true,
+	"patternProperties": true,
+	"$defs":             true,
+	"definitions":       true,
+	"dependentSchemas":  true,
+}
+
 // normalizeSchemaTree 递归归一化工具参数 schema 树：
+//   - 区分 Schema 节点与 Schema 容器：容器自身键为用户属性名，只对其子 Schema 做规整；
+//   - 剔除所有值为 nil 的元数据/属性键（description: null、title: null 等导致上游反序列化失败）；
+//   - 类型别名归一化（str/int/bool/dict/list 等 Python 非标类型别名映射至 JSON Schema 标准）；
+//   - required 规整（剔除 nil、空字符串及非 string 元素，空列表直接清理）；
+//   - array items 规整（解包 tuple 模式，清理 nil items）；
 //   - pattern 值与 patternProperties 键里的 `\_` → `_`（patternProperties 的键也是正则；
 //     map 键不可原地改，命中时重建该层）；
 //   - 只有 enum、没有 type 的属性补上可无损推断的类型（见 inferEnumType）。
 func normalizeSchemaTree(node any) {
 	switch n := node.(type) {
 	case map[string]any:
+		// 1. 剔除所有值为 nil 的元数据/属性键（避免上游 Go 强类型反序列化失败报 11129）
+		for k, v := range n {
+			if v == nil {
+				delete(n, k)
+			}
+		}
+
+		// 2. 类型别名归一化
+		if t, ok := n["type"].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(t)) {
+			case "str":
+				n["type"] = "string"
+			case "int":
+				n["type"] = "integer"
+			case "float":
+				n["type"] = "number"
+			case "bool":
+				n["type"] = "boolean"
+			case "dict":
+				n["type"] = "object"
+			case "list":
+				n["type"] = "array"
+			case "":
+				if _, hasProps := n["properties"]; hasProps {
+					n["type"] = "object"
+				}
+			}
+		}
+
+		// 3. 规整 required 字段
+		if req, hasReq := n["required"]; hasReq {
+			if reqList, ok := req.([]any); ok {
+				var cleaned []any
+				for _, item := range reqList {
+					if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+						cleaned = append(cleaned, strings.TrimSpace(s))
+					}
+				}
+				if len(cleaned) == 0 {
+					delete(n, "required")
+				} else {
+					n["required"] = cleaned
+				}
+			} else {
+				delete(n, "required")
+			}
+		}
+
+		// 4. 规整 array items
+		if items, hasItems := n["items"]; hasItems {
+			if items == nil {
+				delete(n, "items")
+			} else if itemList, ok := items.([]any); ok {
+				var firstDict map[string]any
+				for _, it := range itemList {
+					if d, ok := it.(map[string]any); ok {
+						firstDict = d
+						break
+					}
+				}
+				if firstDict != nil {
+					n["items"] = firstDict
+				} else {
+					n["items"] = map[string]any{"type": "string"}
+				}
+			}
+		}
+
+		// 5. pattern 转义修复
 		if p, ok := n["pattern"].(string); ok && strings.Contains(p, `\_`) {
 			n["pattern"] = strings.ReplaceAll(p, `\_`, `_`)
 		}
@@ -737,9 +862,8 @@ func normalizeSchemaTree(node any) {
 				n["patternProperties"] = fixed
 			}
 		}
-		// enum 缺 type：Kimi 系对参数 schema 严格校验，直接 400 11133「Invalid request
-		// parameters」——同一个模型对带这类 schema 的客户端等于全废。类型能无损推断就补上，
-		// 推断不出来（混合标量/含 null）保持原样，让上游按原语义报错，不猜。
+
+		// 6. enum 缺 type 自动推断
 		if _, hasType := n["type"]; !hasType {
 			if e, ok := n["enum"].([]any); ok && len(e) > 0 {
 				if t := inferEnumType(e); t != "" {
@@ -747,7 +871,21 @@ func normalizeSchemaTree(node any) {
 				}
 			}
 		}
-		for _, v := range n {
+
+		// 7. 递归子树：容器键只遍历子 Schema，防止容器键（如属性名 required）被当成 Schema 关键字误删
+		for k, v := range n {
+			if schemaContainerKeys[k] {
+				if c, ok := v.(map[string]any); ok {
+					for childKey, child := range c {
+						if child == nil {
+							delete(c, childKey)
+							continue
+						}
+						normalizeSchemaTree(child)
+					}
+				}
+				continue
+			}
 			normalizeSchemaTree(v)
 		}
 	case []any:
