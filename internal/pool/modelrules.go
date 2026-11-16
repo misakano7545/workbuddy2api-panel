@@ -423,8 +423,8 @@ func (p *Pool) RulesBlockedForRealm(model, realm string) (blocked, eligible int)
 		return 0, 0
 	}
 	_, bare := splitRealmModel(normalizeRuleModel(model))
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	for _, e := range p.byUID {
 		if realm != "" && e.a.Realm() != realm {
 			continue
