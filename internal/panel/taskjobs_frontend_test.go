@@ -17,7 +17,7 @@ func TestAppJSBackgroundTaskLifecycle(t *testing.T) {
 	}
 	script := `const fs = require('fs'), vm = require('vm'), assert = require('assert');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const start = src.indexOf('let taskUID = null'), end = src.indexOf('async function loadTasks()');
+const start = src.indexOf('let taskUID = null'), end = src.indexOf('async function loadTasks(');
 assert(start > 0 && end > start);
 const nodes = new Map(), timers = new Map(), calls = [], toasts = [];
 let tick = 0, reads = () => Promise.resolve({job: null});
@@ -49,13 +49,18 @@ const flush = async () => { for(let i=0;i<10;i++) await Promise.resolve(); };
   reads = () => Promise.resolve({job: job('cn-a', 'running')});
   vm.runInContext("openTasks('cn-a')", ctx); await flush();
   assert(nodes.get('taskJobState').textContent.includes('执行中'));
-  assert.strictEqual(timers.size, 1);
+  // 两个定时器：作业进度轮询 + 任务表静默刷新（30s，弹窗开着就一直跑）
+  assert.strictEqual(timers.size, 2);
   reads = () => Promise.resolve({job: job('cn-a','finished', [{status:'done',claimed:true},{status:'awaiting_progress',message:'未计分'}])});
-  await [...timers.values()][0](); await flush();
+  // 弹窗里现在有两个定时器（作业轮询 + 任务静默刷新），创建顺序取决于异步竞态，
+  // 不按下标取，全部推一拍——各自只更新自己那部分界面。
+  for (const fn of [...timers.values()]) await fn();
+  await flush();
   assert(nodes.get('taskJobState').textContent.includes('等待计分 1 项'));
   assert(nodes.get('taskJobState').textContent.includes('已结束'));
   assert.strictEqual(nodes.get('btnTaskAutoAll').disabled, false);
-  assert.strictEqual(timers.size, 0);
+  // 作业跑完后作业轮询停了，但弹窗还开着，任务静默刷新仍在（只剩 1 个）
+  assert.strictEqual(timers.size, 1);
 
   let releaseOld;
   reads = path => path.includes('cn-a') ? new Promise(resolve => releaseOld=resolve) : Promise.resolve({job:job('cn-b','running')});

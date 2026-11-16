@@ -321,6 +321,10 @@ func (p *Panel) routes() {
 	// 只做「读 + 领」——任务本身要客户端真实会话，服务端侧伪造不计数（见 docs/campaign-probe.md）。
 	p.mux.HandleFunc("GET /panel/api/campaign", p.campaignStatus)
 	p.mux.HandleFunc("POST /panel/api/campaign/claim", p.campaignClaim)
+	// 实时任务：直接向每个账号查一次任务表并按 TTL 缓存，供看板定时轮询。
+	// 与 tasks/jobs（后台作业结果）、tasks/scan_all（手动扫描）互补：那两个都要
+	// 有人先动一下，这里不需要。
+	p.mux.HandleFunc("GET /panel/api/tasks/live", p.tasksLive)
 	p.mux.HandleFunc("GET /panel/api/usage", p.usage)
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.usageSave)
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.modelProbes)
