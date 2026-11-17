@@ -157,9 +157,17 @@ func liveTasksOf(c *upstream.Client, a *auth.Auth) liveTaskAccount {
 		it.Err = noPersonalTaskMessage
 		return it
 	}
-	tasks, err := c.ListTasksMP(a)
-	if err != nil {
+	// 国际号只走默认口径：小程序头对国际账号没有验证过的契约，单号任务弹窗
+	// （accountTasks）同样明确不探 MP。
+	var tasks []upstream.Task
+	var err error
+	if a.IsGlobal() {
 		tasks, err = c.ListTasks(a)
+	} else {
+		tasks, err = c.ListTasksMP(a)
+		if err != nil {
+			tasks, err = c.ListTasks(a)
+		}
 	}
 	if err != nil {
 		it.Err = err.Error()
