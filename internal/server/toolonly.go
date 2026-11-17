@@ -34,6 +34,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"unicode"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
@@ -120,11 +121,18 @@ var toolOnlyClosingMarkers = []string{
 // toolOnlyLastSentence 取最后一个句末标点之后的那一句（去掉尾部标点）。
 // 只按句末标点切（不按逗号）："检查完了，我继续修下一个" 整句都算最后一句，
 // 切成半句反而会把意图词切走。
+//
+// 半角 . ! ? 只有后面是空白或文本结尾才算句末：文件名（UnityManual.html、check.go）、
+// 版本号（v1.2）、URL 里的点不是句子边界，按它切会把句子从中间截断（"我将开始修改
+// internal/verify/check.go" 会被切成 "go"）。全角 。！？ 任何位置都算句末。
 func toolOnlyLastSentence(s string) string {
 	rs := []rune(strings.TrimRight(s, " \t\r\n"))
 	start, end := 0, len(rs)
 	for i := len(rs) - 1; i >= 0; i-- {
 		if !strings.ContainsRune("。！？!?.", rs[i]) {
+			continue
+		}
+		if rs[i] < 0x80 && i+1 < len(rs) && !unicode.IsSpace(rs[i+1]) {
 			continue
 		}
 		if i == end-1 {

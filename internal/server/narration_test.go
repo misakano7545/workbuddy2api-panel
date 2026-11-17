@@ -288,7 +288,7 @@ func TestNarrationMidTextYieldMarkerStillRescued(t *testing.T) {
 	text := "## 三、整改建议\n\n把每一次实测读数归档，使判断不再依赖人而异的经验判断，" +
 		"也使每次检验的数据自动进入趋势库，为“是否需要更换”提供量化支撑。\n\n---\n\n" +
 		"我将开始修改 internal/verify/check.go"
-	if textYieldsToUser(text) {
+	if yieldsToUser(text, false) {
 		t.Fatal("末句是承诺句，不该判为等用户回话")
 	}
 	if narrationTailPunctuated(text) || !narrationTailSuspends(text) {
@@ -319,7 +319,7 @@ func TestNarrationMidTextYieldMarkerStillRescued(t *testing.T) {
 // 措辞落在**末句**里（模型真的在等用户拍板）：仍然不救。这条守着 #209 的事故形态。
 func TestNarrationFinalSentenceYieldStillSkipped(t *testing.T) {
 	text := "我已经把三处改动过了一遍，剩下两处涉及线上配置。\n\n请确认后我再动手："
-	if !textYieldsToUser(text) {
+	if !yieldsToUser(text, false) {
 		t.Fatal("末句含「请确认后」，应判为等用户回话")
 	}
 	raw, _ := json.Marshal(text)
