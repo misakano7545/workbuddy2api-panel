@@ -206,12 +206,12 @@ func TestOfficialParity(t *testing.T) {
 		{
 			fixture: "official_v3config_head.txt", path: "/v3/config",
 			build: func(c *Client, a *auth.Auth, base string) *http.Request {
-				req, _ := http.NewRequest(http.MethodGet, base+"/v3/config", nil)
-				req.Header.Set("Accept", "application/json, text/plain, */*")
-				req.Header.Set("User-Agent", c.v3ProbeUA(a))
-				req.Header.Set("X-Request-ID", "x")
-				req.Header.Set("X-Product", "SaaS")
-				return req
+				// 走生产函数而不是手拼头：fetchV3ConfigModelMap 会注入 X-Client-* 等
+				// 身份头，手拼的脚手架看不到这些，夹具与产线就会悄悄分叉
+				// （2026-11-18 抓包确认官方 /v3/config 3/3 条都带 X-Client-*）。
+				c.ChatBaseCN = base
+				_, _, _ = c.fetchV3ConfigModelMap(a, "")
+				return nil // 生产函数已经发过请求
 			},
 		},
 	}
