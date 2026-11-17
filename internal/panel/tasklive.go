@@ -181,7 +181,6 @@ func liveTasksOf(c *upstream.Client, a *auth.Auth) liveTaskAccount {
 		it.Err = err.Error()
 		return it
 	}
-	it.Tasks = tasks
 	for _, t := range tasks {
 		switch {
 		case t.Claimed:
@@ -191,6 +190,11 @@ func liveTasksOf(c *upstream.Client, a *auth.Auth) liveTaskAccount {
 		default:
 			it.Pending++
 		}
+	}
+	// 只给还有事可做的账号带任务表：全部领完的号占了绝大多数，把它们的任务表每轮都
+	// 序列化、前端每轮重画几千行是纯开销；计数仍在，需要细看走单号任务弹窗。
+	if it.Pending+it.Claimable > 0 {
+		it.Tasks = tasks
 	}
 	return it
 }

@@ -2854,8 +2854,9 @@ function renderLiveTasks(d) {
   }));
   if (!groups.length) {
     list.innerHTML = ''; empty.style.display = '';
-    empty.querySelector('.t').textContent = (d && d.refreshing) ? '首轮查询中' : '还没有数据';
-    empty.querySelector('.d').textContent = (d && d.refreshing) ? '账号多时首轮要一会儿，查完会自动显示。' : '点「立即刷新」拉一次。';
+    // 有账号却没有分组 = 全部领完了（只有待办 / 可领 / 失败的号才带任务表或错误）
+    empty.querySelector('.t').textContent = accts.length ? '任务都领完了' : (d && d.refreshing) ? '首轮查询中' : '还没有数据';
+    empty.querySelector('.d').textContent = accts.length ? '没有待办、可领或查询失败的账号。' : (d && d.refreshing) ? '账号多时首轮要一会儿，查完会自动显示。' : '点「立即刷新」拉一次。';
     $('liveSummary').textContent = '';
     return;
   }
