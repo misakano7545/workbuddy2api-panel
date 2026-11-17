@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,6 +16,11 @@ func TestTasksLiveSlowRoundDoesNotBlockOrStack(t *testing.T) {
 
 	f := &liveFake{block: make(chan struct{})}
 	p := newLivePanel(t, f)
+	// 断言失败时也要放行被阻塞的假上游，否则 httptest.Server.Close 会一直等；
+	// 在 newLivePanel 之后注册，保证先于它的 Close 执行（Cleanup 后进先出）。
+	var once sync.Once
+	release := func() { once.Do(func() { close(f.block) }) }
+	t.Cleanup(release)
 
 	start := time.Now()
 	out := getLiveJSON(t, p, "/panel/api/tasks/live")
@@ -30,7 +36,7 @@ func TestTasksLiveSlowRoundDoesNotBlockOrStack(t *testing.T) {
 	getLiveJSON(t, p, "/panel/api/tasks/live")
 	getLiveJSON(t, p, "/panel/api/tasks/live?fresh=1")
 
-	close(f.block)
+	release()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		out = getLiveJSON(t, p, "/panel/api/tasks/live")
