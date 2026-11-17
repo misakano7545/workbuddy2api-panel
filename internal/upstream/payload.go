@@ -140,12 +140,16 @@ func prepareBodyOpt(src []byte, sanitize, brandGlobal bool, efforts map[string][
 	// 历史裁剪先于 tool 配对：cut 落在整轮边界上，不会切出半个 tool 配对；
 	// 万一客户端自己的历史本来就断了，后面两步照样兜底。
 	trimHistory(obj, keepRounds)
-	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
-	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
-	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；
-	// 插在结果中间的非 tool 消息（Codex image_resize_notice）同样判配对断裂，
-	// 先 repack 挪后，再 cleanup 删孤儿，两侧同口径。
+	// tool 配对三步（见 tool_pairing.go）：先重排早到结果，再重排插入物，最后清孤儿。
+	// 所有模型一律执行（独立于 deepseek-only 的 sanitize 开关）。这是「让请求通过」的
+	// 安全网——不完整配对的 tool_calls/tool 结果会让上游对之后每条消息都返 400，
+	// 必须先行剔除；插在结果中间的非 tool 消息（Codex image_resize_notice）同样判
+	// 配对断裂，先 repack 挪后，再 cleanup 删孤儿，两侧同口径。
+	// reorderEarly 排最前：它只处理「结果早于调用」这一种顺序倒置，倒置没修时
+	// repack 会把那条早到的 tool 当成普通消息原样留在原地（role != assistant → 直通），
+	// 后面 cleanup 又因两侧 id 都在而判定「配对完整」，倒置就一路带到上游撞 11148。
 	if msgs, ok := obj["messages"].([]any); ok {
+		msgs, _ = reorderEarlyToolResults(msgs)
 		msgs, _ = repackToolResultBlocks(msgs)
 		msgs, _ = cleanupOrphanToolCalls(msgs)
 		// 无改动时两步都返回原 slice，这里回写等于零操作；任一步重排/删除
