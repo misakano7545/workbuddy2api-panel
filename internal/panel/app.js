@@ -2815,16 +2815,16 @@ function groupsFromJobs(jobs) {
 $('btnTaskJobsReload').onclick = () => { taskCenterOwner = 'jobs'; loadTaskJobs(); };
 
 /* ── 实时任务 ─────────────────────────────────────────────────────────
-   数据源：GET /panel/api/tasks/live（后端按 45s TTL 缓存，一行一个账号的当前任务表）。
+   数据源：GET /panel/api/tasks/live（后端按 TTL 缓存，一行一个账号；只有还有事可做的号才带任务表）。
    为什么要这块：既有的「后台任务」只在作业跑过之后才有内容，「扫描待办」要手动点，
    两者都得有人先动一下，看板永远滞后。这里进页面就自动拉、按间隔自动刷。
 
    轮询只在「本页可见 + 浏览器在前台」时跑：切走就停，避免后台标签页把上游当靶子练。
-   间隔拿到后端 ttl_sec 做下限——比 TTL 还短只是打自己的缓存，没意义。 */
+   启动只由 go() 在进入本页时调一次（reattachQueueView 会被 5s 全局轮询反复调用）。 */
 // 一轮 = 每个启用账号一次上游 GET：默认 2 分钟，可选档位都不低于后端缓存 TTL（1 分钟），
 // 再密只是读缓存。
 const LIVE_EVERY_CHOICES = [0, 60, 120, 300];
-let liveTimer = null, liveEvery = 120, liveLoading = false, liveRetry = null;
+let liveTimer = null, liveEvery = 120, liveLoading = false, liveRetry = null, liveLastKey = '';
 function liveTaskRow(t) {
   // 返回行对象，由 renderLiveTasks 统一交给 qrowHTML 渲染一次（返回 HTML 会被渲染两次）。
   // 上游 Task：claimed / claimable 是本地推算，status 是上游原文
@@ -2843,6 +2843,15 @@ function liveTaskRow(t) {
 function renderLiveTasks(d) {
   const list = $('liveList'), empty = $('liveEmpty'), note = $('liveNote');
   const accts = (d && d.accounts) || [];
+  // 数据没变就不重画：账号多时一轮是几百个分组，每个间隔重建一遍 DOM 纯属浪费，
+  // 还会冲掉用户正在选中的文字。age_sec / cached 每次都变，不进比较。
+  const key = JSON.stringify(accts);
+  note.hidden = true; // 上一轮失败的提示在恢复后要收起，包括「数据没变」的早退分支
+  if (key === liveLastKey && list.innerHTML) {
+    $('liveSummary').textContent = liveSummary(accts, d);
+    return;
+  }
+  liveLastKey = key;
   const groups = accts.filter(a => (a.tasks || []).length || a.error).map(a => ({
     uid: a.uid,
     nick: a.nickname || String(a.uid).slice(0, 8),
@@ -2857,20 +2866,23 @@ function renderLiveTasks(d) {
     // 有账号却没有分组 = 全部领完了（只有待办 / 可领 / 失败的号才带任务表或错误）
     empty.querySelector('.t').textContent = accts.length ? '任务都领完了' : (d && d.refreshing) ? '首轮查询中' : '还没有数据';
     empty.querySelector('.d').textContent = accts.length ? '没有待办、可领或查询失败的账号。' : (d && d.refreshing) ? '账号多时首轮要一会儿，查完会自动显示。' : '点「立即刷新」拉一次。';
-    $('liveSummary').textContent = '';
+    $('liveSummary').textContent = liveSummary(accts, d);
     return;
   }
   empty.style.display = 'none';
-  let pending = 0, claimable = 0;
-  accts.forEach(a => { pending += a.pending || 0; claimable += a.claimable || 0; });
   list.innerHTML = groups.map(g =>
     '<div class="qgroup" title="' + esc(g.tip) + '"><header><span class="nm">' + esc(g.nick) + '</span>' +
     '<span class="cnt">' + esc(g.cnt) + '</span><span class="grow"></span>' +
     '<button class="xs" data-live-uid="' + esc(g.uid) + '">打开任务</button></header>' +
     g.rows.map(qrowHTML).join('') + '</div>').join('');
-  $('liveSummary').textContent = accts.length + ' 个账号 · ' + pending + ' 待办 · ' + claimable + ' 可领' +
-    (d && d.cached ? ' · ' + (d.age_sec || 0) + ' 秒前' : ' · 刚更新');
-  note.hidden = true;
+  $('liveSummary').textContent = liveSummary(accts, d);
+}
+function liveSummary(accts, d) {
+  if (!accts.length) return '';
+  let pending = 0, claimable = 0;
+  accts.forEach(a => { pending += a.pending || 0; claimable += a.claimable || 0; });
+  return accts.length + ' 个账号 · ' + pending + ' 待办 · ' + claimable + ' 可领 · ' +
+    ((d && d.age_sec) ? d.age_sec + ' 秒前' : '刚更新') + (d && d.refreshing ? ' · 更新中' : '');
 }
 async function loadLiveTasks(fresh) {
   if (liveLoading) return;
