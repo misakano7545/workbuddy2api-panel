@@ -545,8 +545,8 @@ func normalizeStop(obj map[string]any) {
 // openai_responses_to_openai_chat_completions）会把助手历史里的思考片段原样透传进
 // /v1/chat/completions；上游 content 类型白名单不含它，命中即 HTTP 400 code=11101
 // 「unsupported content type at index 0: reasoning_text」。本仓自己的 responses 入站
-// 不产这种片段（客户端回传的 reasoning item 在 convertInputItems 里就丢弃了），这条
-// 是给「链路上游还有别的转换器」兜底。
+// 不产这种片段（客户端回传的 reasoning item 在 convertInputItems 里转成消息级的
+// reasoning_content 字段，不进 content），这条是给「链路上游还有别的转换器」兜底。
 //
 // 思考片段只是模型私有推理，下游续写不需要，剔除无副作用：
 //   - 删除 type 为 reasoning_text / reasoning 的片段（TrimSpace 后比较）
