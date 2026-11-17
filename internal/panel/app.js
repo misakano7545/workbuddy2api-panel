@@ -2667,7 +2667,11 @@ function openTasks(uid) {
   // 弹窗开着期间定时静默刷新：上游任务进度是分钟级聚合，30 秒一轮足够跟上，
   // 又不会让用户为了看到变化去点「重新加载」。
   if (taskAutoTimer) clearInterval(taskAutoTimer);
-  taskAutoTimer = setInterval(() => { if (taskUID === uid) loadTasks(true); }, 30000);
+  // 标签页在后台不刷：弹窗忘了关时，每轮是对该账号的两次上游读（默认 + 小程序口径）。
+  // typeof 守卫：前端测试在没有 document 的沙箱里求值这一段。
+  taskAutoTimer = setInterval(() => {
+    if (taskUID === uid && !(typeof document !== 'undefined' && document.hidden)) loadTasks(true);
+  }, 30000);
 }
 function closeTasks() {
   taskJobGeneration++;
