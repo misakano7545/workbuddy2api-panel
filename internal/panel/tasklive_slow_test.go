@@ -24,6 +24,9 @@ func TestTasksLiveSlowRoundDoesNotBlockOrStack(t *testing.T) {
 	if out["refreshing"] != true {
 		t.Fatalf("一轮未完成时应报 refreshing：%+v", out)
 	}
+	if out["cached"] != true {
+		t.Fatalf("等待超时后回的是上一份快照，cached 应为 true：%+v", out)
+	}
 	getLiveJSON(t, p, "/panel/api/tasks/live")
 	getLiveJSON(t, p, "/panel/api/tasks/live?fresh=1")
 

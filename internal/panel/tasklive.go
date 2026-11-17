@@ -7,12 +7,16 @@
 // 两者都要「有人先动一下」，看板上永远滞后。本文件提供**只读的实时视图**：
 // 直接向每个账号查一次任务表，按 TTL 缓存后交给前端定时轮询，不需要任何手动动作。
 //
-// 为什么只调小程序口径一次：`ListTasksMP` 是默认口径的超集（上游实测），
-// 全量 28 个号也只要 28 次请求；两个口径都调会翻倍，而结果差集为空。
-// 国际版账号同样有此口径（实测返回 5 条）。
+// 口径：每个账号每轮只请求一次，失败不重试、不换口径。
+//   - 国内版调小程序口径（`ListTasksMP` 是默认口径的超集，上游实测；两个口径都调会
+//     翻倍，而结果差集为空）；
+//   - 国际版只调默认口径（`ListTasks`）。即便小程序口径对国际账号也能返回任务行，它
+//     与单号任务接口 accountTasks 的约定不一致（那里明确不对国际账号探 MP，该契约
+//     未验证），实时卡片与 accountTasks 保持同一口径。
 //
 // 缓存的意义：浏览器每轮轮询都打一次上游，多开页面/多人看会成倍放大。
-// TTL 内直接复用，`fresh=1` 可强制穿透（手动刷新按钮用）。
+// TTL 内直接复用；`fresh=1`（手动刷新按钮用）也有下限，上一轮结束不足
+// taskLiveFreshFloor 时仍回缓存，过了下限才穿透。
 package panel
 
 import (
@@ -118,7 +122,7 @@ func (p *Panel) tasksLive(w http.ResponseWriter, r *http.Request) {
 		age = int(time.Since(at).Seconds())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "cached": !waited, "age_sec": age, "refreshing": refreshing,
+		"ok": true, "cached": !waited || refreshing, "age_sec": age, "refreshing": refreshing,
 		"ttl_sec": int(taskLiveTTL.Seconds()), "accounts": rows,
 	})
 }
