@@ -11,6 +11,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -141,6 +142,22 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 	}
 }
 
+// frameRequestCodes 首帧 error 帧里按 error.code 直接定类的请求级错误。帧路径 code 优先；
+// HTTP 路径的 Classify 先判限流文案，所以 11115 配「too many tokens」之类措辞时 HTTP 上仍是
+// ErrSoftRate，两条路径在这个边角上不一致，本表不去改 Classify。
+// 11101 不在内：它与图片文案共用 code，须交给 Classify 的文案优先序。
+var frameRequestCodes = []struct {
+	code string
+	kind ErrKind
+}{
+	{"11115", ErrPromptTooLong},
+	{"11129", ErrBadParams},
+	{"11133", ErrModelParamInvalid},
+	{"11135", ErrImageInvalid},
+	{"11148", ErrToolMismatch},
+	{"11151", ErrEmptyContent},
+}
+
 // FrameKind 从 SSE error 帧 payload 判定 ErrKind：6004 模型级限流的流式形态
 // （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
 // Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
@@ -153,12 +170,28 @@ func FrameKind(payload string) ErrKind {
 	if IsRestricted(payload) {
 		return ErrAccountFault
 	}
+	// 请求级错误以业务码为准：帧里 code 在 error.code 上，只拿 message 去 Classify 会丢掉它，
+	// 而 message 措辞不保证带已知文案（11129 可能是英文原文 / 下划线形态 / 中文 displayMsg，
+	// 11133 的真实措辞不含 isModelParamInvalid 的任何文案 marker，11151 在 Classify 里只认结构化
+	// code）——判成普通 4xx 后首帧否决照样换号、末端 503。
 	var f struct {
 		Error struct {
+			Code    any    `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal([]byte(payload), &f) != nil || f.Error.Message == "" {
+	if json.Unmarshal([]byte(payload), &f) != nil {
+		return ErrNone
+	}
+	if f.Error.Code != nil {
+		code := strings.TrimSpace(fmt.Sprint(f.Error.Code))
+		for _, c := range frameRequestCodes {
+			if code == c.code {
+				return c.kind
+			}
+		}
+	}
+	if f.Error.Message == "" {
 		return ErrNone
 	}
 	return Classify(http.StatusBadRequest, f.Error.Message)

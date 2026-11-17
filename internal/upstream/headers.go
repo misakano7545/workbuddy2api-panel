@@ -31,18 +31,13 @@ const (
 	//
 	// config upstream.client_version 可覆盖（空 = 按 realm 取内置默认）。
 	//
-	// 已知缺口（issue #257，未修）：5.11.3 的桌面端比 5.9.3 多一层出站头注入
-	// （app.asar 的 proxy-env2 registerOutboundHeaderProvider），对产品 endpoint 追加
-	// X-Client-Version / X-Client-Platform / X-Client-Product，以及来自 Turing SDK 的
-	// X-Device-Token。本项目只对齐了版本号，没有发这几个头，所以 RPC 族（/v2/report、
-	// /v2/billing/*、/console/*）是「5.11.3 UA + 5.9.3 头集」——官方客户端不会出现的组合。
-	// 内置 CLI 子进程那条链（/v2/chat/completions、/v3/config）里 X-Client-* 只在
-	// isSkippableInternalHeader 名单上、没有发送点，头集未变。
-	//
-	// 没退回 5.9.3 也没补发这几个头的原因：5.11.3 这套指纹已用真 CN 号实测通过
-	// （warm model rates / chat 200 / 工具调用 200 / balance_all 200，2026-11-16），
-	// 而补发需要真机抓包确认头序与 X-Device-Token 的出现条件——没有抓包就加头等于编数据。
-	// 拿到 5.11.3 真机 RPC 抓包后再决定：补头 + 对齐头序 + 补进 official 夹具。
+	// issue #257（2026-11-18 真机抓包后已修一半）：5.11.3 桌面端比 5.9.3 多一层出站头
+	// 注入（app.asar 的 proxy-env2 registerOutboundHeaderProvider），对产品 endpoint
+	// 追加 X-Client-Version / X-Client-Platform / X-Client-Product，以及来自 Turing SDK
+	// 的 X-Device-Token。三个 X-Client-* 现已按 realm 隔离注入（只发国内版，见
+	// injectClientIdentityHeaders）；X-Device-Token 仍不发——取值只有客户端 Turing SDK
+	// 能产，网关没有等价来源，账号配了 device_token 时才由 injectDeviceToken 带上。
+	// 抓包证据与结论见 docs/issue-257-client-identity.md。
 	defaultClientVersionCN     = "5.11.3"
 	defaultClientVersionGlobal = "5.9.4"
 	// defaultCliVersion* 出站 UA 中 `CLI/<ver>` 段版本 = 各分发包内置的 @genie/agent-cli，
@@ -51,6 +46,13 @@ const (
 	// config upstream.cli_version 可覆盖。
 	defaultCliVersionCN     = "2.176.0"
 	defaultCliVersionGlobal = "2.165.0"
+
+	// defaultClientIdentityPlatform / defaultClientIdentityProduct 5.11.3 桌面端
+	// X-Client-* 头里的两段固定值。真机国内版全量样本恒为 windows / WorkBuddy
+	// （mac 包会是 macos；产品名取 product config 的 applicationName），2026-11-18
+	// 抓包 130 次命中无一例外。版本段不在这里，走 clientVersion（可被 config 覆盖）。
+	defaultClientIdentityPlatform = "windows"
+	defaultClientIdentityProduct  = "WorkBuddy"
 
 	// originRefererCN / originRefererGlobal 只给**web 层**（渲染器/登录页那类浏览器语义
 	// 的请求）用，RPC 层不发（见 CommonHeaders 注释）。
@@ -99,6 +101,48 @@ func (c *Client) cliVersion(a *auth.Auth) string {
 		return c.CliVersion
 	}
 	return defaultCliVersionFor(a)
+}
+
+// injectClientIdentityHeaders 注入 5.11.3 桌面端新增的 X-Client-* 三头。
+//
+// **只对国内版发，国际版一律不发**（issue #257 的隔离口径）。理由是两侧分发包不同：
+// 国际版停在 5.9.4，app.asar 里没有 proxy-env2 的 registerOutboundHeaderProvider，
+// 官方国际客户端从不发这三个头；把国内的 5.11.3 形态套到国际链路，等于给那条链加
+// 一层它不存在的指纹。版本号（UA / X-IDE-Version）本来就按 realm 各取各的，头集也
+// 必须各归各的，不能因为「国内升到 5.11.3」就让国际链路跟着变形状。
+//
+// 依据（2026-11-18 真机抓包，国内桌面端 5.11.3，见 docs/issue-257-client-identity.md）：
+//   - 三个头在 130 次命中里**恒同现**，取值固定 5.11.3 / windows / WorkBuddy；
+//   - 覆盖范围比静态分析预期的大得多：不只 RPC 族（/v2/report、/v2/chat/busy、
+//     refresh、/console/*、billing），/v2/chat/completions 与 /v3/config 也带——
+//     注入点在全局 axios/undici 拦截器，按 origin 判定，不按路径；
+//   - 官方客户端自身的头序三族各异（node fetch / axios / 渲染器），且 Go 的
+//     net/http 落盘时按字典序写头，逐字节复刻头序不可行、也不是判别特征，故不复刻。
+//
+// X-Device-Token 不在这里补：真机确实几乎每请求都带（1254 字符），但它的取值来自
+// 客户端 Turing SDK，网关侧没有等价来源，凭空造一个反而更可疑；账号配了
+// device_token 时由 injectDeviceToken 在它自己的调用点注入（issue #257 未决项）。
+func (c *Client) injectClientIdentityHeaders(req *http.Request, a *auth.Auth) {
+	if a == nil || a.IsGlobal() {
+		return
+	}
+	req.Header.Set("X-Client-Version", c.clientVersion(a))
+	req.Header.Set("X-Client-Platform", defaultClientIdentityPlatform)
+	req.Header.Set("X-Client-Product", defaultClientIdentityProduct)
+}
+
+// dropClientIdentityHeaders 撤掉 injectClientIdentityHeaders 注入的三头，供**小程序口径**
+// 的请求使用（tasks.go 的 growthJSONMP / ClaimRewardMP）。
+//
+// 为什么必须撤：这三个头来自桌面端 5.11.3 的 origin 注入，小程序那条链路根本不存在这一层。
+// 这些路径都是先 BillingHeaders（CN 号会把三头打上）再覆盖 X-Client-Platform: miniprogram，
+// 不撤就会发出 `5.11.3 / miniprogram / WorkBuddy` —— 桌面端不会说 miniprogram，
+// 小程序也不会自报 5.11.3 与 WorkBuddy（真机小程序是 2.4.0 / mp-weixin / workbuddy-mp，
+// 见 mp_events.go），是个谁都不像的第四种组合。
+func (c *Client) dropClientIdentityHeaders(req *http.Request) {
+	req.Header.Del("X-Client-Version")
+	req.Header.Del("X-Client-Platform")
+	req.Header.Del("X-Client-Product")
 }
 
 // defaultWorkBuddyUAFor 组装默认客户端出站 UA（官方 `buildUserAgent` 形态）：
@@ -320,6 +364,10 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	// Origin+Referer，等于给每个 RPC 请求盖一个浏览器痕迹——反而不是客户端形态。
 	// 需要浏览器语义的调用方（登录页 / web 层）自行设置 originRefererFor。
 	req.Header.Set("User-Agent", c.rpcUAFor(a))
+	// 5.11.3 的 X-Client-* 身份头：按 realm 隔离注入（国际版不发），见
+	// injectClientIdentityHeaders。放在这里是因为 chat / refresh / v3-config /
+	// console 各族都从 CommonHeaders 起头，一处覆盖 RPC 层全部路径。
+	c.injectClientIdentityHeaders(req, a)
 	// X-CodeBuddy-Request：**只有 chat 带**（见 ChatHeaders）。5.9.3 真机全量扫描——
 	// 7 条 /v2/chat/completions 全带（`x-codebuddy-request: 1`），而 busy / report /
 	// refresh / v3-config / billing 等 30+ 条业务路径**一条都没有**。旧实现把它放在
@@ -943,6 +991,9 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	}
 	// 设备风控头：billing 域（report/travel/balance/checkin）同样注入。
 	c.injectDeviceToken(req, a)
+	// X-Client-* 身份头：billing 真机同样带（3/3 条 resource-summary 全有），
+	// 与 RPC 层同口径按 realm 隔离。
+	c.injectClientIdentityHeaders(req, a)
 }
 
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。

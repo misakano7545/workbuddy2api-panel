@@ -28,9 +28,13 @@ type missingCodeFake struct {
 
 func (f *missingCodeFake) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 小程序口径按**取值**认（tasks.go 发的是 "miniprogram"），不能按「有这个头」认：
+		// 5.11.3 桌面端的新一轮出站头里，普通 RPC 请求也会带 X-Client-Platform: windows
+		// （issue #257，真机抓包 155/155 条全带），按有无判定会把桌面请求误判成 mp。
+		isMP := r.Header.Get("X-Client-Platform") == "miniprogram"
 		var buf strings.Builder
 		buf.WriteString(r.URL.Path)
-		if r.Header.Get("X-Client-Platform") != "" {
+		if isMP {
 			buf.WriteString(" mp")
 		}
 		if b, _ := readAllBody(r); len(b) > 0 {
@@ -39,7 +43,7 @@ func (f *missingCodeFake) handler() http.HandlerFunc {
 		}
 		f.mu.Lock()
 		f.seen = append(f.seen, buf.String())
-		mp, mpErr := r.Header.Get("X-Client-Platform") != "", f.mpErr
+		mp, mpErr := isMP, f.mpErr
 		codes := f.codes
 		if mp && len(f.mpCodes) > 0 {
 			codes = f.mpCodes

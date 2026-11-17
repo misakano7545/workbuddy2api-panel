@@ -88,6 +88,9 @@ func (c *Client) ModelBusy(a *auth.Auth, models []string) (map[string]string, er
 			req.Header.Set("X-User-Id", a.UID)
 		}
 		req.Header.Set("X-Domain", c.chatHost(a))
+		// X-Client-*：真机 /v2/chat/busy 10/10 条都带（issue #257 抓包），
+		// 按 realm 隔离注入。
+		c.injectClientIdentityHeaders(req, a)
 		data, err := c.doJSON(req, a)
 		if err != nil {
 			var ue *Error

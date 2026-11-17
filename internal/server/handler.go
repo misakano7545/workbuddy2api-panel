@@ -1923,15 +1923,37 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeStreamError
 				// 上游 body 是活的（200 长流），随轮转立即关闭，不留给函数末尾的 defer 堆 fd。
 				rc.Close()
-				fail(acct.UID)
+				frameKind := upstream.ErrNone
+				if hv.Payload != "" {
+					frameKind = upstream.FrameKind(hv.Payload)
+				}
+				if _, requestLevel := requestErrorCodes[frameKind]; requestLevel {
+					// 请求级错误与账号无关：只释放租约、不解绑会话，同 HTTP 路径的 11115 / 图片无效 / 11148。
+					failKeepBinding(acct.UID)
+				} else {
+					fail(acct.UID)
+				}
 				if hv.Payload == "" {
 					// 零有效帧：上游缺陷，不是账号的问题（不罚号），但换号值得一试。
 					lastErr = sErr
 					log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (no byte written, rotating)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
 				} else {
 					// 帧内错误没有独立 HTTP 状态：末端映射只看 Kind，Status 仅作信封占位。
-					kind := upstream.FrameKind(hv.Payload)
+					kind := frameKind
 					h.applyErrorPolicy(acct.UID, kind, hv.Payload, bareModel, nil)
+					// 请求本身的错误（内容拦截 / 超长 / 参数 / 工具定义……）以「200 + 首帧 error 帧」
+					// 出现时与 HTTP ≥400 路径同口径：同一 body 换任何账号都是同一个拒绝，立即回 400
+					// 并透传 error 帧原文。否则轮转额度烧完后落到末端 503 no_healthy_account，
+					// 客户端把必然失败的请求当可重试反复重发。客户端一个字节都没收到，状态码还能改。
+					if code, ok := requestErrorCodes[kind]; ok {
+						log.Printf("WARN: [server] stream acct=%s model=%s: request-level error frame before first byte kind=%s payload=%s (not rotating)",
+							logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(hv.Payload, 200))
+						writeOpenAIErrorHint(w, http.StatusBadRequest, code, hv.Payload,
+							h.hintOf(kind, hv.Payload, bareModel, reqHasImage, nil))
+						st.status = http.StatusBadRequest
+						st.outcome = reqlog.OutcomeHTTPError
+						return
+					}
 					lastErr = &upstream.Error{Kind: kind, Msg: hv.Payload}
 					log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame before first byte kind=%s payload=%s (rotating)",
 						logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(hv.Payload, 200))
@@ -2584,6 +2606,19 @@ func egressKey(a *auth.Auth) string {
 		realm = a.Realm()
 	}
 	return "direct:" + realm
+}
+
+// requestErrorCodes 请求级上游错误 → 400 的 error.code：错在请求本身，同一 body 换任何账号
+// 都是同一个拒绝，回 503 会被中转站当成可重试。首帧 error 帧的即刻 400 与托管工具探测的
+// 止损共用这张表；码值与轮转循环里 HTTP ≥400 分支的即刻 400 一致。
+var requestErrorCodes = map[upstream.ErrKind]string{
+	upstream.ErrContentBlocked:    "content_blocked",
+	upstream.ErrPromptTooLong:     "prompt_too_long",
+	upstream.ErrImageInvalid:      "image_invalid",
+	upstream.ErrToolMismatch:      "tool_call_mismatch",
+	upstream.ErrBadParams:         "bad_params",
+	upstream.ErrModelParamInvalid: "model_param_invalid",
+	upstream.ErrEmptyContent:      "empty_content",
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。

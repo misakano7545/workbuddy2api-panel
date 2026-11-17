@@ -340,7 +340,12 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID
 		req.Header.Set("X-User-Id", a.UID)
 	}
 	req.Header.Set("X-Domain", c.chatHost(a))
-	// 设备风控头：真机 /v2/report 不带 X-Device-Token（只有 billing 族带），故不注入。
+	// 设备风控头：2026-10-30 的 5.9.3 样本里 /v2/report 不带 X-Device-Token，但
+	// 2026-11-18 国内 5.11.3 抓包的 7 条里有 6 条带着（1254 字符）。取值只有客户端
+	// Turing SDK 能产，网关侧没有等价来源，故此处仍不注入；账号配了 device_token
+	// 时才由 injectDeviceToken 的调用点带上（issue #257 未决项）。
+	// X-Client-*：5.11.3 这条族 7/7 全带，按 realm 隔离注入。
+	c.injectClientIdentityHeaders(req, a)
 	_, err = c.doJSON(req, a)
 	return err
 }
