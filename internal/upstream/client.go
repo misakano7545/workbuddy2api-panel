@@ -2620,6 +2620,9 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 		ua = c.v3ProbeUA(a)
 	}
 	req.Header.Set("User-Agent", ua)
+	// X-Client-*：真机 /v3/config 3/3 条都带（含 CLI 两段式 UA 那条），
+	// 证明注入挂在共享 HTTP 层而非某个 RPC 模块上。按 realm 隔离注入。
+	c.injectClientIdentityHeaders(req, a)
 	resp, err := c.do(req, a, false)
 	if err != nil {
 		return nil, nil, err

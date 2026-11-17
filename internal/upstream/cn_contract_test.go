@@ -13,6 +13,11 @@
 //	accept-encoding                      ← 传输层协商
 //	x-device-token                       ← 账号是否配了设备令牌（配置项，非契约）
 //
+// X-Client-Version / X-Client-Platform / X-Client-Product 三个头来自 2026-11-18 另一次
+// 真机抓包（国内桌面端 **5.11.3**，见 docs/issue-257-client-identity.md）：六条路径全部齐带，取值恒
+// 5.11.3 / windows / WorkBuddy，因此进黄金集；国际版不发这三个头，由
+// TestClientIdentityRealmIsolation 单独钉住（issue #257）。
+//
 // 值断言只做「形态/关键常量」级（版本段、布尔值、枚举），动态 ID 只校验形态。
 package upstream
 
@@ -57,9 +62,13 @@ var cnGoldenCases = []cnGolden{
 			"x-stainless-arch", "x-stainless-lang", "x-stainless-os",
 			"x-stainless-package-version", "x-stainless-retry-count",
 			"x-stainless-runtime", "x-stainless-runtime-version",
+			"x-client-version", "x-client-platform", "x-client-product",
 		},
 		values: map[string]string{
 			"accept":              "application/json",
+			"x-client-version":    "5.11.3",
+			"x-client-platform":   "windows",
+			"x-client-product":    "WorkBuddy",
 			"x-private-data":      "false", // 真机 false（模型优化开），不是 true
 			"x-agent-runtime":     "local-agent",
 			"x-agent-type":        "main",
@@ -77,12 +86,16 @@ var cnGoldenCases = []cnGolden{
 		headers: []string{
 			"accept", "authorization", "content-type", "user-agent", "x-domain",
 			"x-product", "x-request-id", "x-user-id",
+			"x-client-version", "x-client-platform", "x-client-product",
 		},
 		values: map[string]string{
-			"accept":       "application/json, text/plain, */*",
-			"content-type": "application/json;charset=UTF-8",
-			"x-product":    "SaaS",
-			"user-agent":   "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0",
+			"accept":            "application/json, text/plain, */*",
+			"content-type":      "application/json;charset=UTF-8",
+			"x-product":         "SaaS",
+			"x-client-version":  "5.11.3",
+			"x-client-platform": "windows",
+			"x-client-product":  "WorkBuddy",
+			"user-agent":        "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0",
 		},
 		// 2026-10-30 复核：CN 5.9.3 全部 26 条 /v2/report（含登录前 2 条）**都没有**
 		// X-Requested-With。国际版那 10 条带它的样本属于 UA 首段驼峰的渲染器侧另一族，
@@ -95,12 +108,16 @@ var cnGoldenCases = []cnGolden{
 		headers: []string{
 			"accept", "authorization", "content-type", "user-agent", "x-domain",
 			"x-product", "x-request-id", "x-user-id",
+			"x-client-version", "x-client-platform", "x-client-product",
 		},
 		values: map[string]string{
-			"accept":       "application/json, text/plain, */*",
-			"content-type": "application/json",
-			"x-product":    "SaaS",
-			"user-agent":   "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0",
+			"accept":            "application/json, text/plain, */*",
+			"content-type":      "application/json",
+			"x-product":         "SaaS",
+			"x-client-version":  "5.11.3",
+			"x-client-platform": "windows",
+			"x-client-product":  "WorkBuddy",
+			"user-agent":        "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0",
 		},
 		absent: []string{
 			"x-codebuddy-request", "x-conversation-id", "x-conversation-request-id",
@@ -117,11 +134,15 @@ var cnGoldenCases = []cnGolden{
 			"accept", "authorization", "content-type", "user-agent",
 			"x-auth-refresh-source", "x-domain", "x-product", "x-refresh-token",
 			"x-request-id", "x-user-id",
+			"x-client-version", "x-client-platform", "x-client-product",
 		},
 		values: map[string]string{
 			"accept":                "application/json, text/plain, */*",
 			"x-auth-refresh-source": "plugin",
 			"x-product":             "SaaS",
+			"x-client-version":      "5.11.3",
+			"x-client-platform":     "windows",
+			"x-client-product":      "WorkBuddy",
 			"user-agent":            "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0",
 		},
 		absent: []string{"origin", "referer", "accept-language", "x-codebuddy-request", "x-requested-with"},
@@ -132,11 +153,15 @@ var cnGoldenCases = []cnGolden{
 		headers: []string{
 			"accept", "authorization", "content-type", "user-agent", "x-domain",
 			"x-request-id", "x-user-id",
+			"x-client-version", "x-client-platform", "x-client-product",
 		},
 		values: map[string]string{
-			"accept":       "application/json",
-			"content-type": "application/json",
-			"user-agent":   "axios/1.16.1", // billing 层是 axios 实例，与客户端 UA 不同
+			"accept":            "application/json",
+			"content-type":      "application/json",
+			"x-client-version":  "5.11.3",
+			"x-client-platform": "windows",
+			"x-client-product":  "WorkBuddy",
+			"user-agent":        "axios/1.16.1", // billing 层是 axios 实例，与客户端 UA 不同
 		},
 		absent: []string{"origin", "referer", "accept-language", "x-codebuddy-request"},
 	},
@@ -149,10 +174,14 @@ var cnGoldenCases = []cnGolden{
 		headers: []string{
 			"accept", "authorization", "user-agent", "x-domain", "x-product",
 			"x-request-id", "x-user-id",
+			"x-client-version", "x-client-platform", "x-client-product",
 		},
 		values: map[string]string{
-			"accept":    "application/json, text/plain, */*",
-			"x-product": "SaaS",
+			"accept":            "application/json, text/plain, */*",
+			"x-product":         "SaaS",
+			"x-client-version":  "5.11.3",
+			"x-client-platform": "windows",
+			"x-client-product":  "WorkBuddy",
 			// 2026-10-30 复核：真机 /v3/config 是两段单品牌（同 token 三段/两段返回相同）。
 			"user-agent": "WorkBuddy/5.11.3 CLI/2.176.0",
 		},
