@@ -69,3 +69,73 @@ func TestResponsesReplayChatShapedToolKeepsPair(t *testing.T) {
 		t.Fatalf("Chat 形状工具配对被拆：call=%q result=%q name=%q 出站=%v", callID, resultID, resultName, msgs)
 	}
 }
+
+// TestResponsesReplaySkipsHostedToolItems 托管工具与其他不认识、没有 role 也没有内容的
+// 项（web_search_call、image_generation_call、mcp_call 等）不生成消息：此前落入默认
+// 分支变成一条 user 空消息，既拆开同一批工具调用、把图片插进并行 tool 结果之间
+// （11148），又清空调用前暂存的思考。image_generation_call 的 base64 成品绝不能出站。
+func TestResponsesReplaySkipsHostedToolItems(t *testing.T) {
+	blob := strings.Repeat("iVBORw0KGgo", 4096)
+	think := map[string]any{"type": "reasoning", "summary": []any{
+		map[string]any{"type": "summary_text", "text": "先查再画"}}}
+	img := []any{map[string]any{"type": "input_image", "image_url": "data:image/png;base64,aGk="}}
+	cases := []struct {
+		name  string
+		items []any
+		roles string
+	}{
+		{"夹在同一批工具调用之间", []any{
+			map[string]any{"role": "user", "content": "查完画图"},
+			think,
+			map[string]any{"type": "web_search_call", "id": "ws_1", "status": "completed",
+				"action": map[string]any{"type": "search", "query": "q"}},
+			map[string]any{"type": "function_call", "call_id": "c1", "name": "noop", "arguments": "{}"},
+			map[string]any{"type": "image_generation_call", "id": "ig_1", "status": "completed", "result": blob},
+			map[string]any{"type": "function_call", "call_id": "c2", "name": "noop", "arguments": "{}"},
+			map[string]any{"type": "function_call_output", "call_id": "c1", "output": "一"},
+			map[string]any{"type": "function_call_output", "call_id": "c2", "output": "二"},
+		}, "user,assistant,tool,tool"},
+		{"夹在并行工具结果之间", []any{
+			map[string]any{"role": "user", "content": "看图"},
+			map[string]any{"type": "function_call", "call_id": "c1", "name": "view", "arguments": "{}"},
+			map[string]any{"type": "function_call", "call_id": "c2", "name": "view", "arguments": "{}"},
+			map[string]any{"type": "function_call_output", "call_id": "c1", "output": img},
+			map[string]any{"type": "mcp_call", "id": "mcp_1", "server_label": "s", "name": "t", "arguments": "{}", "output": "x"},
+			map[string]any{"type": "function_call_output", "call_id": "c2", "output": "二"},
+		}, "user,assistant,tool,tool,user"},
+	}
+	for _, tc := range cases {
+		out := convertInputItems(tc.items, nil)
+		if got := replayRoles(out); got != tc.roles {
+			t.Fatalf("%s：角色序列 %s，期望 %s（出站 %v）", tc.name, got, tc.roles, out)
+		}
+		raw, _ := json.Marshal(out)
+		if strings.Contains(string(raw), "iVBORw0KGgo") {
+			t.Fatalf("%s：image_generation_call 的 base64 成品出站了", tc.name)
+		}
+	}
+	out := convertInputItems(cases[0].items, nil)
+	if _, reasoning, callID := reasoningTestCall(t, out[1]); callID != "c1" || reasoning != "先查再画" {
+		t.Fatalf("托管项清掉了调用前的思考：call=%s reasoning=%q", callID, reasoning)
+	}
+	if tcs, _ := out[1].(map[string]any)["tool_calls"].([]any); len(tcs) != 2 {
+		t.Fatalf("同一批工具调用被托管项拆成两批：%v", out)
+	}
+	// 不认识但带了内容的项照旧按 user 消息送达，不因为这次修复丢内容。
+	out = convertInputItems([]any{map[string]any{"type": "future_note", "content": "保留我"}}, nil)
+	if len(out) != 1 || out[0].(map[string]any)["content"] != "保留我" {
+		t.Fatalf("带内容的未知项被丢：%v", out)
+	}
+	// compaction 在主循环里清空暂存思考，前瞻也要把它当边界：其前的思考归前一条
+	// assistant，而不是暂存后被 compaction 清掉。
+	out = convertInputItems([]any{
+		map[string]any{"role": "user", "content": "问"},
+		map[string]any{"type": "message", "role": "assistant", "content": "答"},
+		think,
+		map[string]any{"type": "compaction", "encrypted_content": "前情提要 已改完"},
+		map[string]any{"type": "message", "role": "assistant", "content": "再答"},
+	}, nil)
+	if _, reasoning, _ := reasoningTestCall(t, out[1]); reasoning != "先查再画" {
+		t.Fatalf("compaction 前的思考丢了：%v", out)
+	}
+}

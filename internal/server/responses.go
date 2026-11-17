@@ -607,28 +607,54 @@ func textParts(v any) []string {
 	return parts
 }
 
-// reasoningKnownTypes 前瞻扫描认定的「实质项」类型：这些类型决定紧挨其前的思考段在
-// 语义上属于谁。不在集合里的项（additional_tools、local_shell_call 等元数据）会被
-// reasoningGroupTarget 跳过，避免一段被隔开的思考错误归位或被丢弃。
-var reasoningKnownTypes = map[string]bool{
-	"message": true, "user": true,
+// replayMetaTypes 元数据/控制项：不生成消息。
+var replayMetaTypes = map[string]bool{
+	"additional_tools": true, "compaction_trigger": true,
+	"local_shell_call": true, "local_shell_call_output": true,
+}
+
+// replayHandledTypes convertInputItems 里有专门分支的类型（与那里的 switch 一一对应），
+// 其余类型都落默认分支按消息处理。
+var replayHandledTypes = map[string]bool{
+	"message": true, "reasoning": true, "item_reference": true,
+	"compaction": true, "compaction_summary": true, "context_compaction": true,
 	"function_call": true, "function_call_output": true,
 	"custom_tool_call": true, "custom_tool_call_output": true,
 	"agent_message": true,
 }
 
-// reasoningGroupTarget 从 start+1 起找 reasoning 项之后第一个「实质项」：无 type 的
-// dict（Chat 形状混排项，靠 role 表意）也算。找不到返回 nil（对话到此结束）。
+// replayInert 判断回放项是否「不产生消息、也不动任何状态」：元数据项，以及不认识、
+// 没有 role、也没有可用内容的类型项——托管工具的回执（web_search_call、
+// image_generation_call、mcp_call、computer_call、file_search_call、
+// code_interpreter_call 等）都是这种形状，上游没有对应物。它们落进默认分支会变成一条
+// user 空消息：拆开同一批工具调用、把图片插进并行 tool 结果之间（11148）、清空调用前
+// 暂存的思考。前瞻归属与主循环共用这一个判据，两边对同一项的看法才不会分叉。
+// 带内容的未知项照旧按消息送达，不因此丢内容。
+func replayInert(m map[string]any) bool {
+	typ, _ := m["type"].(string)
+	if replayMetaTypes[typ] {
+		return true
+	}
+	if typ == "" || replayHandledTypes[typ] || m["role"] != nil {
+		return false
+	}
+	c, isText := convertContent(m["content"]).(string)
+	return isText && strings.TrimSpace(c) == ""
+}
+
+// reasoningGroupTarget 从 start+1 起找 reasoning 项之后第一个「实质项」：跳过后续的
+// reasoning（连续段同属一组）、item_reference（主循环里不产消息、不清思考）和
+// replayInert 项。找不到返回 nil（对话到此结束）。
 func reasoningGroupTarget(items []any, start int) map[string]any {
 	for i := start + 1; i < len(items); i++ {
 		m, ok := items[i].(map[string]any)
 		if !ok {
 			continue
 		}
-		typ, _ := m["type"].(string)
-		if typ == "" || reasoningKnownTypes[typ] {
-			return m
+		if typ, _ := m["type"].(string); typ == "reasoning" || typ == "item_reference" || replayInert(m) {
+			continue
 		}
+		return m
 	}
 	return nil
 }
@@ -724,6 +750,11 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 				"name": m["name"], "output": m["content"]}
 			typ = "function_call_output"
 		}
+		if replayInert(m) {
+			// 元数据项与托管工具回执：不生成消息、不清空 pendingReasoning、不落图——
+			// 被它们隔开的连续思考段、同一批工具调用与并行工具结果都保持原样。
+			continue
+		}
 		// 图片的落点是「这一轮工具到此为止」的那个项，**不能挂在 flush() 里**：
 		// flush() 在每条 function_call_output 开头都会跑，于是并行工具调用
 		// （assistant 一条带多个 tool_calls）处理第二条结果时，会先把第一条结果的图
@@ -753,11 +784,6 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 		case "item_reference":
 			// 引用型项指向不存在的存档，无从解引用，维持跳过。
 			flush()
-			continue
-		case "additional_tools", "compaction_trigger", "local_shell_call", "local_shell_call_output":
-			// 元数据/控制项：不生成消息、不清空 pendingReasoning，被它们隔开的连续
-			// 思考段仍属同一组（此前落入默认分支会被造成一条假 user 空消息，既切断
-			// 思考组又向上游塞脏数据）。
 			continue
 		case "compaction", "compaction_summary", "context_compaction":
 			// 上一轮的上下文压缩结果：对上游它是后续对话赖以延续的交接摘要，以
