@@ -349,7 +349,7 @@ func (r *continueReader) tryNarrationRetry() bool {
 	}
 	r.narrationTries++
 	// 异步换段：等待期内客户端只会收到 keepalive（见 openSegmentAsync）。
-	return r.openSegmentAsync(body, func(rc io.ReadCloser) {
+	return r.openSegmentAsync(switchNarration, body, func(rc io.ReadCloser) {
 		r.seg++
 		r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
 		r.finish, r.tail = "", nil
