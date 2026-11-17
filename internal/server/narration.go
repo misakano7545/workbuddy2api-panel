@@ -309,6 +309,9 @@ func (r *continueReader) tryNarrationRetry() bool {
 		return false
 	case r.text.Len() == 0:
 		return false
+	case r.text.Len() == r.narrationTextAt:
+		// 上一次救援一个字都没写出来：再发的请求体与上一次一字不差，只是再付一次整段上下文的钱。
+		return false
 	case r.atSegmentCap():
 		return false
 	}
@@ -349,6 +352,7 @@ func (r *continueReader) tryNarrationRetry() bool {
 		return false
 	}
 	r.narrationTries++
+	r.narrationTextAt = r.text.Len()
 	// 异步换段：等待期内客户端只会收到 keepalive（见 openSegmentAsync）。
 	return r.openSegmentAsync(body, func(rc io.ReadCloser) {
 		r.seg++
