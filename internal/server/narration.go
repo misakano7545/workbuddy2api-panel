@@ -29,6 +29,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
@@ -121,25 +122,24 @@ func hasToolCallMarkup(text string) bool {
 // 判据取「措辞 + 问号」，不猜语义：宁可漏救（客户端自己重试一轮的代价是几秒），
 // 也不能替用户按下发送键。
 //
-// 这一组是直接对用户说的话，出现在正文任何位置都算：确认请求后面常跟着草稿本身
+// 这一组是明确对用户说的话，出现在正文任何位置都算：确认请求后面常跟着草稿本身
 // （"请确认后我再发送。\n\n收件人：…\n主题：…"），只看最后一句就会把草稿当成末句、漏掉它。
+// 英文项都是小写（与 strings.ToLower 后的正文比）。
 var userYieldMarkers = []string{
-	"请确认", "确认后", "等你确认", "待你确认", "等你回复", "等你确认后",
-	"要不要我", "你希望", "请告知",
-	"让我知道", "请你确认", "你确认后", "确认无误", "可以吗", "行吗", "好吗",
+	"请确认", "请你确认", "你确认后", "等你确认", "待你确认", "等你回复", "让我知道",
+	"please confirm", "let me know",
 }
 
 // userYieldDeliberation 也能用来问用户、但同样常见于技术叙述的措辞（上游真机样本：4083 字正文
 // 停在「我将开始修改 internal/verify/check.go」上，命中的是三千字之前的「为“是否需要更换”
-// 提供量化支撑」）。预告句救援对它们只认两种位置（见 deliberationAsksUser）：最后一句里，
-// 或者用在问句 / 对「我」「你」说的话里；toolonly 仍按整段认——那条会采纳工具调用，正文又短，
-// 宁可少救。
-var userYieldDeliberation = []string{"是否需要", "需不需要", "要不要"}
-
-// userYieldMarkersEN 英文形态（模型偶发用英文收尾）。
-var userYieldMarkersEN = []string{
-	"please confirm", "let me know", "should i ", "do you want", "would you like",
-	"awaiting your", "waiting for your", "confirm before", "shall i ",
+// 提供量化支撑」；同类还有「staging 确认后再上线」「日志格式确认无误」「如有问题请告知维护者」）。
+// 预告句救援对它们只认三种位置（见 yieldsToUser）：最后一句里；正文最后一个问句里、且问句之后
+// 只剩没有句读的内容（草稿行）；后面紧跟「我 / 你」（"确认后我再发送"，「我们 / 你们」不算）。
+// toolonly 仍按整段认——那条会采纳工具调用，正文又短，宁可少救。
+var userYieldDeliberation = []string{
+	"是否需要", "需不需要", "要不要", "确认后", "确认无误", "请告知", "你希望",
+	"可以吗", "行吗", "好吗",
+	"should i ", "shall i ", "do you want", "would you like", "awaiting your", "waiting for your", "confirm before",
 }
 
 // textYieldsToUser 报告这段正文是否在「等用户回话」：以问号收尾，或含请确认类措辞（整段）。
@@ -149,28 +149,44 @@ var userYieldMarkersEN = []string{
 func textYieldsToUser(text string) bool { return yieldsToUser(text, true) }
 
 // yieldsToUser 同 textYieldsToUser；deliberationAnywhere=false 时 userYieldDeliberation 只按
-// deliberationAsksUser 的两种位置认（预告句救援用，issue #245）。
+// 它注释里的三种位置认（预告句救援用，issue #245）。
 func yieldsToUser(text string, deliberationAnywhere bool) bool {
-	t := strings.TrimSpace(text)
+	t := strings.ToLower(strings.TrimSpace(text))
 	if t == "" {
 		return false
 	}
 	if strings.HasSuffix(t, "？") || strings.HasSuffix(t, "?") {
 		return true
 	}
-	if containsAnyOf(t, userYieldMarkers) || containsAnyOf(strings.ToLower(t), userYieldMarkersEN) {
+	if containsAnyOf(t, userYieldMarkers) {
 		return true
 	}
 	if deliberationAnywhere {
 		return containsAnyOf(t, userYieldDeliberation)
 	}
-	return containsAnyOf(toolOnlyLastSentence(t), userYieldDeliberation) || deliberationAsksUser(t)
+	return containsAnyOf(toolOnlyLastSentence(t), userYieldDeliberation) ||
+		containsAnyOf(trailingQuestion(t), userYieldDeliberation) ||
+		deliberationAddressesUser(t)
 }
 
-// deliberationAsksUser 正文里的「是否需要 / 要不要」是否在问用户：后面紧跟「我」「你」
-// （"是否需要我先发给你过目。草稿如下…"），或所在句子以问号结束（"要不要现在发送？\n草稿…"）。
-// 技术叙述（"为“是否需要更换”提供量化支撑。"）两样都不沾。
-func deliberationAsksUser(t string) bool {
+// trailingQuestion 正文最后一个问句——前提是它之后只剩没有句读的内容（"要不要现在发送？\n
+// 收件人：…\n主题：…"，问句后面是草稿行）。问句之后还有完整的句子，说明模型接着往下说了，
+// 那个问句只是叙述的一部分，返回空串。
+func trailingQuestion(t string) string {
+	i := strings.LastIndexAny(t, "？?")
+	if i < 0 {
+		return ""
+	}
+	_, n := utf8.DecodeRuneInString(t[i:])
+	if strings.ContainsAny(t[i+n:], "。！？!?") {
+		return ""
+	}
+	return toolOnlyLastSentence(t[:i+n])
+}
+
+// deliberationAddressesUser 正文里的 userYieldDeliberation 后面是否紧跟「我」「你」
+// （"确认后我再发送"、"是否需要我先发给你过目"）。「我们 / 你们」是叙述主语，不算。
+func deliberationAddressesUser(t string) bool {
 	for _, m := range userYieldDeliberation {
 		for rest := t; ; {
 			i := strings.Index(rest, m)
@@ -178,10 +194,8 @@ func deliberationAsksUser(t string) bool {
 				break
 			}
 			rest = rest[i+len(m):]
-			if strings.HasPrefix(rest, "我") || strings.HasPrefix(rest, "你") {
-				return true
-			}
-			if j := strings.IndexAny(rest, "。！？!?\n"); j >= 0 && (rest[j] == '?' || strings.HasPrefix(rest[j:], "？")) {
+			if (strings.HasPrefix(rest, "我") || strings.HasPrefix(rest, "你")) &&
+				!strings.HasPrefix(rest, "我们") && !strings.HasPrefix(rest, "你们") {
 				return true
 			}
 		}
