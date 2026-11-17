@@ -189,7 +189,7 @@ func (r *continueReader) tryStarvedRetry() bool {
 		log.Printf("[starved] acct=%s model=%s seg=%d %s（正文 0B）→ 同额度关思考重发",
 			logfmt.Label(r.acct.UID, r.acct.Nickname), bareModelOf(r.body), r.seg, cause)
 	}, func(status int, err error) {
-		log.Printf("WARN: [starved] acct=%s seg=%d 关思考重发失败（status=%d err=%v）→ 降级为截断终态",
+		log.Printf("WARN: [starved] acct=%s seg=%d 关思考重发失败（status=%d err=%v）→ 接着判下一条（续写或按截断收尾）",
 			logfmt.Label(r.acct.UID, r.acct.Nickname), r.seg+1, status, err)
 	})
 }

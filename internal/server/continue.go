@@ -144,7 +144,9 @@ type continueReader struct {
 	lastClientAt time.Time // 上次客户端可见输出/keepalive 的时刻（静默节流）
 	// emitted 已向下游交出过数据帧。在这之前 StreamHint 的首帧否决窗口还开着，一条注释行就会
 	// 提交 200：之后这次尝试的首帧若是 error 帧，就换不了号、只能「200 + error 帧」收尾。
-	// 所以保活注释只在 emitted 之后补（见 maybeKeepalive）。
+	// 所以保活注释只在 emitted 之后补（见 maybeKeepalive）。这之前的等待（例如首段零输出
+	// 时的空截断救援）完全靠首帧心跳（server.head_keepalive）喂活连接：配成 0 时这段等待
+	// 客户端一个字节都收不到。
 	emitted bool
 
 	// segSawDone 当前段是否以 [DONE] 收尾：换段失败时按它决定收尾形态。
@@ -536,7 +538,7 @@ func (r *continueReader) emit(payload string) {
 // 透传并 flush，responsesWriter 与 chat 类客户端的解析器都忽略它；唯一作用是
 // 让连接保持「有数据流动」，防流静默超时掐线。下游还没收到任何数据帧时不补（见 emitted）。
 func (r *continueReader) maybeKeepalive() {
-	if !r.emitted || keepaliveEvery > 0 && time.Since(r.lastClientAt) < keepaliveEvery {
+	if !r.emitted || (keepaliveEvery > 0 && time.Since(r.lastClientAt) < keepaliveEvery) {
 		return
 	}
 	r.out = append(r.out, ": keepalive\n\n"...)
