@@ -30,6 +30,19 @@ const (
 	//   - 真机 X-IDE-Version: 5.9.4，/v3/config UA = `WorkBuddy/5.9.4 CLI/2.165.0`
 	//
 	// config upstream.client_version 可覆盖（空 = 按 realm 取内置默认）。
+	//
+	// 已知缺口（issue #257，未修）：5.11.3 的桌面端比 5.9.3 多一层出站头注入
+	// （app.asar 的 proxy-env2 registerOutboundHeaderProvider），对产品 endpoint 追加
+	// X-Client-Version / X-Client-Platform / X-Client-Product，以及来自 Turing SDK 的
+	// X-Device-Token。本项目只对齐了版本号，没有发这几个头，所以 RPC 族（/v2/report、
+	// /v2/billing/*、/console/*）是「5.11.3 UA + 5.9.3 头集」——官方客户端不会出现的组合。
+	// 内置 CLI 子进程那条链（/v2/chat/completions、/v3/config）里 X-Client-* 只在
+	// isSkippableInternalHeader 名单上、没有发送点，头集未变。
+	//
+	// 没退回 5.9.3 也没补发这几个头的原因：5.11.3 这套指纹已用真 CN 号实测通过
+	// （warm model rates / chat 200 / 工具调用 200 / balance_all 200，2026-11-16），
+	// 而补发需要真机抓包确认头序与 X-Device-Token 的出现条件——没有抓包就加头等于编数据。
+	// 拿到 5.11.3 真机 RPC 抓包后再决定：补头 + 对齐头序 + 补进 official 夹具。
 	defaultClientVersionCN     = "5.11.3"
 	defaultClientVersionGlobal = "5.9.4"
 	// defaultCliVersion* 出站 UA 中 `CLI/<ver>` 段版本 = 各分发包内置的 @genie/agent-cli，
