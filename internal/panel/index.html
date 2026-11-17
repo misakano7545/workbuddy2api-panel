@@ -1213,11 +1213,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <header>
           <h3>实时任务 <span class="hint" id="liveSummary"></span></h3>
           <span class="grow"></span>
-          <label class="sel-note" title="每次轮询向每个账号查一次任务表（上游只读）">自动刷新
+          <label class="sel-note" title="每轮向每个启用账号查一次任务表（上游只读），默认 2 分钟一轮">自动刷新
             <select id="liveEvery">
               <option value="0">关</option>
-              <option value="45" selected>45 秒</option>
-              <option value="120">2 分钟</option>
+              <option value="60">1 分钟</option>
+              <option value="120" selected>2 分钟</option>
               <option value="300">5 分钟</option>
             </select>
           </label>

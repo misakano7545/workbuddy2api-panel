@@ -2821,7 +2821,10 @@ $('btnTaskJobsReload').onclick = () => { taskCenterOwner = 'jobs'; loadTaskJobs(
 
    轮询只在「本页可见 + 浏览器在前台」时跑：切走就停，避免后台标签页把上游当靶子练。
    间隔拿到后端 ttl_sec 做下限——比 TTL 还短只是打自己的缓存，没意义。 */
-let liveTimer = null, liveEvery = 45, liveLoading = false, liveTTL = 45;
+// 一轮 = 每个启用账号一次上游 GET：默认 2 分钟，可选档位都不低于后端缓存 TTL（1 分钟），
+// 再密只是读缓存。
+const LIVE_EVERY_CHOICES = [0, 60, 120, 300];
+let liveTimer = null, liveEvery = 120, liveLoading = false;
 function liveTaskRow(t) {
   // 返回行对象，由 renderLiveTasks 统一交给 qrowHTML 渲染一次（返回 HTML 会被渲染两次）。
   // 上游 Task：claimed / claimable 是本地推算，status 是上游原文
@@ -2840,7 +2843,6 @@ function liveTaskRow(t) {
 function renderLiveTasks(d) {
   const list = $('liveList'), empty = $('liveEmpty'), note = $('liveNote');
   const accts = (d && d.accounts) || [];
-  if (d && d.ttl_sec) liveTTL = d.ttl_sec;
   const groups = accts.filter(a => (a.tasks || []).length || a.error).map(a => ({
     uid: a.uid,
     nick: a.nickname || String(a.uid).slice(0, 8),
@@ -2889,8 +2891,6 @@ async function loadLiveTasks(fresh) {
 }
 function liveTasksTick() {
   if (view !== 'taskscenter' || document.hidden) return;
-  // 间隔比后端 TTL 短只会读缓存；按实际 TTL 抬到下限，避免无谓轮询。
-  if (liveEvery < liveTTL) liveEvery = liveTTL;
   loadLiveTasks(false);
 }
 let liveVisBound = false;
@@ -2920,7 +2920,7 @@ if ($('liveEvery')) {
   const savedRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('wb2api.liveEvery') : null;
   if (savedRaw !== null && savedRaw !== '') {
     const saved = Number(savedRaw);
-    if (saved >= 0) { liveEvery = saved; $('liveEvery').value = String(saved); }
+    if (LIVE_EVERY_CHOICES.includes(saved)) { liveEvery = saved; $('liveEvery').value = String(saved); }
   }
 }
 if ($('btnLiveReload')) $('btnLiveReload').onclick = () => loadLiveTasks(true);

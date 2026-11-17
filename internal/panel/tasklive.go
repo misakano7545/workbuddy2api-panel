@@ -25,8 +25,9 @@ import (
 )
 
 // taskLiveTTL 实时任务缓存有效期。取值考虑两点：上游任务进度是分钟级聚合的，
-// 再密也不会更新；而 28 个号一轮就是 28 次上游 GET，压得太短会把看板变成压测。
-const taskLiveTTL = 45 * time.Second
+// 再密也不会更新；而一轮是「启用账号数」次上游 GET，一个打开的面板每秒的请求量 =
+// 账号数 / 缓存时长，压得太短（原 45 秒）会把看板变成压测。
+const taskLiveTTL = 60 * time.Second
 
 // taskLiveConcurrency 一轮实时查询的账号并发（与券码/活动页同档，避免打爆上游）。
 const taskLiveConcurrency = 4
