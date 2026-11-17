@@ -119,70 +119,64 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 // c0) 在后），上游判 11148 tool_call_sequence_broken 顶死整条会话。
 //
 // 参照 hub PR #3（PolarisTime，niyouqianma/workbuddy2api-hub）的
-// reorder_early_tool_results：只调顺序、不改内容——call id 在一次请求内唯一，
-// 重排无损，工具语义与结果正文都原样保留。
+// reorder_early_tool_results：只调顺序、不改内容，工具语义与结果正文都原样保留。
 //
 // 目标位置是所属 assistant 之后、**其后连续 tool 结果之后**（与 PR 同口径），
 // 因此用「延迟到结果区结束再落地」而不是插在 assistant 紧跟的位置：正常顺序的
 // 结果先出，早到的那几条补在同批末尾，同批内的原相对顺序保持不变。
 //
-// 边界：
-//   - 同名 id 被多条 assistant 声明时跟最后一次声明走（与 cleanupOrphanToolCalls
-//     的对称裁剪口径一致）；
-//   - 找不到声明者的孤儿结果不动，交给 cleanupOrphanToolCalls 删；
+// 归属判定：**id 会跨轮复用**——上游没给 id 时网关自己按轮内下标补 call_0 / toolu_0
+// （responses.go / messages.go 的 openTool），同一会话里每轮都可能有一个 call_0。
+// 所以不能「同 id 跟最后一次声明走」（PR 的口径）：那会把顺序本来正确的第一轮结果
+// 搬到最后一轮之后，反而制造 11148。这里正序扫描，记每个 id「已声明、未应答」的次数：
+//   - 结果命中未应答的声明 → 正常配对，原地不动；
+//   - 否则它不属于前面任何一次声明：后面有同 id 的声明就是早到结果，归**最近**那一次，
+//     并预先记作该次已应答（之后同 id 的结果不会再被它吸走）；
+//   - 前后都找不到声明者的孤儿结果不动，交给 cleanupOrphanToolCalls 删；
 //   - 本来顺序就对的请求零改动零分配（返回原 slice）。
 func reorderEarlyToolResults(messages []any) ([]any, bool) {
 	if len(messages) < 2 {
 		return messages, false
 	}
-	declAt := map[string]int{}
+	// 每个 id 的全部声明下标（正序遍历 → 升序）。
+	decls := map[string][]int{}
 	for i, raw := range messages {
-		m, ok := raw.(map[string]any)
-		if !ok || m["role"] != "assistant" {
-			continue
-		}
-		tcs, ok := m["tool_calls"].([]any)
-		if !ok {
-			continue
-		}
-		for _, tci := range tcs {
-			tc, ok := tci.(map[string]any)
-			if !ok {
-				continue
-			}
-			if id, _ := tc["id"].(string); id != "" {
-				declAt[id] = i
-			}
+		for _, id := range declaredToolCallIDs(raw) {
+			decls[id] = append(decls[id], i)
 		}
 	}
-	if len(declAt) == 0 {
+	if len(decls) == 0 {
 		return messages, false
 	}
+	open := map[string]int{} // id → 已声明未应答次数；早到结果先扣，可暂为负
+	group := map[int][]any{} // 声明下标 → 归它的早到结果（原相对顺序）
 	early := make([]bool, len(messages))
 	anyEarly := false
 	for i, raw := range messages {
+		for _, id := range declaredToolCallIDs(raw) {
+			open[id]++
+		}
 		m, ok := raw.(map[string]any)
 		if !ok || m["role"] != "tool" {
 			continue
 		}
 		id, _ := m["tool_call_id"].(string)
-		if j, ok := declAt[id]; ok && j > i {
-			early[i] = true
-			anyEarly = true
+		if open[id] > 0 {
+			open[id]--
+			continue
+		}
+		for _, j := range decls[id] {
+			if j > i {
+				early[i] = true
+				anyEarly = true
+				group[j] = append(group[j], raw)
+				open[id]--
+				break
+			}
 		}
 	}
 	if !anyEarly {
 		return messages, false
-	}
-	// 按声明下标归组，同时保持同批结果的原相对顺序（正序遍历即原序）。
-	group := map[int][]any{}
-	for i, raw := range messages {
-		if !early[i] {
-			continue
-		}
-		m, _ := raw.(map[string]any)
-		id, _ := m["tool_call_id"].(string)
-		group[declAt[id]] = append(group[declAt[id]], raw)
 	}
 
 	out := make([]any, 0, len(messages))
@@ -213,6 +207,24 @@ func reorderEarlyToolResults(messages []any) ([]any, bool) {
 	}
 	flush()
 	return out, true
+}
+
+// declaredToolCallIDs 返回一条 assistant 消息 tool_calls 里的非空 id（其他消息为 nil）。
+func declaredToolCallIDs(raw any) []string {
+	m, ok := raw.(map[string]any)
+	if !ok || m["role"] != "assistant" {
+		return nil
+	}
+	tcs, _ := m["tool_calls"].([]any)
+	var ids []string
+	for _, tci := range tcs {
+		if tc, ok := tci.(map[string]any); ok {
+			if id, _ := tc["id"].(string); id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
 }
 
 // cleanupOrphanToolCalls 剔除无法配对的 tool_call 与 tool 结果（所有模型，独立于

@@ -85,6 +85,29 @@ func TestReorderEarlyToolResults(t *testing.T) {
 			change: false,
 		},
 		{
+			// 上游没给 id 时网关自己补 call_0 / toolu_0（按轮内下标），同一 id 会跨轮复用。
+			// 结果只属于它前面最近一次尚未应答的声明，不能按「最后一次声明」整体后移。
+			name: "跨轮复用同一 id、顺序本就正确（零改动）",
+			in: []any{user("a"), call("call_0"), tool("call_0", "r1"),
+				user("b"), call("call_0"), tool("call_0", "r2"), user("c")},
+			want:   []string{"user", "assistant:call_0", "tool:call_0", "user", "assistant:call_0", "tool:call_0", "user"},
+			change: false,
+		},
+		{
+			name: "跨轮复用同一 id、第二轮结果早到：只挪第二轮",
+			in: []any{user("a"), call("call_0"), tool("call_0", "r1"),
+				user("b"), tool("call_0", "r2"), call("call_0"), user("c")},
+			want:   []string{"user", "assistant:call_0", "tool:call_0", "user", "assistant:call_0", "tool:call_0", "user"},
+			change: true,
+		},
+		{
+			name: "两轮都早到：各归各的最近声明",
+			in: []any{tool("call_0", "r1"), call("call_0"), user("b"),
+				tool("call_0", "r2"), call("call_0")},
+			want:   []string{"assistant:call_0", "tool:call_0", "user", "assistant:call_0", "tool:call_0"},
+			change: true,
+		},
+		{
 			name:   "声称者是最后一条消息：循环结束时仍要补上",
 			in:     []any{user("run"), tool("c0", "ok"), call("c0")},
 			want:   []string{"user", "assistant:c0", "tool:c0"},
