@@ -75,16 +75,12 @@ func TestResponsesReplayChatShapedToolKeepsPair(t *testing.T) {
 // 分支变成一条 user 空消息，既拆开同一批工具调用、把图片插进并行 tool 结果之间
 // （11148），又清空调用前暂存的思考。image_generation_call 的 base64 成品绝不能出站。
 func TestResponsesReplaySkipsHostedToolItems(t *testing.T) {
-	blob := strings.Repeat("iVBORw0KGgo", 4096)
 	think := map[string]any{"type": "reasoning", "summary": []any{
 		map[string]any{"type": "summary_text", "text": "先查再画"}}}
-	img := []any{map[string]any{"type": "input_image", "image_url": "data:image/png;base64,aGk="}}
-	cases := []struct {
-		name  string
-		items []any
-		roles string
-	}{
-		{"夹在同一批工具调用之间", []any{
+
+	t.Run("夹在同一批工具调用之间", func(t *testing.T) {
+		blob := strings.Repeat("iVBORw0KGgo", 4096)
+		out := convertInputItems([]any{
 			map[string]any{"role": "user", "content": "查完画图"},
 			think,
 			map[string]any{"type": "web_search_call", "id": "ws_1", "status": "completed",
@@ -94,79 +90,90 @@ func TestResponsesReplaySkipsHostedToolItems(t *testing.T) {
 			map[string]any{"type": "function_call", "call_id": "c2", "name": "noop", "arguments": "{}"},
 			map[string]any{"type": "function_call_output", "call_id": "c1", "output": "一"},
 			map[string]any{"type": "function_call_output", "call_id": "c2", "output": "二"},
-		}, "user,assistant,tool,tool"},
-		{"夹在并行工具结果之间", []any{
+		}, nil)
+		if got := replayRoles(out); got != "user,assistant,tool,tool" {
+			t.Fatalf("角色序列 %s：托管项造出了消息或拆开了批次（出站 %v）", got, out)
+		}
+		if tcs, _ := out[1].(map[string]any)["tool_calls"].([]any); len(tcs) != 2 {
+			t.Fatalf("同一批工具调用被托管项拆成两批：%v", out)
+		}
+		if _, reasoning, _ := reasoningTestCall(t, out[1]); reasoning != "先查再画" {
+			t.Fatalf("托管项清掉了调用前的思考：%q", reasoning)
+		}
+		if raw, _ := json.Marshal(out); strings.Contains(string(raw), "iVBORw0KGgo") {
+			t.Fatal("image_generation_call 的 base64 成品出站了")
+		}
+	})
+
+	t.Run("夹在并行工具结果之间", func(t *testing.T) {
+		img := []any{map[string]any{"type": "input_image", "image_url": "data:image/png;base64,aGk="}}
+		out := convertInputItems([]any{
 			map[string]any{"role": "user", "content": "看图"},
 			map[string]any{"type": "function_call", "call_id": "c1", "name": "view", "arguments": "{}"},
 			map[string]any{"type": "function_call", "call_id": "c2", "name": "view", "arguments": "{}"},
 			map[string]any{"type": "function_call_output", "call_id": "c1", "output": img},
 			map[string]any{"type": "mcp_call", "id": "mcp_1", "server_label": "s", "name": "t", "arguments": "{}", "output": "x"},
 			map[string]any{"type": "function_call_output", "call_id": "c2", "output": "二"},
-		}, "user,assistant,tool,tool,user"},
-	}
-	for _, tc := range cases {
-		out := convertInputItems(tc.items, nil)
-		if got := replayRoles(out); got != tc.roles {
-			t.Fatalf("%s：角色序列 %s，期望 %s（出站 %v）", tc.name, got, tc.roles, out)
+		}, nil)
+		if got := replayRoles(out); got != "user,assistant,tool,tool,user" {
+			t.Fatalf("角色序列 %s：图片被插进了并行 tool 结果之间（出站 %v）", got, out)
 		}
-		raw, _ := json.Marshal(out)
-		if strings.Contains(string(raw), "iVBORw0KGgo") {
-			t.Fatalf("%s：image_generation_call 的 base64 成品出站了", tc.name)
+	})
+
+	t.Run("compaction 是前瞻边界", func(t *testing.T) {
+		// compaction 在主循环里清空暂存思考，前瞻也要把它当边界：其前的思考归前一条
+		// assistant，而不是暂存后被 compaction 清掉。
+		out := convertInputItems([]any{
+			map[string]any{"role": "user", "content": "问"},
+			map[string]any{"type": "message", "role": "assistant", "content": "答"},
+			think,
+			map[string]any{"type": "compaction", "encrypted_content": "前情提要 已改完"},
+			map[string]any{"type": "message", "role": "assistant", "content": "再答"},
+		}, nil)
+		if _, reasoning, _ := reasoningTestCall(t, out[1]); reasoning != "先查再画" {
+			t.Fatalf("compaction 前的思考丢了：%v", out)
 		}
-	}
-	out := convertInputItems(cases[0].items, nil)
-	if _, reasoning, callID := reasoningTestCall(t, out[1]); callID != "c1" || reasoning != "先查再画" {
-		t.Fatalf("托管项清掉了调用前的思考：call=%s reasoning=%q", callID, reasoning)
-	}
-	if tcs, _ := out[1].(map[string]any)["tool_calls"].([]any); len(tcs) != 2 {
-		t.Fatalf("同一批工具调用被托管项拆成两批：%v", out)
-	}
-	// 不认识但带了内容的项照旧按 user 消息送达，不因为这次修复丢内容。
-	out = convertInputItems([]any{map[string]any{"type": "future_note", "content": "保留我"}}, nil)
-	if len(out) != 1 || out[0].(map[string]any)["content"] != "保留我" {
-		t.Fatalf("带内容的未知项被丢：%v", out)
-	}
-	// compaction 在主循环里清空暂存思考，前瞻也要把它当边界：其前的思考归前一条
-	// assistant，而不是暂存后被 compaction 清掉。
-	out = convertInputItems([]any{
-		map[string]any{"role": "user", "content": "问"},
-		map[string]any{"type": "message", "role": "assistant", "content": "答"},
-		think,
-		map[string]any{"type": "compaction", "encrypted_content": "前情提要 已改完"},
-		map[string]any{"type": "message", "role": "assistant", "content": "再答"},
-	}, nil)
-	if _, reasoning, _ := reasoningTestCall(t, out[1]); reasoning != "先查再画" {
-		t.Fatalf("compaction 前的思考丢了：%v", out)
-	}
+	})
+
+	t.Run("带内容的未知项照旧送达", func(t *testing.T) {
+		out := convertInputItems([]any{map[string]any{"type": "future_note", "content": "保留我"}}, nil)
+		if len(out) != 1 || out[0].(map[string]any)["content"] != "保留我" {
+			t.Fatalf("带内容的未知项被丢：%v", out)
+		}
+	})
 }
 
 // TestResponsesReplayCompactionNeverInjectsBlob compaction 交接摘要的兜底：真实的
 // encrypted_content 是密文（URL-safe base64、标准 base64 都有），解不出摘要时不能把
 // 密文当成摘要塞给上游；解出的摘要为空不造消息；纯文本摘要有长度上限。
 func TestResponsesReplayCompactionNeverInjectsBlob(t *testing.T) {
-	for name, enc := range map[string]string{
-		"URL-safe 密文":      "gAAAAABnX2_pQ-" + strings.Repeat("Zm9vYmFyYmF6_-", 64),
-		"标准 base64 非 JSON": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v",
-		"摘要为空的 JSON":       "eyJ2IjoxLCJzdW1tYXJ5IjoiIn0=",
+	for _, tc := range []struct{ name, enc string }{
+		{"URL-safe 密文", "gAAAAABnX2_pQ-" + strings.Repeat("Zm9vYmFyYmF6_-", 64)},
+		{"标准 base64 非 JSON", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v"},
+		{"摘要为空的 JSON", "eyJ2IjoxLCJzdW1tYXJ5IjoiIn0="},
 	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := convertInputItems([]any{
+				map[string]any{"type": "compaction", "encrypted_content": tc.enc},
+				map[string]any{"role": "user", "content": "继续"},
+			}, nil)
+			if len(out) != 1 {
+				t.Fatalf("不该生成交接摘要：%v", out)
+			}
+		})
+	}
+	t.Run("纯文本摘要封顶", func(t *testing.T) {
+		long := strings.Repeat("改了 a.go 与 b.go，测试已通过。", 8192)
 		out := convertInputItems([]any{
-			map[string]any{"type": "compaction", "encrypted_content": enc},
+			map[string]any{"type": "compaction", "encrypted_content": long},
 			map[string]any{"role": "user", "content": "继续"},
 		}, nil)
-		if len(out) != 1 {
-			t.Fatalf("%s：不该生成交接摘要：%v", name, out)
+		if len(out) != 2 {
+			t.Fatalf("纯文本摘要被丢：%d 条", len(out))
 		}
-	}
-	long := strings.Repeat("改了 a.go 与 b.go，测试已通过。", 8192)
-	out := convertInputItems([]any{
-		map[string]any{"type": "compaction", "encrypted_content": long},
-		map[string]any{"role": "user", "content": "继续"},
-	}, nil)
-	if len(out) != 2 {
-		t.Fatalf("纯文本摘要被丢：%d 条", len(out))
-	}
-	content := asString(out[0].(map[string]any)["content"])
-	if len(content) > compactionSummaryMax+256 || !strings.Contains(content, "改了 a.go") {
-		t.Fatalf("纯文本摘要没有封顶：%d 字节", len(content))
-	}
+		content := asString(out[0].(map[string]any)["content"])
+		if len(content) > compactionSummaryMax+256 || !strings.Contains(content, "改了 a.go") {
+			t.Fatalf("纯文本摘要没有封顶：%d 字节", len(content))
+		}
+	})
 }
