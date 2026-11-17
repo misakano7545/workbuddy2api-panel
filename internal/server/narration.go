@@ -29,7 +29,6 @@ import (
 	"io"
 	"log"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
@@ -121,11 +120,21 @@ func hasToolCallMarkup(text string) bool {
 //
 // 判据取「措辞 + 问号」，不猜语义：宁可漏救（客户端自己重试一轮的代价是几秒），
 // 也不能替用户按下发送键。
+//
+// 这一组是直接对用户说的话，出现在正文任何位置都算：确认请求后面常跟着草稿本身
+// （"请确认后我再发送。\n\n收件人：…\n主题：…"），只看最后一句就会把草稿当成末句、漏掉它。
 var userYieldMarkers = []string{
 	"请确认", "确认后", "等你确认", "待你确认", "等你回复", "等你确认后",
-	"是否需要", "需不需要", "要不要我", "要不要", "你希望", "请告知",
+	"要不要我", "你希望", "请告知",
 	"让我知道", "请你确认", "你确认后", "确认无误", "可以吗", "行吗", "好吗",
 }
+
+// userYieldDeliberation 也能用来问用户、但同样常见于技术叙述的措辞（上游真机样本：4083 字正文
+// 停在「我将开始修改 internal/verify/check.go」上，命中的是三千字之前的「为“是否需要更换”
+// 提供量化支撑」）。预告句救援对它们只认两种位置（见 deliberationAsksUser）：最后一句里，
+// 或者用在问句 / 对「我」「你」说的话里；toolonly 仍按整段认——那条会采纳工具调用，正文又短，
+// 宁可少救。
+var userYieldDeliberation = []string{"是否需要", "需不需要", "要不要"}
 
 // userYieldMarkersEN 英文形态（模型偶发用英文收尾）。
 var userYieldMarkersEN = []string{
@@ -133,29 +142,15 @@ var userYieldMarkersEN = []string{
 	"awaiting your", "waiting for your", "confirm before", "shall i ",
 }
 
-// yieldTailBytes 判「等用户回话」时最多扫末尾这么长的窗口（最后一句过长时兜底）。
-const yieldTailBytes = 200
-
-// yieldTail 取「最后一次句读之后」的窗口：交回控制权总是最后一句里的事，中段甚至
-// 紧邻尾部的「是否需要」都可能是技术叙述（真实样本：结尾是「…为是否需要更换提供量化
-// 支撑。\n\n---\n\n我将开始修改 check.go」，含 200B 窗口也挡掉了救援）。
-// 按最后一句判，承诺句那一段里没有措辞就照常救。
-func yieldTail(s string) string {
-	// 先剥掉末尾的句读：末句完整结束（"…请确认后我再发送。"）时，最后那个句号后面
-	// 是空的，按它切会切出空串，等于放弃判据。
-	s = strings.TrimRight(s, "。！？!?\n ")
-	if i := strings.LastIndexAny(s, "。！？!?\n"); i >= 0 {
-		_, n := utf8.DecodeRuneInString(s[i:])
-		s = s[i+n:]
-	}
-	return tailOf(strings.TrimSpace(s), yieldTailBytes)
-}
-
-// textYieldsToUser 报告这段正文是否在「等用户回话」：以问号收尾，或末句含请确认类措辞。
+// textYieldsToUser 报告这段正文是否在「等用户回话」：以问号收尾，或含请确认类措辞（整段）。
 //
 // 注意问号收尾在 narrationTailSuspends 里被判为「说完了」（句末标点），所以这条判据
 // 必须独立成立——它挡的是「模型主动提问后停下」这个正确行为，而不是「话没说完」。
-func textYieldsToUser(text string) bool {
+func textYieldsToUser(text string) bool { return yieldsToUser(text, true) }
+
+// yieldsToUser 同 textYieldsToUser；deliberationAnywhere=false 时 userYieldDeliberation 只按
+// deliberationAsksUser 的两种位置认（预告句救援用，issue #245）。
+func yieldsToUser(text string, deliberationAnywhere bool) bool {
 	t := strings.TrimSpace(text)
 	if t == "" {
 		return false
@@ -163,15 +158,40 @@ func textYieldsToUser(text string) bool {
 	if strings.HasSuffix(t, "？") || strings.HasSuffix(t, "?") {
 		return true
 	}
-	tail := yieldTail(t)
-	for _, m := range userYieldMarkers {
-		if strings.Contains(tail, m) {
-			return true
+	if containsAnyOf(t, userYieldMarkers) || containsAnyOf(strings.ToLower(t), userYieldMarkersEN) {
+		return true
+	}
+	if deliberationAnywhere {
+		return containsAnyOf(t, userYieldDeliberation)
+	}
+	return containsAnyOf(toolOnlyLastSentence(t), userYieldDeliberation) || deliberationAsksUser(t)
+}
+
+// deliberationAsksUser 正文里的「是否需要 / 要不要」是否在问用户：后面紧跟「我」「你」
+// （"是否需要我先发给你过目。草稿如下…"），或所在句子以问号结束（"要不要现在发送？\n草稿…"）。
+// 技术叙述（"为“是否需要更换”提供量化支撑。"）两样都不沾。
+func deliberationAsksUser(t string) bool {
+	for _, m := range userYieldDeliberation {
+		for rest := t; ; {
+			i := strings.Index(rest, m)
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len(m):]
+			if strings.HasPrefix(rest, "我") || strings.HasPrefix(rest, "你") {
+				return true
+			}
+			if j := strings.IndexAny(rest, "。！？!?\n"); j >= 0 && (rest[j] == '?' || strings.HasPrefix(rest[j:], "？")) {
+				return true
+			}
 		}
 	}
-	low := strings.ToLower(tail)
-	for _, m := range userYieldMarkersEN {
-		if strings.Contains(low, m) {
+	return false
+}
+
+func containsAnyOf(s string, subs []string) bool {
+	for _, m := range subs {
+		if strings.Contains(s, m) {
 			return true
 		}
 	}
@@ -316,7 +336,8 @@ func (r *continueReader) tryNarrationRetry() bool {
 	// 模型在等用户拍板（问句结尾 / 「请确认后我再…」）：这是**故意的**收尾。
 	// 补一句「继续执行下一步」会拿到工具调用并被采纳，等于替用户按下发送键
 	// （issue #209 两例：要确认的邮件被直接群发）。
-	if textYieldsToUser(txt) {
+	// 「是否需要 / 要不要」这类也常见于技术叙述的措辞只认问用户的用法（见 deliberationAsksUser）。
+	if yieldsToUser(txt, false) {
 		return false
 	}
 	// 长度闸门只约束「标点型悬停」：那是排版习惯（说明 + 列表以冒号收尾，issue #209），
