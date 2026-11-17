@@ -149,8 +149,7 @@ func (p *Panel) collectLiveTasks() []liveTaskAccount {
 
 // liveTasksOf 读一个账号的任务表并统计三类计数。
 //
-// 只发小程序口径一次；该口径失败（老版本上游 / 该域不支持）再退回默认口径，
-// 保证「查得到什么就显示什么」，而不是整行报错。
+// 国内号只发小程序口径一次；国际号只发默认口径。失败不重试、不换口径。
 func liveTasksOf(c *upstream.Client, a *auth.Auth) liveTaskAccount {
 	it := liveTaskAccount{UID: a.UID, Nickname: a.Nickname, Realm: a.Realm()}
 	if !a.SupportsPersonalEndpoints() {
@@ -159,15 +158,14 @@ func liveTasksOf(c *upstream.Client, a *auth.Auth) liveTaskAccount {
 	}
 	// 国际号只走默认口径：小程序头对国际账号没有验证过的契约，单号任务弹窗
 	// （accountTasks）同样明确不探 MP。
+	// 每个账号每轮恰好一次上游请求：失败不重试、不换口径。重试会在上游抖动或一批号
+	// 失效（封号潮）时把一轮的请求数翻倍，失败号等下一轮即可。
 	var tasks []upstream.Task
 	var err error
 	if a.IsGlobal() {
 		tasks, err = c.ListTasks(a)
 	} else {
 		tasks, err = c.ListTasksMP(a)
-		if err != nil {
-			tasks, err = c.ListTasks(a)
-		}
 	}
 	if err != nil {
 		it.Err = err.Error()
