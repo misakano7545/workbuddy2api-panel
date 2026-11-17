@@ -310,6 +310,11 @@ func (h *Handler) probeOnce(ctx context.Context, realm, model string, body []byt
 			var ue *upstream.Error
 			if errors.As(err, &ue) {
 				h.applyErrorPolicy(a.UID, ue.Kind, ue.Msg, model, ue)
+				// 请求级错误（11129 工具定义不合规、11128 内容拦截等）错在探测体本身，换号必然
+				// 同样被拒：再试两个号只是多打两次上游、多记两笔渠道拦截。
+				if _, ok := requestErrorCodes[ue.Kind]; ok {
+					break
+				}
 			}
 			continue
 		}
