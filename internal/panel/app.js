@@ -498,7 +498,12 @@ function go(v) {
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   if (v === 'balhist') loadBalance();
-  if (v === 'taskscenter') reattachQueueView();
+  if (v === 'taskscenter') {
+    reattachQueueView();
+    // 实时任务卡只在「进入本页」时启动一次；reattachQueueView 还会被 5s 全局轮询反复调用，
+    // 挂在那里会让用户选的刷新间隔与「关」全部失效（见 startLiveTasks）。
+    startLiveTasks();
+  }
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 /* 首次进入延到本轮脚本求值之后再 go()。
@@ -3199,10 +3204,6 @@ function reattachQueueView() {
     taskCenterOwner = 'jobs';
     loadTaskJobs();
   }
-  // 实时任务卡独立于下面的队列/作业列表，进本页即拉一次并接管轮询。
-  // typeof 守卫：本文件有测试会把 reattachQueueView 单独切出来求值（不带上
-  // startLiveTasks），无守卫会 ReferenceError 把整段测试打断。
-  if (typeof startLiveTasks === 'function') startLiveTasks();
   // 全程异步：go() 在顶层（app.js ~143 行）被调用时，本文件下方 let/const
   //（queueTimer/lastQueueSeq 等）尚未初始化——同步读取即 TDZ ReferenceError
   // 使整个脚本中断。await 之后才碰它们（旧 pollQueueOnce 正是靠开头的 await
