@@ -2824,7 +2824,7 @@ $('btnTaskJobsReload').onclick = () => { taskCenterOwner = 'jobs'; loadTaskJobs(
 // 一轮 = 每个启用账号一次上游 GET：默认 2 分钟，可选档位都不低于后端缓存 TTL（1 分钟），
 // 再密只是读缓存。
 const LIVE_EVERY_CHOICES = [0, 60, 120, 300];
-let liveTimer = null, liveEvery = 120, liveLoading = false;
+let liveTimer = null, liveEvery = 120, liveLoading = false, liveRetry = null;
 function liveTaskRow(t) {
   // 返回行对象，由 renderLiveTasks 统一交给 qrowHTML 渲染一次（返回 HTML 会被渲染两次）。
   // 上游 Task：claimed / claimable 是本地推算，status 是上游原文
@@ -2854,8 +2854,8 @@ function renderLiveTasks(d) {
   }));
   if (!groups.length) {
     list.innerHTML = ''; empty.style.display = '';
-    empty.querySelector('.t').textContent = '还没有数据';
-    empty.querySelector('.d').textContent = '点「立即刷新」拉一次。';
+    empty.querySelector('.t').textContent = (d && d.refreshing) ? '首轮查询中' : '还没有数据';
+    empty.querySelector('.d').textContent = (d && d.refreshing) ? '账号多时首轮要一会儿，查完会自动显示。' : '点「立即刷新」拉一次。';
     $('liveSummary').textContent = '';
     return;
   }
@@ -2876,9 +2876,16 @@ async function loadLiveTasks(fresh) {
   liveLoading = true;
   const btn = $('btnLiveReload');
   if (btn) btn.disabled = true;
+  if (liveRetry) { clearTimeout(liveRetry); liveRetry = null; }
   try {
     const d = await api('tasks/live' + (fresh ? '?fresh=1' : ''));
     renderLiveTasks(d);
+    // 后台那一轮还没跑完（返回的是上一份快照，可能是空的）：几秒后再取一次，不等下一个
+    // 轮询间隔，否则卡片总比数据慢一个间隔。这只是读服务端缓存，不产生上游请求；一轮结束
+    // refreshing 变 false 就停。
+    if (d && d.refreshing) {
+      liveRetry = setTimeout(() => { liveRetry = null; if (liveVisible()) loadLiveTasks(false); }, 8000);
+    }
   } catch (e) {
     const note = $('liveNote');
     note.hidden = false;
@@ -2889,8 +2896,10 @@ async function loadLiveTasks(fresh) {
     if (btn) btn.disabled = false;
   }
 }
+// liveVisible 本页在前台才轮询：切走视图、切到别的标签页都算不可见。
+function liveVisible() { return view === 'taskscenter' && !(typeof document !== 'undefined' && document.hidden); }
 function liveTasksTick() {
-  if (view !== 'taskscenter' || document.hidden) return;
+  if (!liveVisible()) return;
   loadLiveTasks(false);
 }
 let liveVisBound = false;

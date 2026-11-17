@@ -59,7 +59,6 @@ func (f *liveFake) handler(w http.ResponseWriter, r *http.Request) {
 func newLivePanel(t *testing.T, f *liveFake, extra ...*auth.Auth) *Panel {
 	t.Helper()
 	useRealmForTest(t)
-	taskLive = &liveCache{} // 每个用例独立缓存
 	srv := httptest.NewServer(http.HandlerFunc(f.handler))
 	t.Cleanup(srv.Close)
 

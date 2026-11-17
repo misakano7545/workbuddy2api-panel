@@ -66,7 +66,6 @@ func getLive(t *testing.T, p *Panel, url string) map[string]any {
 }
 
 func TestTasksLiveCountsAndCache(t *testing.T) {
-	taskLive = &liveCache{} // 每个用例独立缓存
 	var calls atomic.Int32
 	p := liveTasksPanel(t, &calls, "")
 
@@ -107,7 +106,6 @@ func TestTasksLiveCountsAndCache(t *testing.T) {
 }
 
 func TestTasksLivePerAccountFailureIsolated(t *testing.T) {
-	taskLive = &liveCache{}
 	var calls atomic.Int32
 	p := liveTasksPanel(t, &calls, "cn-2")
 
@@ -137,7 +135,6 @@ func TestTasksLivePerAccountFailureIsolated(t *testing.T) {
 }
 
 func TestTasksLiveSkipsDisabledAccounts(t *testing.T) {
-	taskLive = &liveCache{}
 	var calls atomic.Int32
 	p := liveTasksPanel(t, &calls, "")
 	p.cfg.Pool.Disable("cn-1", "test")

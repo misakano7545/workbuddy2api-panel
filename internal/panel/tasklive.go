@@ -50,74 +50,75 @@ type liveTaskAccount struct {
 	Err     string `json:"error,omitempty"`
 }
 
-// liveCache 实时任务快照缓存（进程内，单面板实例）。
+// liveCache 实时任务快照（挂在 Panel 上，随面板实例走）。零值可用。
 type liveCache struct {
 	mu   sync.Mutex
-	at   time.Time
+	at   time.Time // 最近一轮完成的时刻；零值 = 还没跑完过
 	rows []liveTaskAccount
-	// inflight 同一时刻只允许一轮上游查询：多标签页同时轮询时，
-	// 后来的请求等前一**次**结果，而不是各自再打一遍 28 个号。
-	inflight chan struct{}
+	// running 非 nil 表示有一轮在后台跑，轮次结束时关闭。同一时刻只跑一轮：多标签页
+	// 同时轮询时共用它，而不是各自再打一遍所有账号。
+	running chan struct{}
 }
 
-var taskLive = &liveCache{}
+// taskLiveWait 单个请求最多等一轮多久，比常见反代 60s 读超时短。变量只为让测试能压缩
+// 时间，生产不改。
+var taskLiveWait = 25 * time.Second
+
+// taskLiveSnapshot 取实时任务快照，必要时在后台起一轮。
+//
+// 一轮在后台 goroutine 里跑、不绑请求：账号多、个别上游挂住（单次最长 120s）时，一轮
+// 可以比反代超时和 30s 更久。请求最多等 taskLiveWait，之后带着上一份快照返回
+// （refreshing=true），不会被反代截断，也不会让后来的请求排队等到 503。
+//
+// 返回 waited=true 表示本次请求等过一轮；refreshing=true 表示返回时仍有一轮在跑
+// （返回的是上一份快照，从没跑完过则为空）。
+func (p *Panel) taskLiveSnapshot(fresh bool) (rows []liveTaskAccount, at time.Time, waited, refreshing bool) {
+	c := &p.taskLive
+	c.mu.Lock()
+	age := time.Since(c.at)
+	stale := c.at.IsZero() || age >= taskLiveTTL || (fresh && age >= taskLiveFreshFloor)
+	if stale && c.running == nil {
+		done := make(chan struct{})
+		c.running = done
+		go func() {
+			rows := p.collectLiveTasks()
+			c.mu.Lock()
+			c.rows, c.at, c.running = rows, time.Now(), nil
+			c.mu.Unlock()
+			close(done)
+		}()
+	}
+	// 没有快照可给，或用户明确要新的：等这一轮（有上限）。其余情况直接回现有快照，
+	// 过期的由后台那一轮顶上，下一次读取就是新的。
+	done := c.running
+	wait := done != nil && (c.at.IsZero() || fresh)
+	c.mu.Unlock()
+
+	if wait {
+		waited = true
+		select {
+		case <-done:
+		case <-time.After(taskLiveWait):
+		}
+	}
+	c.mu.Lock()
+	rows, at, refreshing = c.rows, c.at, c.running != nil
+	c.mu.Unlock()
+	return rows, at, waited, refreshing
+}
 
 // tasksLive GET /panel/api/tasks/live?fresh=1
 //
 // 返回所有启用账号的当前任务表。账号级失败只标在对应行（error 字段），
 // 不影响其它账号——一个号的 token 过期不该让整个看板空掉。
 func (p *Panel) tasksLive(w http.ResponseWriter, r *http.Request) {
-	fresh := r.URL.Query().Get("fresh") == "1"
-
-	taskLive.mu.Lock()
-	// fresh=1 也有下限：上一轮刚结束不足 taskLiveFreshFloor 时仍回缓存，连点「立即刷新」
-	// 或脚本反复带 fresh 不会连续起新轮（每轮 = 每个启用账号一次上游 GET）。
-	if fresh && !taskLive.at.IsZero() && time.Since(taskLive.at) < taskLiveFreshFloor {
-		fresh = false
+	rows, at, waited, refreshing := p.taskLiveSnapshot(r.URL.Query().Get("fresh") == "1")
+	age := 0
+	if !at.IsZero() {
+		age = int(time.Since(at).Seconds())
 	}
-	if !fresh && len(taskLive.rows) > 0 && time.Since(taskLive.at) < taskLiveTTL {
-		rows, at := taskLive.rows, taskLive.at
-		taskLive.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "cached": true, "age_sec": int(time.Since(at).Seconds()),
-			"ttl_sec": int(taskLiveTTL.Seconds()), "accounts": rows,
-		})
-		return
-	}
-	if taskLive.inflight != nil {
-		// 已有一轮在跑：等它，别叠加。
-		ch := taskLive.inflight
-		taskLive.mu.Unlock()
-		select {
-		case <-ch:
-		case <-time.After(30 * time.Second):
-			writeErr(w, http.StatusServiceUnavailable, "上一轮任务查询仍在进行，稍后再试")
-			return
-		}
-		taskLive.mu.Lock()
-		rows, at := taskLive.rows, taskLive.at
-		taskLive.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "cached": true, "age_sec": int(time.Since(at).Seconds()),
-			"ttl_sec": int(taskLiveTTL.Seconds()), "accounts": rows,
-		})
-		return
-	}
-	ch := make(chan struct{})
-	taskLive.inflight = ch
-	taskLive.mu.Unlock()
-
-	rows := p.collectLiveTasks()
-
-	taskLive.mu.Lock()
-	taskLive.rows = rows
-	taskLive.at = time.Now()
-	taskLive.inflight = nil
-	taskLive.mu.Unlock()
-	close(ch)
-
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "cached": false, "age_sec": 0,
+		"ok": true, "cached": !waited, "age_sec": age, "refreshing": refreshing,
 		"ttl_sec": int(taskLiveTTL.Seconds()), "accounts": rows,
 	})
 }
