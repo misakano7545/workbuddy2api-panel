@@ -124,6 +124,8 @@ type continueReader struct {
 	// （"我先说明结论，然后我将开始修改…"，再停一次），只给一次机会等于第二段
 	// 又回到客户端手上——issue #245 的真实形态。总量仍由 outputCap 兜底。
 	narrationTries int
+	// narrationTextAt 最近一次救援发出时的正文长度：续写段没写出新正文就不再救。
+	narrationTextAt int
 
 	// toolOnlyTried 安全续写（只采纳工具调用）已用（每请求一次；见 tryToolOnlyRescue）。
 	toolOnlyTried bool
