@@ -59,15 +59,25 @@ var transportHeader = map[string]bool{
 	"accept-encoding": true, "content-encoding": true,
 }
 
+// versionedHeader 版本段由配置驱动（client_version / cli_version，随分发包走）的头：
+// 只比形态，版本号抹成 <v> 再比。夹具是某一版真机原文，不能为了跟版去改它；按号码
+// 硬比，每次跟版都得动门禁，等于自己给自己放水。抹掉号码后，UA 少一段、品牌变了、
+// x-ide-version 消失照样会红。
+//
+// 只放开这两个头：x-stainless-package-version / x-stainless-runtime-version 这类不随
+// 配置走的版本号必须仍逐字钉住，所以不能对所有头一律抹版本号。
+var versionedHeader = map[string]bool{"user-agent": true, "x-ide-version": true}
+
 // verPat 三段式版本号（5.9.3 / 2.165.0）。
 var verPat = regexp.MustCompile(`\d+\.\d+\.\d+`)
 
-// normVer 抹掉版本号只留形态。
-//
-// 版本段是配置驱动的，跟着上游分发包走（CN 5.11.3 / GL 5.9.4），而夹具是 5.9.3
-// 真机原文——夹具不能改，那是抓包事实。若按号码硬比，每次跟版都得动门禁，等于
-// 自己给自己放水；抹掉号码后，UA 少一段、brand 变了、x-ide-version 消失这些都还会红。
-func normVer(s string) string { return verPat.ReplaceAllString(s, "<v>") }
+// parityValue 对拍用的规范值：key 为小写头名。
+func parityValue(key, v string) string {
+	if versionedHeader[key] {
+		return verPat.ReplaceAllString(v, "<v>")
+	}
+	return v
+}
 
 func loadFixture(t *testing.T, name string) (order []string, values map[string]string) {
 	t.Helper()
@@ -126,6 +136,27 @@ func lookupVal(values map[string]string, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestParityValueScope 门禁只对配置驱动的版本段放宽：UA / x-ide-version 换版本号
+// 仍算一致，形态变了照样不一致；其余头里的版本号（SDK 包版本、Node 运行时版本）逐字比。
+func TestParityValueScope(t *testing.T) {
+	cases := []struct {
+		key, official, ours string
+		same                bool
+	}{
+		{"user-agent", "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0", "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0", true},
+		{"user-agent", "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0", "WorkBuddy/5.11.3 CLI/2.176.0", false},
+		{"user-agent", "WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0", "WorkBuddy/5.9.4 WorkBuddy/5.9.4 CLI/2.165.0", false},
+		{"x-ide-version", "5.9.3", "5.11.3", true},
+		{"x-stainless-package-version", "6.25.0", "6.26.0", false},
+		{"x-stainless-runtime-version", "v22.21.1", "v22.22.0", false},
+	}
+	for _, tc := range cases {
+		if got := parityValue(tc.key, tc.official) == parityValue(tc.key, tc.ours); got != tc.same {
+			t.Errorf("%s: %q vs %q 判一致=%v want %v", tc.key, tc.official, tc.ours, got, tc.same)
+		}
+	}
 }
 
 // TestOfficialParity 逐路径对拍官方真机头与本项目出站头。
@@ -257,7 +288,7 @@ func TestOfficialParity(t *testing.T) {
 				if !ok {
 					continue
 				}
-				if normVer(offVals[orig]) != normVer(gotVals[g]) {
+				if parityValue(k, offVals[orig]) != parityValue(k, gotVals[g]) {
 					valDiff = append(valDiff, k+": 官方="+strconv.Quote(offVals[orig])+" 项目="+strconv.Quote(gotVals[g]))
 				}
 			}
