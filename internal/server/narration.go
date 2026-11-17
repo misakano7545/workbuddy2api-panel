@@ -391,7 +391,7 @@ func (r *continueReader) tryNarrationRetry() bool {
 	// 模型在等用户拍板（问句结尾 / 「请确认后我再…」）：这是**故意的**收尾。
 	// 补一句「继续执行下一步」会拿到工具调用并被采纳，等于替用户按下发送键
 	// （issue #209 两例：要确认的邮件被直接群发）。
-	// 「是否需要 / 要不要」这类也常见于技术叙述的措辞只认问用户的用法（见 deliberationAsksUser）。
+	// 「是否需要 / 要不要」这类也常见于技术叙述的措辞只认问用户的用法（见 deliberationAddressesUser）。
 	if yieldsToUser(txt, false) {
 		return false
 	}
