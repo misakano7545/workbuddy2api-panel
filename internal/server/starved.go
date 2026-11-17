@@ -179,7 +179,7 @@ func (r *continueReader) tryStarvedRetry() bool {
 		cause = "思考完直接收尾"
 	}
 	// 异步换段：等待期内客户端只会收到 keepalive（见 openSegmentAsync）。
-	return r.openSegmentAsync(body, func(rc io.ReadCloser) {
+	return r.openSegmentAsync(switchStarved, body, func(rc io.ReadCloser) {
 		r.seg++
 		r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
 		r.finish, r.tail = "", nil
@@ -189,7 +189,7 @@ func (r *continueReader) tryStarvedRetry() bool {
 		log.Printf("[starved] acct=%s model=%s seg=%d %s（正文 0B）→ 同额度关思考重发",
 			logfmt.Label(r.acct.UID, r.acct.Nickname), bareModelOf(r.body), r.seg, cause)
 	}, func(status int, err error) {
-		log.Printf("WARN: [starved] acct=%s seg=%d 关思考重发失败（status=%d err=%v）→ 降级为截断终态",
+		log.Printf("WARN: [starved] acct=%s seg=%d 关思考重发失败（status=%d err=%v）→ 接着判下一条（续写或按截断收尾）",
 			logfmt.Label(r.acct.UID, r.acct.Nickname), r.seg+1, status, err)
 	})
 }

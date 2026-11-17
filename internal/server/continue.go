@@ -144,6 +144,12 @@ type continueReader struct {
 	origTail   []string
 
 	lastClientAt time.Time // 上次客户端可见输出/keepalive 的时刻（静默节流）
+	// emitted 已向下游交出过数据帧。在这之前 StreamHint 的首帧否决窗口还开着，一条注释行就会
+	// 提交 200：之后这次尝试的首帧若是 error 帧，就换不了号、只能「200 + error 帧」收尾。
+	// 所以保活注释只在 emitted 之后补（见 maybeKeepalive）。这之前的等待（例如首段零输出
+	// 时的空截断救援）完全靠首帧心跳（server.head_keepalive）喂活连接：配成 0 时这段等待
+	// 客户端一个字节都收不到。
+	emitted bool
 
 	// segSawDone 当前段是否以 [DONE] 收尾：换段失败时按它决定收尾形态。
 	segSawDone bool
@@ -152,6 +158,10 @@ type continueReader struct {
 	// 而是轮询它并在等待期间补 keepalive——换段是一次完整的上游 POST，同步等待会让
 	// 客户端在整个 TTFB（3~30s）里零字节，触发流式 idle 超时。
 	pending *pendingSeg
+	// openCtx 换段请求用的 context：客户端请求 context 的子 context，Close 时取消——
+	// 客户端断开后在途请求立即放手，不必等请求 context 结束。
+	openCtx  context.Context
+	stopOpen context.CancelFunc
 
 	// readErr 本段结束时的读错误（nil = 上游 [DONE] 正常收尾）。用于区分「上游
 	// 断流」与「客户端先断开」——两者的 err 都是非 nil，但归因完全不同：后者是
@@ -199,6 +209,7 @@ func newContinueReaderWithFloor(ctx context.Context, up *upstream.Client, acct *
 		lastClientAt: time.Now(), budgetFloor: budgetFloor}
 	r.br = bufio.NewReaderSize(rc, 64*1024)
 	r.limitSet, r.limit = bodyOutputLimit(body)
+	r.openCtx, r.stopOpen = context.WithCancel(ctx)
 	return r
 }
 
@@ -251,7 +262,21 @@ func (r *continueReader) Read(p []byte) (int, error) {
 }
 
 // Close 关闭当前段 body（续写切换时已关旧段；abandon 场景由 handler defer 兜底）。
+//
+// 有在途的换段请求时取消它，迟到的响应体由一个短命协程收走关掉：客户端空闲超时断开、
+// StreamHint 写保活失败返回时，正是带着在途请求走到这里。
 func (r *continueReader) Close() error {
+	if r.stopOpen != nil {
+		r.stopOpen()
+	}
+	if ps := r.pending; ps != nil {
+		r.pending = nil
+		go func() {
+			if res := <-ps.ch; res.rc != nil {
+				res.rc.Close()
+			}
+		}()
+	}
 	if r.cur != nil {
 		return r.cur.Close()
 	}
@@ -503,6 +528,7 @@ func sumUsage(acc, u map[string]any) map[string]any {
 }
 
 func (r *continueReader) emit(payload string) {
+	r.emitted = true
 	r.lastClientAt = time.Now()
 	r.out = append(r.out, "data: "...)
 	r.out = append(r.out, payload...)
@@ -512,9 +538,9 @@ func (r *continueReader) emit(payload string) {
 // maybeKeepalive 被吞帧到达时调用：距上次客户端可见输出超过 keepaliveEvery 就
 // 补一条 SSE 注释帧。注释行（":" 开头）是 SSE 规范的 no-op——StreamHint 原样
 // 透传并 flush，responsesWriter 与 chat 类客户端的解析器都忽略它；唯一作用是
-// 让连接保持「有数据流动」，防流静默超时掐线。
+// 让连接保持「有数据流动」，防流静默超时掐线。下游还没收到任何数据帧时不补（见 emitted）。
 func (r *continueReader) maybeKeepalive() {
-	if keepaliveEvery > 0 && time.Since(r.lastClientAt) < keepaliveEvery {
+	if !r.emitted || (keepaliveEvery > 0 && time.Since(r.lastClientAt) < keepaliveEvery) {
 		return
 	}
 	r.out = append(r.out, ": keepalive\n\n"...)
@@ -525,6 +551,7 @@ func (r *continueReader) maybeKeepalive() {
 type pendingSeg struct {
 	ch      chan segOpenResult
 	sawDone bool // 触发换段的那一段是否以 [DONE] 收尾（失败收尾时要原样使用）
+	next    int  // 换段失败后从决策链的哪一条接着判（见 decideNext）
 	onOK    func(io.ReadCloser)
 	onFail  func(status int, err error)
 }
@@ -542,15 +569,16 @@ type segOpenResult struct {
 // 到——流式客户端有 idle 超时，静默到阈值就主动断开，用户看到的就是「说到一半突然
 // 中断」。Trae 那种单段直通没有这个窗口，同一客户端在两边表现不同，这也是原因之一。
 //
+// rule 是发起这次换段的那一条（switchStarved 等）：失败时从它的下一条接着判。
 // 返回 false 表示已有在途请求（不应发生，调用方按原路径继续）。
-func (r *continueReader) openSegmentAsync(body []byte, onOK func(io.ReadCloser), onFail func(int, error)) bool {
+func (r *continueReader) openSegmentAsync(rule int, body []byte, onOK func(io.ReadCloser), onFail func(int, error)) bool {
 	if r.pending != nil {
 		return false
 	}
-	ps := &pendingSeg{ch: make(chan segOpenResult, 1), sawDone: r.segSawDone, onOK: onOK, onFail: onFail}
+	ps := &pendingSeg{ch: make(chan segOpenResult, 1), sawDone: r.segSawDone, next: rule + 1, onOK: onOK, onFail: onFail}
 	r.pending = ps
 	go func() {
-		rc, status, _, err := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta, nil)
+		rc, status, _, err := r.up.ChatStreamContext(r.openCtx, r.acct, body, r.clientIP, r.meta, nil)
 		ps.ch <- segOpenResult{rc: rc, status: status, err: err}
 	}()
 	return true
@@ -558,7 +586,7 @@ func (r *continueReader) openSegmentAsync(body []byte, onOK func(io.ReadCloser),
 
 // pollPending 轮询在途的换段请求：
 //   - 拿到且成功 → 交给 onOK 安装新段（调用方随后继续读）；
-//   - 拿到但失败 → onFail 记日志、按原段终态收尾（不等价于「没续写」，与同步版本一致）；
+//   - 拿到但失败 → onFail 记日志，从决策链的下一条接着判（与同步版本一致，见 decideNext）；
 //   - 还没拿到 → 按需补一条 ": keepalive" 注释帧，让客户端看到数据流动。
 func (r *continueReader) pollPending() bool {
 	ps := r.pending
@@ -580,7 +608,7 @@ func (r *continueReader) pollPending() bool {
 			res.rc.Close()
 		}
 		ps.onFail(res.status, res.err)
-		r.finishStream(ps.sawDone)
+		r.decideNext(ps.sawDone, ps.next)
 		return true
 	case <-time.After(wait):
 		r.maybeKeepalive()
@@ -602,25 +630,44 @@ func (r *continueReader) endSegment(sawDone bool) {
 	r.flushSegUsage()
 	// 安全续写段的裁决：拿到完整工具调用就采纳（继续正常收尾），否则回滚到首段终态。
 	r.settleToolOnly(sawDone)
-	if r.tryStarvedRetry() {
+	r.decideNext(sawDone, switchStarved)
+}
+
+// 段结束后的换段决策链，按优先级排列（decideNext 依次判）。
+const (
+	switchStarved   = iota // 空截断救援（tryStarvedRetry）
+	switchToolOnly         // 安全续写（tryToolOnlyRescue）
+	switchNarration        // 预告式收尾救援（tryNarrationRetry）
+	switchContinue         // length 截断续写 / 断流盲重试（canContinue）
+)
+
+// decideNext 从第 from 条开始依次判换段，命中就异步发起；都不命中就收尾。
+//
+// 换段请求失败时从失败那一条的下一条接着判（pollPending）：与同步发起时「这条返回 false
+// 就落到下一条」一致——例如无限额请求的空截断救援失败后，仍可走一次续写。已经发起过的
+// 规则各自记了用过（starvedTried 等），不会重复发起。
+func (r *continueReader) decideNext(sawDone bool, from int) {
+	if from <= switchStarved && r.tryStarvedRetry() {
 		return
 	}
 	// 安全续写（只采纳工具调用）：模型刚看完工具结果却只写一句就收尾。
-	if r.tryToolOnlyRescue() {
+	if from <= switchToolOnly && r.tryToolOnlyRescue() {
 		return
 	}
 	// 预告式收尾（finish=stop + 正文停在「……：」上 + 工具类请求）：续写剩余内容。
 	// 这条必须排在 canContinue 之前判断，但两者互斥（后者要求 finish=length 或断流）。
-	if r.tryNarrationRetry() {
+	if from <= switchNarration && r.tryNarrationRetry() {
 		return
 	}
-	if r.canContinue(sawDone) {
+	if from > switchContinue {
+		// 续写请求本身失败：降级为截断终态（日志已在失败回调里记过）。
+	} else if r.canContinue(sawDone) {
 		// 必须是「断流盲重试」还是「length 截断续写」（r.finish 在续写成功后被重置）。
 		blind := !sawDone && r.finish == ""
 		body, err := r.continuationBody()
 		if err == nil {
 			// 异步换段：等待期内客户端只会收到 keepalive，不会出现整段静默。
-			if r.openSegmentAsync(body, func(rc io.ReadCloser) {
+			if r.openSegmentAsync(switchContinue, body, func(rc io.ReadCloser) {
 				r.seg++
 				if blind {
 					r.blindRetried = true
