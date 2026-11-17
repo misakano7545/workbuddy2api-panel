@@ -150,6 +150,10 @@ type continueReader struct {
 	// 而是轮询它并在等待期间补 keepalive——换段是一次完整的上游 POST，同步等待会让
 	// 客户端在整个 TTFB（3~30s）里零字节，触发流式 idle 超时。
 	pending *pendingSeg
+	// openCtx 换段请求用的 context：客户端请求 context 的子 context，Close 时取消——
+	// 客户端断开后在途请求立即放手，不必等请求 context 结束。
+	openCtx  context.Context
+	stopOpen context.CancelFunc
 
 	// readErr 本段结束时的读错误（nil = 上游 [DONE] 正常收尾）。用于区分「上游
 	// 断流」与「客户端先断开」——两者的 err 都是非 nil，但归因完全不同：后者是
@@ -197,6 +201,7 @@ func newContinueReaderWithFloor(ctx context.Context, up *upstream.Client, acct *
 		lastClientAt: time.Now(), budgetFloor: budgetFloor}
 	r.br = bufio.NewReaderSize(rc, 64*1024)
 	r.limitSet, r.limit = bodyOutputLimit(body)
+	r.openCtx, r.stopOpen = context.WithCancel(ctx)
 	return r
 }
 
@@ -249,7 +254,21 @@ func (r *continueReader) Read(p []byte) (int, error) {
 }
 
 // Close 关闭当前段 body（续写切换时已关旧段；abandon 场景由 handler defer 兜底）。
+//
+// 有在途的换段请求时取消它，迟到的响应体由一个短命协程收走关掉：客户端空闲超时断开、
+// StreamHint 写保活失败返回时，正是带着在途请求走到这里。
 func (r *continueReader) Close() error {
+	if r.stopOpen != nil {
+		r.stopOpen()
+	}
+	if ps := r.pending; ps != nil {
+		r.pending = nil
+		go func() {
+			if res := <-ps.ch; res.rc != nil {
+				res.rc.Close()
+			}
+		}()
+	}
 	if r.cur != nil {
 		return r.cur.Close()
 	}
@@ -548,7 +567,7 @@ func (r *continueReader) openSegmentAsync(body []byte, onOK func(io.ReadCloser),
 	ps := &pendingSeg{ch: make(chan segOpenResult, 1), sawDone: r.segSawDone, onOK: onOK, onFail: onFail}
 	r.pending = ps
 	go func() {
-		rc, status, _, err := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta, nil)
+		rc, status, _, err := r.up.ChatStreamContext(r.openCtx, r.acct, body, r.clientIP, r.meta, nil)
 		ps.ch <- segOpenResult{rc: rc, status: status, err: err}
 	}()
 	return true
