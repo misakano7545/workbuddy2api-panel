@@ -12,11 +12,13 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/debugcap"
+	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
 
 // responsesWebsocketUnsupported 回应 Codex 的 WS 升级探测（GET /v1/responses）。
@@ -607,28 +609,54 @@ func textParts(v any) []string {
 	return parts
 }
 
-// reasoningKnownTypes 前瞻扫描认定的「实质项」类型：这些类型决定紧挨其前的思考段在
-// 语义上属于谁。不在集合里的项（additional_tools、local_shell_call 等元数据）会被
-// reasoningGroupTarget 跳过，避免一段被隔开的思考错误归位或被丢弃。
-var reasoningKnownTypes = map[string]bool{
-	"message": true, "user": true,
+// replayMetaTypes 元数据/控制项：不生成消息。
+var replayMetaTypes = map[string]bool{
+	"additional_tools": true, "compaction_trigger": true,
+	"local_shell_call": true, "local_shell_call_output": true,
+}
+
+// replayHandledTypes convertInputItems 里有专门分支的类型（与那里的 switch 一一对应），
+// 其余类型都落默认分支按消息处理。
+var replayHandledTypes = map[string]bool{
+	"message": true, "reasoning": true, "item_reference": true,
+	"compaction": true, "compaction_summary": true, "context_compaction": true,
 	"function_call": true, "function_call_output": true,
 	"custom_tool_call": true, "custom_tool_call_output": true,
 	"agent_message": true,
 }
 
-// reasoningGroupTarget 从 start+1 起找 reasoning 项之后第一个「实质项」：无 type 的
-// dict（Chat 形状混排项，靠 role 表意）也算。找不到返回 nil（对话到此结束）。
+// replayInert 判断回放项是否「不产生消息、也不动任何状态」：元数据项，以及不认识、
+// 没有 role、也没有可用内容的类型项——托管工具的回执（web_search_call、
+// image_generation_call、mcp_call、computer_call、file_search_call、
+// code_interpreter_call 等）都是这种形状，上游没有对应物。它们落进默认分支会变成一条
+// user 空消息：拆开同一批工具调用、把图片插进并行 tool 结果之间（11148）、清空调用前
+// 暂存的思考。前瞻归属与主循环共用这一个判据，两边对同一项的看法才不会分叉。
+// 带内容的未知项照旧按消息送达，不因此丢内容。
+func replayInert(m map[string]any) bool {
+	typ, _ := m["type"].(string)
+	if replayMetaTypes[typ] {
+		return true
+	}
+	if typ == "" || replayHandledTypes[typ] || m["role"] != nil {
+		return false
+	}
+	c, isText := convertContent(m["content"]).(string)
+	return isText && strings.TrimSpace(c) == ""
+}
+
+// reasoningGroupTarget 从 start+1 起找 reasoning 项之后第一个「实质项」：跳过后续的
+// reasoning（连续段同属一组）、item_reference（主循环里不产消息、不清思考）和
+// replayInert 项。找不到返回 nil（对话到此结束）。
 func reasoningGroupTarget(items []any, start int) map[string]any {
 	for i := start + 1; i < len(items); i++ {
 		m, ok := items[i].(map[string]any)
 		if !ok {
 			continue
 		}
-		typ, _ := m["type"].(string)
-		if typ == "" || reasoningKnownTypes[typ] {
-			return m
+		if typ, _ := m["type"].(string); typ == "reasoning" || typ == "item_reference" || replayInert(m) {
+			continue
 		}
+		return m
 	}
 	return nil
 }
@@ -651,9 +679,20 @@ func reasoningStartsAssistant(target map[string]any) bool {
 	return false
 }
 
+// compactionSummaryMax 交接摘要送上游的字节上限。摘要每轮都随历史重发，来源又是
+// 客户端，不封顶时一份异常大的摘要会让此后每一轮都更早撞上 11115。
+const compactionSummaryMax = 32 << 10
+
+// opaqueCompactionBlob 只由 base64 / base64url / token 字符组成、且够长的串：真实的
+// encrypted_content 是密文（URL-safe base64 不带 padding 时标准解码会失败），解不出
+// 摘要就是对上游无意义的乱码。纯文本摘要总会有空白或非 ASCII 字符；短于 32 的放行，
+// 免得 "Done" 这类单词被当成密文。
+var opaqueCompactionBlob = regexp.MustCompile(`^[A-Za-z0-9+/=_.\-]{32,}$`)
+
 // decodeCompactionSummary 尽力解码 compaction 项的 encrypted_content：正常形态是
-// base64(JSON {"v":1,"summary":...})，先补齐 base64 padding 再解；解不开时保留原文
-// ——外部提供者可能塞的是纯文本摘要，丢了它就丢了唯一一份上下文交接。
+// base64(JSON {"v":1,"summary":...})，先补齐 base64 padding 再解，解出的 summary
+// 为空就是没有摘要；解不开时，像密文的丢弃，其余按纯文本摘要保留——外部提供者可能
+// 塞的是纯文本摘要，丢了它就丢了唯一一份上下文交接。结果封顶 compactionSummaryMax。
 func decodeCompactionSummary(blob string) string {
 	text := strings.TrimSpace(blob)
 	if text == "" {
@@ -664,11 +703,14 @@ func decodeCompactionSummary(blob string) string {
 		var obj struct {
 			Summary string `json:"summary"`
 		}
-		if json.Unmarshal(raw, &obj) == nil && obj.Summary != "" {
-			return obj.Summary
+		if json.Unmarshal(raw, &obj) == nil {
+			return logfmt.Truncate(obj.Summary, compactionSummaryMax)
 		}
 	}
-	return text
+	if opaqueCompactionBlob.MatchString(text) {
+		return ""
+	}
+	return logfmt.Truncate(text, compactionSummaryMax)
 }
 
 func convertInputItems(items []any, meta *responsesMeta) []any {
@@ -715,6 +757,20 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			continue
 		}
 		typ, _ := m["type"].(string)
+		if typ == "" && m["role"] == "tool" && asString(m["tool_call_id"]) != "" {
+			// Chat 形状的工具结果（客户端把 chat messages 直接塞进 input）按
+			// function_call_output 处理：落进默认分支只剩 role/content，tool_call_id 丢了，
+			// 出站的 cleanupOrphanToolCalls 会把这一对调用与结果一起删掉。走同一分支也就
+			// 同样拆出图片、同样不在并行结果之间落图。
+			m = map[string]any{"type": "function_call_output", "call_id": m["tool_call_id"],
+				"name": m["name"], "output": m["content"]}
+			typ = "function_call_output"
+		}
+		if replayInert(m) {
+			// 元数据项与托管工具回执：不生成消息、不清空 pendingReasoning、不落图——
+			// 被它们隔开的连续思考段、同一批工具调用与并行工具结果都保持原样。
+			continue
+		}
 		// 图片的落点是「这一轮工具到此为止」的那个项，**不能挂在 flush() 里**：
 		// flush() 在每条 function_call_output 开头都会跑，于是并行工具调用
 		// （assistant 一条带多个 tool_calls）处理第二条结果时，会先把第一条结果的图
@@ -745,11 +801,6 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			// 引用型项指向不存在的存档，无从解引用，维持跳过。
 			flush()
 			continue
-		case "additional_tools", "compaction_trigger", "local_shell_call", "local_shell_call_output":
-			// 元数据/控制项：不生成消息、不清空 pendingReasoning，被它们隔开的连续
-			// 思考段仍属同一组（此前落入默认分支会被造成一条假 user 空消息，既切断
-			// 思考组又向上游塞脏数据）。
-			continue
 		case "compaction", "compaction_summary", "context_compaction":
 			// 上一轮的上下文压缩结果：对上游它是后续对话赖以延续的交接摘要，以
 			// system 消息保留在回放历史里；解码不出内容则跳过，不造空消息。
@@ -771,11 +822,15 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			pendingReasoning = ""
 			if id := asString(m["call_id"]); id != "" {
 				txt, imgs := splitToolImages(m["output"])
-				out = append(out, map[string]any{
+				msg := map[string]any{
 					"role":         "tool",
 					"tool_call_id": id,
 					"content":      txt,
-				})
+				}
+				if name := asString(m["name"]); name != "" {
+					msg["name"] = name // 只有 Chat 形状的结果带 name，原样保留
+				}
+				out = append(out, msg)
 				toolImgs = append(toolImgs, imgs...)
 				continue
 			}
