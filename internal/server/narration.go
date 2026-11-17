@@ -339,8 +339,9 @@ func (r *continueReader) tryNarrationRetry() bool {
 		return false
 	}
 	nudge := narrationNudge
-	if !narrationTailPunctuated(txt) {
-		// 无标点悬停（承诺句）用另一条指令：说成「停在冒号上」模型会反过来争辩。
+	if !narrationTailPunctuated(txt) && !narrationTailStructurallyOpen(txt) {
+		// 无标点悬停（承诺句）用另一条指令：说成「停在冒号上」模型会反过来争辩。截断的调用标记、
+		// 未闭合代码块同样没有标点，但它们不是承诺句：告诉模型「你承诺的动作没执行」是答非所问。
 		nudge = narrationPromiseNudge
 	}
 	body, err := r.continuationBodyWithNudge(nudge)
