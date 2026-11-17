@@ -2823,18 +2823,19 @@ $('btnTaskJobsReload').onclick = () => { taskCenterOwner = 'jobs'; loadTaskJobs(
    间隔拿到后端 ttl_sec 做下限——比 TTL 还短只是打自己的缓存，没意义。 */
 let liveTimer = null, liveEvery = 45, liveLoading = false, liveTTL = 45;
 function liveTaskRow(t) {
+  // 返回行对象，由 renderLiveTasks 统一交给 qrowHTML 渲染一次（返回 HTML 会被渲染两次）。
   // 上游 Task：claimed / claimable 是本地推算，status 是上游原文
   const st = t.claimed ? 'done' : t.claimable ? 'claim_pending' : (t.locked ? 'skipped' : 'scan');
   const prog = (t.progress_known && t.target > 0) ? (t.current + '/' + t.target) : '';
   const gain = (t.credit ? '+' + t.credit + 'c' : '') + (t.energy ? ' +' + t.energy + 'e' : '');
-  return qrowHTML({
+  return {
     code: t.task_code,
     title: t.title,
     desc: t.task_desc || t.description,
     status: st,
     prog: prog,
     message: [t.task_desc || t.description, gain.trim()].filter(Boolean).join(' · '),
-  });
+  };
 }
 function renderLiveTasks(d) {
   const list = $('liveList'), empty = $('liveEmpty'), note = $('liveNote');
