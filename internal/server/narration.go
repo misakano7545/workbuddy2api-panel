@@ -196,23 +196,42 @@ func narrationTailStructurallyOpen(text string) bool {
 	return strings.Count(strings.TrimRight(text, " \t\r\n"), "```")%2 == 1
 }
 
-// narrationPromiseMarkers 第一人称承诺下一步动作的措辞（"我将开始修改…"、"let me check…"）。
-// 只收第一人称：「接下来 / 下一步」既能预告自己的动作，也常用来对用户说话（"接下来你可以运行
-// npm test"），长正文里认它们会把写完的回答续写一段。
+// narrationPromiseMarkers 承诺下一步动作的措辞（"我将开始修改…"、"我需要先读取…"、"let me check…"）。
+// 「接下来 / 下一步」单独出现不收：它们也常用来对用户说话（"接下来你可以运行 npm test"），
+// 长正文里认它们会把写完的回答续写一段；带上动作的「接下来开始 / 现在开始」才收。
 var narrationPromiseMarkers = []string{
 	"我将", "我会", "我先", "我要", "我来", "我继续", "我现在", "让我",
-	"let me", "i'll", "i will", "i'm going to", "i am going to",
+	"我需要", "我得", "我打算", "我开始", "我再", "我接着", "我还要", "我马上", "我这就",
+	"我们接着", "接下来开始", "现在开始", "正在",
+	"let me", "let's", "i'll", "i will", "i'm ", "i am going to", "i need to", "i should", "now i",
 }
 
-// narrationTailPromises 最后一句是否第一人称承诺（长正文无标点收尾时救援的前提，issue #245）。
+// narrationPromiseNoise 含承诺词却不是承诺的固定说法，匹配前先剔掉（"对我来说" 里的「我来」）。
+var narrationPromiseNoise = []string{"我来说", "我来看"}
+
+// narrationTailPromises 最后一句是否在预告下一步动作（长正文无标点收尾时救援的前提，issue #245）：
+// 含 narrationPromiseMarkers，或以现在分词开头的英文旁白（"Reading failfirst.sh mutation script"，
+// 见 narrationTailSuspends 的样本）。
 func narrationTailPromises(text string) bool {
-	last := strings.ToLower(toolOnlyLastSentence(text))
+	last := strings.ToLower(strings.TrimSpace(toolOnlyLastSentence(text)))
+	for _, n := range narrationPromiseNoise {
+		last = strings.ReplaceAll(last, n, "")
+	}
 	for _, m := range narrationPromiseMarkers {
 		if strings.Contains(last, m) {
 			return true
 		}
 	}
-	return false
+	first, _, _ := strings.Cut(last, " ")
+	if len(first) < 5 || !strings.HasSuffix(first, "ing") {
+		return false
+	}
+	for _, c := range first {
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // tailHangPunct 标点型悬停的收尾符（后面必然还有东西）。
@@ -345,7 +364,7 @@ func (r *continueReader) tryNarrationRetry() bool {
 	// 整段越长越可能是正常排版。无标点悬停是句子被掐断（"我将…"/"我会…"），与正文
 	// 长度无关——长会话里恰好最常见，按整段长度挡掉会导致一条都不救（issue #245）。
 	// 结构上确实没写完的（未闭合代码块 / 截断的调用标记）同样不受此限。
-	// 但无标点的长正文只救最后一句是第一人称承诺的（见 narrationTailPromises）：写完的长总结
+	// 但无标点的长正文只救最后一句在预告下一步动作的（见 narrationTailPromises）：写完的长总结
 	// 最后一行常常没有句号（列表项、表格行、「全部测试通过 ✅」、文件路径），一律放开的话它们
 	// 会被续写一段、还被告知「承诺的动作没执行」，每次都是整段上下文重发的计费请求。
 	if !narrationTailStructurallyOpen(txt) && len(txt) > narrationMaxBytes &&
