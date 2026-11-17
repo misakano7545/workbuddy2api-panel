@@ -715,6 +715,15 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			continue
 		}
 		typ, _ := m["type"].(string)
+		if typ == "" && m["role"] == "tool" && asString(m["tool_call_id"]) != "" {
+			// Chat 形状的工具结果（客户端把 chat messages 直接塞进 input）按
+			// function_call_output 处理：落进默认分支只剩 role/content，tool_call_id 丢了，
+			// 出站的 cleanupOrphanToolCalls 会把这一对调用与结果一起删掉。走同一分支也就
+			// 同样拆出图片、同样不在并行结果之间落图。
+			m = map[string]any{"type": "function_call_output", "call_id": m["tool_call_id"],
+				"name": m["name"], "output": m["content"]}
+			typ = "function_call_output"
+		}
 		// 图片的落点是「这一轮工具到此为止」的那个项，**不能挂在 flush() 里**：
 		// flush() 在每条 function_call_output 开头都会跑，于是并行工具调用
 		// （assistant 一条带多个 tool_calls）处理第二条结果时，会先把第一条结果的图
@@ -771,11 +780,15 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			pendingReasoning = ""
 			if id := asString(m["call_id"]); id != "" {
 				txt, imgs := splitToolImages(m["output"])
-				out = append(out, map[string]any{
+				msg := map[string]any{
 					"role":         "tool",
 					"tool_call_id": id,
 					"content":      txt,
-				})
+				}
+				if name := asString(m["name"]); name != "" {
+					msg["name"] = name // 只有 Chat 形状的结果带 name，原样保留
+				}
+				out = append(out, msg)
 				toolImgs = append(toolImgs, imgs...)
 				continue
 			}
