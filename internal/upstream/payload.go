@@ -766,11 +766,29 @@ var schemaContainerKeys = map[string]bool{
 	"$defs":             true,
 	"definitions":       true,
 	"dependentSchemas":  true,
+	// dependentRequired 的值是属性名数组、dependencies（draft-7）的值是属性名数组或子
+	// schema：键都是属性名。不当容器，属性名叫 items / type 时会被当成关键字改写
+	// （["type"] 被换成 {"type":"string"}）。
+	"dependentRequired": true,
+	"dependencies":      true,
+}
+
+// schemaDataKeys 取值是**数据**而不是 schema 的关键字：default / const / enum /
+// example(s) 里的对象就是客户端声明的取值本身，里面出现 type、items、required、null
+// 也只是数据。规整只作用于 schema，绝不递归进这些值——否则改写的是模型看到的默认值、
+// 常量和枚举项（如 default {"type":"str"} 被改成 "string"）。
+var schemaDataKeys = map[string]bool{
+	"default":  true,
+	"const":    true,
+	"enum":     true,
+	"example":  true,
+	"examples": true,
 }
 
 // normalizeSchemaTree 递归归一化工具参数 schema 树：
 //   - 区分 Schema 节点与 Schema 容器：容器自身键为用户属性名，只对其子 Schema 做规整；
-//   - 剔除所有值为 nil 的元数据/属性键（description: null、title: null 等导致上游反序列化失败）；
+//   - 剔除值为 nil 的关键字（description: null、title: null 等导致上游反序列化失败），
+//     数据关键字（default / const / enum / example(s)）的 null 保留；
 //   - 类型别名归一化（str/int/bool/dict/list 等 Python 非标类型别名映射至 JSON Schema 标准）；
 //   - required 规整（剔除 nil、空字符串及非 string 元素，空列表直接清理）；
 //   - array items 规整（解包 tuple 模式，清理 nil items）；
@@ -780,9 +798,11 @@ var schemaContainerKeys = map[string]bool{
 func normalizeSchemaTree(node any) {
 	switch n := node.(type) {
 	case map[string]any:
-		// 1. 剔除所有值为 nil 的元数据/属性键（避免上游 Go 强类型反序列化失败报 11129）
+		// 1. 剔除值为 nil 的关键字（避免上游 Go 强类型反序列化失败报 11129）。
+		// 数据关键字除外：const:null（只能是 null）、default:null（缺省为 null）是有意义的
+		// 取值，删了就改了语义（见 schemaDataKeys）。
 		for k, v := range n {
-			if v == nil {
+			if v == nil && !schemaDataKeys[k] {
 				delete(n, k)
 			}
 		}
@@ -878,6 +898,9 @@ func normalizeSchemaTree(node any) {
 
 		// 7. 递归子树：容器键只遍历子 Schema，防止容器键（如属性名 required）被当成 Schema 关键字误删
 		for k, v := range n {
+			if schemaDataKeys[k] {
+				continue // 数据值，不是 schema（见 schemaDataKeys）
+			}
 			if schemaContainerKeys[k] {
 				if c, ok := v.(map[string]any); ok {
 					for childKey, child := range c {
