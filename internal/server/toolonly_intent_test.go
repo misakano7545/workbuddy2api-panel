@@ -61,6 +61,9 @@ func TestToolOnlyLastSentence(t *testing.T) {
 		{"结尾多个标点……ok。", "结尾多个标点……ok"},
 		{"", ""},
 		{"。。。", ""},
+		// 半角点后面不是空白（文件名、版本号）不算句末。
+		{"写完了。我将开始修改 internal/verify/check.go", "我将开始修改 internal/verify/check.go"},
+		{"已确认。升到 v1.2 再看", "升到 v1.2 再看"},
 	}
 	for _, c := range cases {
 		if got := toolOnlyLastSentence(c.in); got != c.want {
