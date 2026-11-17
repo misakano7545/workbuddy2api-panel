@@ -93,7 +93,10 @@ func TestTasksLiveCountsAndCache(t *testing.T) {
 		t.Fatalf("缓存命中仍打了上游：%d -> %d", n1, calls.Load())
 	}
 
-	// fresh=1 穿透
+	// fresh=1 穿透（压缩下限；下限本身由 TestTasksLiveFreshHasFloor 钉住）
+	oldFloor := taskLiveFreshFloor
+	taskLiveFreshFloor = 0
+	defer func() { taskLiveFreshFloor = oldFloor }()
 	out3 := getLive(t, p, "/panel/api/tasks/live?fresh=1")
 	if out3["cached"] != false {
 		t.Fatalf("fresh=1 应穿透缓存: %+v", out3)

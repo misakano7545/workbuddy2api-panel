@@ -31,6 +31,9 @@ const taskLiveTTL = 45 * time.Second
 // taskLiveConcurrency 一轮实时查询的账号并发（与券码/活动页同档，避免打爆上游）。
 const taskLiveConcurrency = 4
 
+// taskLiveFreshFloor fresh=1 的下限。变量只为让测试能压缩时间，生产不改。
+var taskLiveFreshFloor = 15 * time.Second
+
 // liveTaskAccount 单账号的实时任务行。
 type liveTaskAccount struct {
 	UID      string          `json:"uid"`
@@ -66,6 +69,11 @@ func (p *Panel) tasksLive(w http.ResponseWriter, r *http.Request) {
 	fresh := r.URL.Query().Get("fresh") == "1"
 
 	taskLive.mu.Lock()
+	// fresh=1 也有下限：上一轮刚结束不足 taskLiveFreshFloor 时仍回缓存，连点「立即刷新」
+	// 或脚本反复带 fresh 不会连续起新轮（每轮 = 每个启用账号一次上游 GET）。
+	if fresh && !taskLive.at.IsZero() && time.Since(taskLive.at) < taskLiveFreshFloor {
+		fresh = false
+	}
 	if !fresh && len(taskLive.rows) > 0 && time.Since(taskLive.at) < taskLiveTTL {
 		rows, at := taskLive.rows, taskLive.at
 		taskLive.mu.Unlock()
