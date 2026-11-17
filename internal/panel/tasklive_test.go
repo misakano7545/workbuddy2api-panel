@@ -66,7 +66,6 @@ func getLive(t *testing.T, p *Panel, url string) map[string]any {
 }
 
 func TestTasksLiveCountsAndCache(t *testing.T) {
-	taskLive = &liveCache{} // 每个用例独立缓存
 	var calls atomic.Int32
 	p := liveTasksPanel(t, &calls, "")
 
@@ -93,7 +92,10 @@ func TestTasksLiveCountsAndCache(t *testing.T) {
 		t.Fatalf("缓存命中仍打了上游：%d -> %d", n1, calls.Load())
 	}
 
-	// fresh=1 穿透
+	// fresh=1 穿透（压缩下限；下限本身由 TestTasksLiveFreshHasFloor 钉住）
+	oldFloor := taskLiveFreshFloor
+	taskLiveFreshFloor = 0
+	defer func() { taskLiveFreshFloor = oldFloor }()
 	out3 := getLive(t, p, "/panel/api/tasks/live?fresh=1")
 	if out3["cached"] != false {
 		t.Fatalf("fresh=1 应穿透缓存: %+v", out3)
@@ -104,7 +106,6 @@ func TestTasksLiveCountsAndCache(t *testing.T) {
 }
 
 func TestTasksLivePerAccountFailureIsolated(t *testing.T) {
-	taskLive = &liveCache{}
 	var calls atomic.Int32
 	p := liveTasksPanel(t, &calls, "cn-2")
 
@@ -134,7 +135,6 @@ func TestTasksLivePerAccountFailureIsolated(t *testing.T) {
 }
 
 func TestTasksLiveSkipsDisabledAccounts(t *testing.T) {
-	taskLive = &liveCache{}
 	var calls atomic.Int32
 	p := liveTasksPanel(t, &calls, "")
 	p.cfg.Pool.Disable("cn-1", "test")

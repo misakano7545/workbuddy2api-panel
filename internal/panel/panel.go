@@ -165,6 +165,8 @@ type Panel struct {
 	// campaignCacheMu/campaignCache 活动进度查询的短时缓存（campaign.go）。
 	campaignCacheMu sync.Mutex
 	campaignCache   campaignCacheEntry
+	// taskLive 实时任务快照与「同一时刻只跑一轮」的闸门（tasklive.go）。
+	taskLive liveCache
 }
 
 // SetGrowthConcurrency 设置排程轮次的账号间并发（1-4；<=0 视为默认 1）。面板保存配置时热改。

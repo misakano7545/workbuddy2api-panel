@@ -7,12 +7,16 @@
 // 两者都要「有人先动一下」，看板上永远滞后。本文件提供**只读的实时视图**：
 // 直接向每个账号查一次任务表，按 TTL 缓存后交给前端定时轮询，不需要任何手动动作。
 //
-// 为什么只调小程序口径一次：`ListTasksMP` 是默认口径的超集（上游实测），
-// 全量 28 个号也只要 28 次请求；两个口径都调会翻倍，而结果差集为空。
-// 国际版账号同样有此口径（实测返回 5 条）。
+// 口径：每个账号每轮只请求一次，失败不重试、不换口径。
+//   - 国内版调小程序口径（`ListTasksMP` 是默认口径的超集，上游实测；两个口径都调会
+//     翻倍，而结果差集为空）；
+//   - 国际版只调默认口径（`ListTasks`）。即便小程序口径对国际账号也能返回任务行，它
+//     与单号任务接口 accountTasks 的约定不一致（那里明确不对国际账号探 MP，该契约
+//     未验证），实时卡片与 accountTasks 保持同一口径。
 //
 // 缓存的意义：浏览器每轮轮询都打一次上游，多开页面/多人看会成倍放大。
-// TTL 内直接复用，`fresh=1` 可强制穿透（手动刷新按钮用）。
+// TTL 内直接复用；`fresh=1`（手动刷新按钮用）也有下限，上一轮结束不足
+// taskLiveFreshFloor 时仍回缓存，过了下限才穿透。
 package panel
 
 import (
@@ -25,11 +29,15 @@ import (
 )
 
 // taskLiveTTL 实时任务缓存有效期。取值考虑两点：上游任务进度是分钟级聚合的，
-// 再密也不会更新；而 28 个号一轮就是 28 次上游 GET，压得太短会把看板变成压测。
-const taskLiveTTL = 45 * time.Second
+// 再密也不会更新；而一轮是「启用账号数」次上游 GET，一个打开的面板每秒的请求量 =
+// 账号数 / 缓存时长，压得太短（原 45 秒）会把看板变成压测。
+const taskLiveTTL = 60 * time.Second
 
 // taskLiveConcurrency 一轮实时查询的账号并发（与券码/活动页同档，避免打爆上游）。
 const taskLiveConcurrency = 4
+
+// taskLiveFreshFloor fresh=1 的下限。变量只为让测试能压缩时间，生产不改。
+var taskLiveFreshFloor = 15 * time.Second
 
 // liveTaskAccount 单账号的实时任务行。
 type liveTaskAccount struct {
@@ -46,69 +54,75 @@ type liveTaskAccount struct {
 	Err     string `json:"error,omitempty"`
 }
 
-// liveCache 实时任务快照缓存（进程内，单面板实例）。
+// liveCache 实时任务快照（挂在 Panel 上，随面板实例走）。零值可用。
 type liveCache struct {
 	mu   sync.Mutex
-	at   time.Time
+	at   time.Time // 最近一轮完成的时刻；零值 = 还没跑完过
 	rows []liveTaskAccount
-	// inflight 同一时刻只允许一轮上游查询：多标签页同时轮询时，
-	// 后来的请求等前一**次**结果，而不是各自再打一遍 28 个号。
-	inflight chan struct{}
+	// running 非 nil 表示有一轮在后台跑，轮次结束时关闭。同一时刻只跑一轮：多标签页
+	// 同时轮询时共用它，而不是各自再打一遍所有账号。
+	running chan struct{}
 }
 
-var taskLive = &liveCache{}
+// taskLiveWait 单个请求最多等一轮多久，比常见反代 60s 读超时短。变量只为让测试能压缩
+// 时间，生产不改。
+var taskLiveWait = 25 * time.Second
+
+// taskLiveSnapshot 取实时任务快照，必要时在后台起一轮。
+//
+// 一轮在后台 goroutine 里跑、不绑请求：账号多、个别上游挂住（单次最长 120s）时，一轮
+// 可以比反代超时和 30s 更久。请求最多等 taskLiveWait，之后带着上一份快照返回
+// （refreshing=true），不会被反代截断，也不会让后来的请求排队等到 503。
+//
+// 返回 waited=true 表示本次请求等过一轮；refreshing=true 表示返回时仍有一轮在跑
+// （返回的是上一份快照，从没跑完过则为空）。
+func (p *Panel) taskLiveSnapshot(fresh bool) (rows []liveTaskAccount, at time.Time, waited, refreshing bool) {
+	c := &p.taskLive
+	c.mu.Lock()
+	age := time.Since(c.at)
+	stale := c.at.IsZero() || age >= taskLiveTTL || (fresh && age >= taskLiveFreshFloor)
+	if stale && c.running == nil {
+		done := make(chan struct{})
+		c.running = done
+		go func() {
+			rows := p.collectLiveTasks()
+			c.mu.Lock()
+			c.rows, c.at, c.running = rows, time.Now(), nil
+			c.mu.Unlock()
+			close(done)
+		}()
+	}
+	// 没有快照可给，或用户明确要新的：等这一轮（有上限）。其余情况直接回现有快照，
+	// 过期的由后台那一轮顶上，下一次读取就是新的。
+	done := c.running
+	wait := done != nil && (c.at.IsZero() || fresh)
+	c.mu.Unlock()
+
+	if wait {
+		waited = true
+		select {
+		case <-done:
+		case <-time.After(taskLiveWait):
+		}
+	}
+	c.mu.Lock()
+	rows, at, refreshing = c.rows, c.at, c.running != nil
+	c.mu.Unlock()
+	return rows, at, waited, refreshing
+}
 
 // tasksLive GET /panel/api/tasks/live?fresh=1
 //
 // 返回所有启用账号的当前任务表。账号级失败只标在对应行（error 字段），
 // 不影响其它账号——一个号的 token 过期不该让整个看板空掉。
 func (p *Panel) tasksLive(w http.ResponseWriter, r *http.Request) {
-	fresh := r.URL.Query().Get("fresh") == "1"
-
-	taskLive.mu.Lock()
-	if !fresh && len(taskLive.rows) > 0 && time.Since(taskLive.at) < taskLiveTTL {
-		rows, at := taskLive.rows, taskLive.at
-		taskLive.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "cached": true, "age_sec": int(time.Since(at).Seconds()),
-			"ttl_sec": int(taskLiveTTL.Seconds()), "accounts": rows,
-		})
-		return
+	rows, at, waited, refreshing := p.taskLiveSnapshot(r.URL.Query().Get("fresh") == "1")
+	age := 0
+	if !at.IsZero() {
+		age = int(time.Since(at).Seconds())
 	}
-	if taskLive.inflight != nil {
-		// 已有一轮在跑：等它，别叠加。
-		ch := taskLive.inflight
-		taskLive.mu.Unlock()
-		select {
-		case <-ch:
-		case <-time.After(30 * time.Second):
-			writeErr(w, http.StatusServiceUnavailable, "上一轮任务查询仍在进行，稍后再试")
-			return
-		}
-		taskLive.mu.Lock()
-		rows, at := taskLive.rows, taskLive.at
-		taskLive.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "cached": true, "age_sec": int(time.Since(at).Seconds()),
-			"ttl_sec": int(taskLiveTTL.Seconds()), "accounts": rows,
-		})
-		return
-	}
-	ch := make(chan struct{})
-	taskLive.inflight = ch
-	taskLive.mu.Unlock()
-
-	rows := p.collectLiveTasks()
-
-	taskLive.mu.Lock()
-	taskLive.rows = rows
-	taskLive.at = time.Now()
-	taskLive.inflight = nil
-	taskLive.mu.Unlock()
-	close(ch)
-
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "cached": false, "age_sec": 0,
+		"ok": true, "cached": !waited || refreshing, "age_sec": age, "refreshing": refreshing,
 		"ttl_sec": int(taskLiveTTL.Seconds()), "accounts": rows,
 	})
 }
@@ -149,23 +163,28 @@ func (p *Panel) collectLiveTasks() []liveTaskAccount {
 
 // liveTasksOf 读一个账号的任务表并统计三类计数。
 //
-// 只发小程序口径一次；该口径失败（老版本上游 / 该域不支持）再退回默认口径，
-// 保证「查得到什么就显示什么」，而不是整行报错。
+// 国内号只发小程序口径一次；国际号只发默认口径。失败不重试、不换口径。
 func liveTasksOf(c *upstream.Client, a *auth.Auth) liveTaskAccount {
 	it := liveTaskAccount{UID: a.UID, Nickname: a.Nickname, Realm: a.Realm()}
 	if !a.SupportsPersonalEndpoints() {
 		it.Err = noPersonalTaskMessage
 		return it
 	}
-	tasks, err := c.ListTasksMP(a)
-	if err != nil {
+	// 国际号只走默认口径：小程序头对国际账号没有验证过的契约，单号任务弹窗
+	// （accountTasks）同样明确不探 MP。
+	// 每个账号每轮恰好一次上游请求：失败不重试、不换口径。重试会在上游抖动或一批号
+	// 失效（封号潮）时把一轮的请求数翻倍，失败号等下一轮即可。
+	var tasks []upstream.Task
+	var err error
+	if a.IsGlobal() {
 		tasks, err = c.ListTasks(a)
+	} else {
+		tasks, err = c.ListTasksMP(a)
 	}
 	if err != nil {
 		it.Err = err.Error()
 		return it
 	}
-	it.Tasks = tasks
 	for _, t := range tasks {
 		switch {
 		case t.Claimed:
@@ -175,6 +194,11 @@ func liveTasksOf(c *upstream.Client, a *auth.Auth) liveTaskAccount {
 		default:
 			it.Pending++
 		}
+	}
+	// 只给还有事可做的账号带任务表：全部领完的号占了绝大多数，把它们的任务表每轮都
+	// 序列化、前端每轮重画几千行是纯开销；计数仍在，需要细看走单号任务弹窗。
+	if it.Pending+it.Claimable > 0 {
+		it.Tasks = tasks
 	}
 	return it
 }

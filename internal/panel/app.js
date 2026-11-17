@@ -498,7 +498,12 @@ function go(v) {
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   if (v === 'balhist') loadBalance();
-  if (v === 'taskscenter') reattachQueueView();
+  if (v === 'taskscenter') {
+    reattachQueueView();
+    // 实时任务卡只在「进入本页」时启动一次；reattachQueueView 还会被 5s 全局轮询反复调用，
+    // 挂在那里会让用户选的刷新间隔与「关」全部失效（见 startLiveTasks）。
+    startLiveTasks();
+  }
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 /* 首次进入延到本轮脚本求值之后再 go()。
@@ -2662,7 +2667,11 @@ function openTasks(uid) {
   // 弹窗开着期间定时静默刷新：上游任务进度是分钟级聚合，30 秒一轮足够跟上，
   // 又不会让用户为了看到变化去点「重新加载」。
   if (taskAutoTimer) clearInterval(taskAutoTimer);
-  taskAutoTimer = setInterval(() => { if (taskUID === uid) loadTasks(true); }, 30000);
+  // 标签页在后台不刷：弹窗忘了关时，国内版账号每轮是两次上游读（默认 + 小程序口径），国际版一次。
+  // typeof 守卫：前端测试在没有 document 的沙箱里求值这一段。
+  taskAutoTimer = setInterval(() => {
+    if (taskUID === uid && !(typeof document !== 'undefined' && document.hidden)) loadTasks(true);
+  }, 30000);
 }
 function closeTasks() {
   taskJobGeneration++;
@@ -2810,31 +2819,43 @@ function groupsFromJobs(jobs) {
 $('btnTaskJobsReload').onclick = () => { taskCenterOwner = 'jobs'; loadTaskJobs(); };
 
 /* ── 实时任务 ─────────────────────────────────────────────────────────
-   数据源：GET /panel/api/tasks/live（后端按 45s TTL 缓存，一行一个账号的当前任务表）。
+   数据源：GET /panel/api/tasks/live（后端按 TTL 缓存，一行一个账号；只有还有事可做的号才带任务表）。
    为什么要这块：既有的「后台任务」只在作业跑过之后才有内容，「扫描待办」要手动点，
    两者都得有人先动一下，看板永远滞后。这里进页面就自动拉、按间隔自动刷。
 
    轮询只在「本页可见 + 浏览器在前台」时跑：切走就停，避免后台标签页把上游当靶子练。
-   间隔拿到后端 ttl_sec 做下限——比 TTL 还短只是打自己的缓存，没意义。 */
-let liveTimer = null, liveEvery = 45, liveLoading = false, liveTTL = 45;
+   启动只由 go() 在进入本页时调一次（reattachQueueView 会被 5s 全局轮询反复调用）。 */
+// 一轮 = 每个启用账号一次上游 GET：默认 2 分钟，可选档位都不低于后端缓存 TTL（1 分钟），
+// 再密只是读缓存。
+const LIVE_EVERY_CHOICES = [0, 60, 120, 300];
+let liveTimer = null, liveEvery = 120, liveLoading = false, liveRetry = null, liveLastKey = '';
 function liveTaskRow(t) {
+  // 返回行对象，由 renderLiveTasks 统一交给 qrowHTML 渲染一次（返回 HTML 会被渲染两次）。
   // 上游 Task：claimed / claimable 是本地推算，status 是上游原文
   const st = t.claimed ? 'done' : t.claimable ? 'claim_pending' : (t.locked ? 'skipped' : 'scan');
   const prog = (t.progress_known && t.target > 0) ? (t.current + '/' + t.target) : '';
   const gain = (t.credit ? '+' + t.credit + 'c' : '') + (t.energy ? ' +' + t.energy + 'e' : '');
-  return qrowHTML({
+  return {
     code: t.task_code,
     title: t.title,
     desc: t.task_desc || t.description,
     status: st,
     prog: prog,
     message: [t.task_desc || t.description, gain.trim()].filter(Boolean).join(' · '),
-  });
+  };
 }
 function renderLiveTasks(d) {
   const list = $('liveList'), empty = $('liveEmpty'), note = $('liveNote');
   const accts = (d && d.accounts) || [];
-  if (d && d.ttl_sec) liveTTL = d.ttl_sec;
+  // 数据没变就不重画：账号多时一轮是几百个分组，每个间隔重建一遍 DOM 纯属浪费，
+  // 还会冲掉用户正在选中的文字。age_sec / cached 每次都变，不进比较。
+  const key = JSON.stringify(accts);
+  note.hidden = true; // 上一轮失败的提示在恢复后要收起，包括「数据没变」的早退分支
+  if (key === liveLastKey && list.innerHTML) {
+    $('liveSummary').textContent = liveSummary(accts, d);
+    return;
+  }
+  liveLastKey = key;
   const groups = accts.filter(a => (a.tasks || []).length || a.error).map(a => ({
     uid: a.uid,
     nick: a.nickname || String(a.uid).slice(0, 8),
@@ -2846,31 +2867,42 @@ function renderLiveTasks(d) {
   }));
   if (!groups.length) {
     list.innerHTML = ''; empty.style.display = '';
-    empty.querySelector('.t').textContent = '还没有数据';
-    empty.querySelector('.d').textContent = '点「立即刷新」拉一次。';
-    $('liveSummary').textContent = '';
+    // 有账号却没有分组 = 全部领完了（只有待办 / 可领 / 失败的号才带任务表或错误）
+    empty.querySelector('.t').textContent = accts.length ? '任务都领完了' : (d && d.refreshing) ? '首轮查询中' : '还没有数据';
+    empty.querySelector('.d').textContent = accts.length ? '没有待办、可领或查询失败的账号。' : (d && d.refreshing) ? '账号多时首轮要一会儿，查完会自动显示。' : '点「立即刷新」拉一次。';
+    $('liveSummary').textContent = liveSummary(accts, d);
     return;
   }
   empty.style.display = 'none';
-  let pending = 0, claimable = 0;
-  accts.forEach(a => { pending += a.pending || 0; claimable += a.claimable || 0; });
   list.innerHTML = groups.map(g =>
     '<div class="qgroup" title="' + esc(g.tip) + '"><header><span class="nm">' + esc(g.nick) + '</span>' +
     '<span class="cnt">' + esc(g.cnt) + '</span><span class="grow"></span>' +
     '<button class="xs" data-live-uid="' + esc(g.uid) + '">打开任务</button></header>' +
     g.rows.map(qrowHTML).join('') + '</div>').join('');
-  $('liveSummary').textContent = accts.length + ' 个账号 · ' + pending + ' 待办 · ' + claimable + ' 可领' +
-    (d && d.cached ? ' · ' + (d.age_sec || 0) + ' 秒前' : ' · 刚更新');
-  note.hidden = true;
+  $('liveSummary').textContent = liveSummary(accts, d);
+}
+function liveSummary(accts, d) {
+  if (!accts.length) return '';
+  let pending = 0, claimable = 0;
+  accts.forEach(a => { pending += a.pending || 0; claimable += a.claimable || 0; });
+  return accts.length + ' 个账号 · ' + pending + ' 待办 · ' + claimable + ' 可领 · ' +
+    ((d && d.age_sec) ? d.age_sec + ' 秒前' : '刚更新') + (d && d.refreshing ? ' · 更新中' : '');
 }
 async function loadLiveTasks(fresh) {
   if (liveLoading) return;
   liveLoading = true;
   const btn = $('btnLiveReload');
   if (btn) btn.disabled = true;
+  if (liveRetry) { clearTimeout(liveRetry); liveRetry = null; }
   try {
     const d = await api('tasks/live' + (fresh ? '?fresh=1' : ''));
     renderLiveTasks(d);
+    // 后台那一轮还没跑完（返回的是上一份快照，可能是空的）：几秒后再取一次，不等下一个
+    // 轮询间隔，否则卡片总比数据慢一个间隔。这只是读服务端缓存，不产生上游请求；一轮结束
+    // refreshing 变 false 就停。
+    if (d && d.refreshing) {
+      liveRetry = setTimeout(() => { liveRetry = null; if (liveVisible()) loadLiveTasks(false); }, 8000);
+    }
   } catch (e) {
     const note = $('liveNote');
     note.hidden = false;
@@ -2881,10 +2913,10 @@ async function loadLiveTasks(fresh) {
     if (btn) btn.disabled = false;
   }
 }
+// liveVisible 本页在前台才轮询：切走视图、切到别的标签页都算不可见。
+function liveVisible() { return view === 'taskscenter' && !(typeof document !== 'undefined' && document.hidden); }
 function liveTasksTick() {
-  if (view !== 'taskscenter' || document.hidden) return;
-  // 间隔比后端 TTL 短只会读缓存；按实际 TTL 抬到下限，避免无谓轮询。
-  if (liveEvery < liveTTL) liveEvery = liveTTL;
+  if (!liveVisible()) return;
   loadLiveTasks(false);
 }
 let liveVisBound = false;
@@ -2914,7 +2946,7 @@ if ($('liveEvery')) {
   const savedRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('wb2api.liveEvery') : null;
   if (savedRaw !== null && savedRaw !== '') {
     const saved = Number(savedRaw);
-    if (saved >= 0) { liveEvery = saved; $('liveEvery').value = String(saved); }
+    if (LIVE_EVERY_CHOICES.includes(saved)) { liveEvery = saved; $('liveEvery').value = String(saved); }
   }
 }
 if ($('btnLiveReload')) $('btnLiveReload').onclick = () => loadLiveTasks(true);
@@ -3199,10 +3231,6 @@ function reattachQueueView() {
     taskCenterOwner = 'jobs';
     loadTaskJobs();
   }
-  // 实时任务卡独立于下面的队列/作业列表，进本页即拉一次并接管轮询。
-  // typeof 守卫：本文件有测试会把 reattachQueueView 单独切出来求值（不带上
-  // startLiveTasks），无守卫会 ReferenceError 把整段测试打断。
-  if (typeof startLiveTasks === 'function') startLiveTasks();
   // 全程异步：go() 在顶层（app.js ~143 行）被调用时，本文件下方 let/const
   //（queueTimer/lastQueueSeq 等）尚未初始化——同步读取即 TDZ ReferenceError
   // 使整个脚本中断。await 之后才碰它们（旧 pollQueueOnce 正是靠开头的 await
