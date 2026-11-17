@@ -56,6 +56,10 @@ func TestClassify(t *testing.T) {
 		{400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, ErrBadParams},
 		{400, `Unmarshal chat params failed`, ErrBadParams},
 		{400, `{"code":11101,"msg":"x"}`, ErrBadParams},
+		// 11129 工具定义不合规：确定性请求级错误，分类后不轮转、不罚号。
+		{400, `{"code":11129,"msg":"invalid function call parameters"}`, ErrBadParams},
+		{400, `invalid function call parameters`, ErrBadParams},
+		{400, `{"extError":{"code":"invalid_function_parameters"}}`, ErrBadParams},
 		// 图片格式/数据错误是确定性请求错误，分类后不轮转、不罚号。
 		{400, `{"code":11101,"msg":"Parse message failed: invalid image_url content at index 2: json: cannot unmarshal string into Go value of type v2.ImageContent"}`, ErrImageInvalid},
 		{400, `{"code":11135,"msg":"invalid_image_data"}`, ErrImageInvalid},
