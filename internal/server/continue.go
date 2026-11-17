@@ -142,6 +142,10 @@ type continueReader struct {
 	origTail   []string
 
 	lastClientAt time.Time // 上次客户端可见输出/keepalive 的时刻（静默节流）
+	// emitted 已向下游交出过数据帧。在这之前 StreamHint 的首帧否决窗口还开着，一条注释行就会
+	// 提交 200：之后这次尝试的首帧若是 error 帧，就换不了号、只能「200 + error 帧」收尾。
+	// 所以保活注释只在 emitted 之后补（见 maybeKeepalive）。
+	emitted bool
 
 	// segSawDone 当前段是否以 [DONE] 收尾：换段失败时按它决定收尾形态。
 	segSawDone bool
@@ -520,6 +524,7 @@ func sumUsage(acc, u map[string]any) map[string]any {
 }
 
 func (r *continueReader) emit(payload string) {
+	r.emitted = true
 	r.lastClientAt = time.Now()
 	r.out = append(r.out, "data: "...)
 	r.out = append(r.out, payload...)
@@ -529,9 +534,9 @@ func (r *continueReader) emit(payload string) {
 // maybeKeepalive 被吞帧到达时调用：距上次客户端可见输出超过 keepaliveEvery 就
 // 补一条 SSE 注释帧。注释行（":" 开头）是 SSE 规范的 no-op——StreamHint 原样
 // 透传并 flush，responsesWriter 与 chat 类客户端的解析器都忽略它；唯一作用是
-// 让连接保持「有数据流动」，防流静默超时掐线。
+// 让连接保持「有数据流动」，防流静默超时掐线。下游还没收到任何数据帧时不补（见 emitted）。
 func (r *continueReader) maybeKeepalive() {
-	if keepaliveEvery > 0 && time.Since(r.lastClientAt) < keepaliveEvery {
+	if !r.emitted || keepaliveEvery > 0 && time.Since(r.lastClientAt) < keepaliveEvery {
 		return
 	}
 	r.out = append(r.out, ": keepalive\n\n"...)
