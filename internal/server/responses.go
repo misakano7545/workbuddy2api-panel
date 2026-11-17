@@ -12,11 +12,13 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/debugcap"
+	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
 
 // responsesWebsocketUnsupported 回应 Codex 的 WS 升级探测（GET /v1/responses）。
@@ -677,9 +679,20 @@ func reasoningStartsAssistant(target map[string]any) bool {
 	return false
 }
 
+// compactionSummaryMax 交接摘要送上游的字节上限。摘要每轮都随历史重发，来源又是
+// 客户端，不封顶时一份异常大的摘要会让此后每一轮都更早撞上 11115。
+const compactionSummaryMax = 32 << 10
+
+// opaqueCompactionBlob 只由 base64 / base64url / token 字符组成、且够长的串：真实的
+// encrypted_content 是密文（URL-safe base64 不带 padding 时标准解码会失败），解不出
+// 摘要就是对上游无意义的乱码。纯文本摘要总会有空白或非 ASCII 字符；短于 32 的放行，
+// 免得 "Done" 这类单词被当成密文。
+var opaqueCompactionBlob = regexp.MustCompile(`^[A-Za-z0-9+/=_.\-]{32,}$`)
+
 // decodeCompactionSummary 尽力解码 compaction 项的 encrypted_content：正常形态是
-// base64(JSON {"v":1,"summary":...})，先补齐 base64 padding 再解；解不开时保留原文
-// ——外部提供者可能塞的是纯文本摘要，丢了它就丢了唯一一份上下文交接。
+// base64(JSON {"v":1,"summary":...})，先补齐 base64 padding 再解，解出的 summary
+// 为空就是没有摘要；解不开时，像密文的丢弃，其余按纯文本摘要保留——外部提供者可能
+// 塞的是纯文本摘要，丢了它就丢了唯一一份上下文交接。结果封顶 compactionSummaryMax。
 func decodeCompactionSummary(blob string) string {
 	text := strings.TrimSpace(blob)
 	if text == "" {
@@ -690,11 +703,14 @@ func decodeCompactionSummary(blob string) string {
 		var obj struct {
 			Summary string `json:"summary"`
 		}
-		if json.Unmarshal(raw, &obj) == nil && obj.Summary != "" {
-			return obj.Summary
+		if json.Unmarshal(raw, &obj) == nil {
+			return logfmt.Truncate(obj.Summary, compactionSummaryMax)
 		}
 	}
-	return text
+	if opaqueCompactionBlob.MatchString(text) {
+		return ""
+	}
+	return logfmt.Truncate(text, compactionSummaryMax)
 }
 
 func convertInputItems(items []any, meta *responsesMeta) []any {

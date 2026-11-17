@@ -139,3 +139,34 @@ func TestResponsesReplaySkipsHostedToolItems(t *testing.T) {
 		t.Fatalf("compaction 前的思考丢了：%v", out)
 	}
 }
+
+// TestResponsesReplayCompactionNeverInjectsBlob compaction 交接摘要的兜底：真实的
+// encrypted_content 是密文（URL-safe base64、标准 base64 都有），解不出摘要时不能把
+// 密文当成摘要塞给上游；解出的摘要为空不造消息；纯文本摘要有长度上限。
+func TestResponsesReplayCompactionNeverInjectsBlob(t *testing.T) {
+	for name, enc := range map[string]string{
+		"URL-safe 密文":      "gAAAAABnX2_pQ-" + strings.Repeat("Zm9vYmFyYmF6_-", 64),
+		"标准 base64 非 JSON": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v",
+		"摘要为空的 JSON":       "eyJ2IjoxLCJzdW1tYXJ5IjoiIn0=",
+	} {
+		out := convertInputItems([]any{
+			map[string]any{"type": "compaction", "encrypted_content": enc},
+			map[string]any{"role": "user", "content": "继续"},
+		}, nil)
+		if len(out) != 1 {
+			t.Fatalf("%s：不该生成交接摘要：%v", name, out)
+		}
+	}
+	long := strings.Repeat("改了 a.go 与 b.go，测试已通过。", 8192)
+	out := convertInputItems([]any{
+		map[string]any{"type": "compaction", "encrypted_content": long},
+		map[string]any{"role": "user", "content": "继续"},
+	}, nil)
+	if len(out) != 2 {
+		t.Fatalf("纯文本摘要被丢：%d 条", len(out))
+	}
+	content := asString(out[0].(map[string]any)["content"])
+	if len(content) > compactionSummaryMax+256 || !strings.Contains(content, "改了 a.go") {
+		t.Fatalf("纯文本摘要没有封顶：%d 字节", len(content))
+	}
+}
