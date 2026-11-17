@@ -10,6 +10,8 @@ package upstream
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
@@ -128,6 +130,53 @@ func TestClientIdentityDesktopReport(t *testing.T) {
 		}
 		if got := glHdr.Get(h); got != "" {
 			t.Errorf("GL /v2/report 不该发 %s，实际=%q", h, got)
+		}
+	}
+}
+
+// TestClientIdentityNotOnMPPaths 小程序口径的请求只带平台段，不带桌面端那三头。
+//
+// 这些路径（growth 任务 accept / claim）先调 BillingHeaders（CN 号会把
+// X-Client-Version/Platform/Product 打上），再覆盖 X-Client-Platform: miniprogram。
+// 不撤三头就会发出 `5.11.3 / miniprogram / WorkBuddy`：桌面端不会说 miniprogram，
+// 小程序也不会自报 5.11.3 与 WorkBuddy（真机小程序是 2.4.0 / mp-weixin / workbuddy-mp）。
+func TestClientIdentityNotOnMPPaths(t *testing.T) {
+	var mu sync.Mutex
+	var seen []http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Clone())
+		mu.Unlock()
+		if strings.Contains(r.URL.Path, "/claim") {
+			w.Write([]byte(`{"code":0,"msg":"OK","data":{"already_claimed":false,"credit":100,"energy":5}}`))
+			return
+		}
+		w.Write([]byte(`{"code":0,"msg":"OK","data":[{"task_code":"chat_5","current":1,"target":1}]}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
+	a := cnProbeAuth()
+	if err := c.AcceptTasksMP(a, []string{"Sequential_Tasks_1"}); err != nil {
+		t.Fatalf("AcceptTasksMP: %v", err)
+	}
+	if _, _, err := c.ClaimRewardMP(a, "Sequential_Tasks_1"); err != nil {
+		t.Fatalf("ClaimRewardMP: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("应发两次上游请求，实际 %d", len(seen))
+	}
+	for i, h := range seen {
+		if got := h.Get("X-Client-Platform"); got != mpPlatform {
+			t.Errorf("第 %d 次请求 X-Client-Platform=%q want %q", i+1, got, mpPlatform)
+		}
+		for _, k := range []string{"X-Client-Version", "X-Client-Product"} {
+			if got := h.Get(k); got != "" {
+				t.Errorf("第 %d 次请求（小程序口径）不该带 %s，实际=%q", i+1, k, got)
+			}
 		}
 	}
 }

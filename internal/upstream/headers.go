@@ -131,6 +131,20 @@ func (c *Client) injectClientIdentityHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("X-Client-Product", defaultClientIdentityProduct)
 }
 
+// dropClientIdentityHeaders 撤掉 injectClientIdentityHeaders 注入的三头，供**小程序口径**
+// 的请求使用（tasks.go 的 growthJSONMP / ClaimRewardMP）。
+//
+// 为什么必须撤：这三个头来自桌面端 5.11.3 的 origin 注入，小程序那条链路根本不存在这一层。
+// 这些路径都是先 BillingHeaders（CN 号会把三头打上）再覆盖 X-Client-Platform: miniprogram，
+// 不撤就会发出 `5.11.3 / miniprogram / WorkBuddy` —— 桌面端不会说 miniprogram，
+// 小程序也不会自报 5.11.3 与 WorkBuddy（真机小程序是 2.4.0 / mp-weixin / workbuddy-mp，
+// 见 mp_events.go），是个谁都不像的第四种组合。
+func (c *Client) dropClientIdentityHeaders(req *http.Request) {
+	req.Header.Del("X-Client-Version")
+	req.Header.Del("X-Client-Platform")
+	req.Header.Del("X-Client-Product")
+}
+
 // defaultWorkBuddyUAFor 组装默认客户端出站 UA（官方 `buildUserAgent` 形态）：
 // `WorkBuddy/<ver> <brand>/<ver> CLI/<cliVer>`
 //
