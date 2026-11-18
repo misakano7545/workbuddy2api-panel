@@ -27,6 +27,9 @@ func TestScheduleWindowToleratesMissedMinute(t *testing.T) {
 	if auto, _ := m.scheduleDue(late); !auto {
 		t.Fatal("错过目标分钟的当天应补跑")
 	}
+	// 置位改由 Run 在走通后调用（scheduleDue 只判不置位，见 issue #274）。
+	m.now = func() time.Time { return late }
+	m.markAutoDone()
 	if auto, _ := m.scheduleDue(late.Add(time.Minute)); auto {
 		t.Fatal("同一天只跑一次")
 	}

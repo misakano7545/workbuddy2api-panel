@@ -303,6 +303,9 @@ func TestScheduleUsesShanghaiAndRunsOncePerDay(t *testing.T) {
 		t.Fatalf("startup schedule: auto=%v regular=%v", auto, regular)
 	}
 	m.lastCheck = now
+	// lastAutoDay 现在只由 Run 走通后置位（scheduleDue 不再自己置位，见 issue #274）。
+	m.now = func() time.Time { return now }
+	m.markAutoDone()
 	auto, regular = m.scheduleDue(now.Add(10 * time.Second))
 	if auto || regular {
 		t.Fatal("duplicate schedule within the same day")

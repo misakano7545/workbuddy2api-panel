@@ -147,6 +147,8 @@ type Manager struct {
 	release     *release
 	lastCheck   time.Time
 	lastAutoDay string
+	// autoRetryAt 自动更新失败后的下一次可尝试时刻（见 autoRetryDelay）。
+	autoRetryAt time.Time
 	restarting  func()
 }
 
@@ -223,7 +225,12 @@ func CleanupStaleTempFiles(dir string, olderThan time.Duration) {
 			continue
 		}
 		info, err := e.Info()
-		if err != nil || !info.ModTime().Before(cutoff) {
+		if err != nil {
+			continue
+		}
+		// 0 字节的不问年龄一律清：那是「下载没开始/刚开始就失败」的残留，而这个函数只在
+		// 启动时跑一次，不可能有在途更新（issue #274 现象 2 里的 .wb2api-release-*.zip）。
+		if info.Size() > 0 && !info.ModTime().Before(cutoff) {
 			continue
 		}
 		if err := os.Remove(filepath.Join(dir, name)); err == nil {
@@ -571,6 +578,15 @@ func (m *Manager) fetchAsset(ctx context.Context, asset *releaseAsset) (string, 
 	}
 	archivePath := archiveFile.Name()
 	cleanup := func() { os.Remove(archivePath) }
+	// 失败路径一律把临时文件删掉：留着 0 字节的 .wb2api-release-*.zip 会被当成「已下好的
+	// 更新包」（issue #274 现象 2）。Windows 上必须先关句柄才能删，所以统一走 defer。
+	kept := false
+	defer func() {
+		if !kept {
+			archiveFile.Close()
+			cleanup()
+		}
+	}()
 	if err := m.downloadAsset(ctx, asset, archiveFile); err != nil {
 		archiveFile.Close()
 		return "", func() {}, err
@@ -588,6 +604,7 @@ func (m *Manager) fetchAsset(ctx context.Context, asset *releaseAsset) (string, 
 		m.mu.Unlock()
 		return "", func() {}, fmt.Errorf("%w（[%s] %s）", err, kindChecksum, adviceFor(kindChecksum))
 	}
+	kept = true
 	return archivePath, cleanup, nil
 }
 
@@ -1043,20 +1060,29 @@ func (m *Manager) Run(ctx context.Context) {
 		}
 		autoDue, regularDue := m.scheduleDue(m.now())
 		if autoDue || regularDue {
-			if err := m.Check(ctx); err != nil {
+			err := m.Check(ctx)
+			if err != nil {
 				if ctx.Err() == nil {
 					if autoDue {
-						log.Printf("WARN: [updater] 自动更新检查失败，今日自动更新未执行（明日自动时间再试）: %v", err)
+						// 失败不等于「今天跑过了」：403 是匿名限额被同出口的其它进程吃光，
+						// 半小时后可能就好了（issue #274 现象 1）。
+						m.deferAuto()
+						log.Printf("WARN: [updater] 自动更新检查失败，%s 后重试: %v", autoRetryDelay, err)
 					} else {
 						log.Printf("WARN: [updater] release check: %v", err)
 					}
 				}
-			} else if autoDue && m.Status().UpdateAvailable && m.Status().CanInstall {
-				if err := m.Install(ctx); err != nil {
-					log.Printf("WARN: [updater] automatic install: %v", err)
+			} else if autoDue {
+				if m.Status().UpdateAvailable && m.Status().CanInstall {
+					if err := m.Install(ctx); err != nil {
+						m.deferAuto()
+						log.Printf("WARN: [updater] automatic install: %v（%s 后重试）", err, autoRetryDelay)
+					} else {
+						m.RestartAfter(time.Second)
+						return
+					}
 				} else {
-					m.RestartAfter(time.Second)
-					return
+					m.markAutoDone()
 				}
 			}
 		}
@@ -1068,6 +1094,29 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
+// autoRetryDelay 自动更新没走通时的重试间隔。
+//
+// 原先的语义是「一次失败就整天不再检查」——lastAutoDay 在 scheduleDue 里就置位，Check
+// 失败也照样算跑过。未认证的 GitHub API 只有 60 次/小时且按出口 IP 共享，很容易被同机
+// 其它工具吃光，而本仓库一天可能发好几个修复：一次 403 就让用户落后一整天（issue #274）。
+// 30 分钟：足够长到不把限额耗得更狠，足够短到当天还有机会更新。
+const autoRetryDelay = 30 * time.Minute
+
+// markAutoDone 今天的自动更新已经走完（检查成功且无需安装，或已交给重启）。
+func (m *Manager) markAutoDone() {
+	m.mu.Lock()
+	m.lastAutoDay = m.now().In(shanghai()).Format("2006-01-02")
+	m.autoRetryAt = time.Time{}
+	m.mu.Unlock()
+}
+
+// deferAuto 这次没走通，隔 autoRetryDelay 再试，而不是等到明天。
+func (m *Manager) deferAuto() {
+	m.mu.Lock()
+	m.autoRetryAt = m.now().Add(autoRetryDelay)
+	m.mu.Unlock()
+}
+
 func (m *Manager) scheduleDue(now time.Time) (auto, regular bool) {
 	now = now.In(shanghai())
 	m.mu.Lock()
@@ -1076,12 +1125,13 @@ func (m *Manager) scheduleDue(now time.Time) (auto, regular bool) {
 	// 窗口式而非分钟精确相等：分钟 ticker 的相位漂移、上一轮 Check 占住循环跨过
 	// 目标分钟、进程在目标分钟之后才启动，精确相等都会让当天自动更新静默落空。
 	// 改为「今天还没跑过 且 已到/过目标时刻」——错过起点也能补跑当天的一次。
+	//
+	// 这里只判、不置位：置位改由 Run 在真正走通后调 markAutoDone（失败时调 deferAuto
+	// 排一次重试）。放在这里置位就是「一次失败整天放弃」的根因。
 	target, terr := time.Parse("15:04", m.settings.AutoTime)
 	auto = m.settings.AutoEnabled && terr == nil && m.lastAutoDay != day &&
-		now.Hour()*60+now.Minute() >= target.Hour()*60+target.Minute()
-	if auto {
-		m.lastAutoDay = day
-	}
+		now.Hour()*60+now.Minute() >= target.Hour()*60+target.Minute() &&
+		(m.autoRetryAt.IsZero() || !now.Before(m.autoRetryAt))
 	return auto, m.lastCheck.IsZero() || now.Sub(m.lastCheck) >= 6*time.Hour
 }
 
