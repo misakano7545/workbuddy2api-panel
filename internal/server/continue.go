@@ -193,6 +193,9 @@ type continueReader struct {
 	// 占用只取末段 prompt，记到账号 / 用量 / 预算上的必须是这一份。segUsage 当前段的 usage。
 	billed   map[string]any
 	segUsage map[string]any
+	// rescueWhy 本轮被挡掉的救援判据（枚举码，见 rescue_trace.go）：默认不记录，
+	// 只在 WB2API_RESCUE_TRACE=1 时有值。
+	rescueWhy []string
 
 	done bool
 }
@@ -647,6 +650,7 @@ const (
 // 就落到下一条」一致——例如无限额请求的空截断救援失败后，仍可走一次续写。已经发起过的
 // 规则各自记了用过（starvedTried 等），不会重复发起。
 func (r *continueReader) decideNext(sawDone bool, from int) {
+	r.rescueWhy = r.rescueWhy[:0]
 	if from <= switchStarved && r.tryStarvedRetry() {
 		return
 	}
@@ -704,6 +708,7 @@ func (r *continueReader) decideNext(sawDone bool, from int) {
 		log.Printf("INFO: [continue] acct=%s 累计输出 %d token 已达上限 %d → 停止续写，按截断收尾",
 			logfmt.Label(r.acct.UID, r.acct.Nickname), int(r.totalOutput()), int(r.outputCap()))
 	}
+	r.logRescueSkip()
 	r.finishStream(sawDone)
 }
 

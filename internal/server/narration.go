@@ -385,17 +385,25 @@ const narrationMaxRescues = 2
 // 返回 true 表示已换到新段继续读，调用方直接 return。
 func (r *continueReader) tryNarrationRetry() bool {
 	switch {
-	case r.narrationTries >= narrationMaxRescues, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
-		return false
+	case r.narrationTries >= narrationMaxRescues:
+		return r.skip("narration", "tries_cap")
+	case r.errSeen:
+		return r.skip("narration", "err_frame")
+	case r.toolSeen:
+		return r.skip("narration", "tool_seen")
+	case r.clientGone():
+		return r.skip("narration", "client_gone")
+	case r.outputCapped():
+		return r.skip("narration", "output_capped")
 	case r.finish != "stop":
-		return false
+		return r.skip("narration", "finish_not_stop")
 	case r.text.Len() == 0:
-		return false
+		return r.skip("narration", "no_text")
 	case r.text.Len() == r.narrationTextAt:
 		// 上一次救援一个字都没写出来：再发的请求体与上一次一字不差，只是再付一次整段上下文的钱。
-		return false
+		return r.skip("narration", "no_new_text")
 	case r.atSegmentCap():
-		return false
+		return r.skip("narration", "segment_cap")
 	}
 	txt := r.text.String()
 	// 模型在等用户拍板（问句结尾 / 「请确认后我再…」）：这是**故意的**收尾。
@@ -403,7 +411,7 @@ func (r *continueReader) tryNarrationRetry() bool {
 	// （issue #209 两例：要确认的邮件被直接群发）。
 	// 「是否需要 / 要不要」这类也常见于技术叙述的措辞只认问用户的用法（见 deliberationAddressesUser）。
 	if yieldsToUser(txt, false) {
-		return false
+		return r.skip("narration", "yields_to_user")
 	}
 	// 救援指令早些时候的出口是「只回一句『已完成』」。文案已经换成「什么都不要输出」
 	// （issue #273：那三个字会进客户端正文），但模型按旧习惯照回的情况仍会有——认它，
@@ -412,7 +420,7 @@ func (r *continueReader) tryNarrationRetry() bool {
 	// toolOnlyLastSentence 会把两句连成一句。
 	if tail := strings.TrimRight(txt, " 	\r\n「」\"'*_。"); strings.HasSuffix(tail, "已完成") ||
 		strings.HasSuffix(strings.ToLower(tail), "done") {
-		return false
+		return r.skip("narration", "ack_done")
 	}
 	// 两道形态闸门都不让「聊天文风」过关（issue #273：角色扮演机器人「一两句 + ||| 分条 +
 	// <face:…> 收尾、基本不写句号」，既不是标点型悬停也不是承诺句，于是每条正常回复都被
@@ -425,23 +433,23 @@ func (r *continueReader) tryNarrationRetry() bool {
 	if !narrationTailStructurallyOpen(txt) {
 		if narrationTailPunctuated(txt) {
 			if len(txt) > narrationMaxBytes {
-				return false
+				return r.skip("narration", "tail_punct_long")
 			}
 		} else if !narrationTailPromises(txt) {
-			return false
+			return r.skip("narration", "tail_no_promise")
 		}
 	}
 	if !narrationTailSuspends(txt) {
-		return false
+		return r.skip("narration", "tail_ends_sentence")
 	}
 	// 结构未闭合（截断的调用标记 / 未闭合代码块）只补一次：残缺标记留在前缀里，
 	// 追加正文补不完它（续写段写多少都还是半截），再救也只是白花一次上游调用。
 	if narrationTailStructurallyOpen(txt) && r.narrationTries >= 1 {
-		return false
+		return r.skip("narration", "structural_retry_cap")
 	}
 	declared, toolTurn := bodyToolShape(r.body)
 	if !declared || !toolTurn {
-		return false
+		return r.skip("narration", "no_tool_history")
 	}
 	nudge := narrationNudge
 	if !narrationTailPunctuated(txt) && !narrationTailStructurallyOpen(txt) {
@@ -451,7 +459,7 @@ func (r *continueReader) tryNarrationRetry() bool {
 	}
 	body, err := r.continuationBodyWithNudge(nudge)
 	if err != nil {
-		return false
+		return r.skip("narration", "body_build_failed")
 	}
 	r.narrationTries++
 	r.narrationTextAt = r.text.Len()
