@@ -239,10 +239,18 @@ var badParamsMarkers11129 = []string{
 	"工具定义不合规",
 }
 
-// isToolSchemaRejected 判定 11129：业务码精确命中，或文案命中（首帧 error 帧里 message 可能是
-// 英文原文、下划线形态或中文 displayMsg）。lower 须为 strings.ToLower(body)。
+// isToolSchemaRejected 判定「工具定义被上游整体拒收」：11129（schema 形态不合规，
+// displayMsg「工具定义不合规」）与 11152（工具名不合规或重名，displayMsg「工具名称
+// 不规范」）都属同一类——错在客户端声明的 tools，换任何账号都是同一处拒绝。
+// 业务码精确命中（容忍空白/字符串形态/嵌套），或文案命中（首帧 error 帧里 message
+// 可能是英文原文、下划线形态或中文 displayMsg）。lower 须为 strings.ToLower(body)。
+//
+// 11152 是 2026-11-18 真机实测补进来的：工具名带点/冒号/斜杠/CJK/空格、或两个同名
+// 工具，上游一律 400 11152。此前未登记 → 落到 Classify 通用 4xx 兜底 → ErrClient →
+// 喂连败、轮转全池、末端 503 no_healthy_account，把一个确定性请求错误伪装成账号故障。
 func isToolSchemaRejected(body, lower string) bool {
-	return hasBusinessCode(body, "11129") || containsAnyMarker(lower, badParamsMarkers11129)
+	return hasBusinessCode(body, "11129") || hasBusinessCode(body, "11152") ||
+		containsAnyMarker(lower, badParamsMarkers11129)
 }
 
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，

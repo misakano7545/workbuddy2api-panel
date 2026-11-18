@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log"
 	"math"
+	"strconv"
 	"strings"
 	"sync/atomic"
 )
@@ -729,6 +730,22 @@ func normalizeToolParameters(node any) any {
 	if !ok {
 		return map[string]any{"type": "object", "properties": map[string]any{}}
 	}
+	// 顶层 $ref：整份参数 schema 指向 $defs 时上游一刀拒收（实测 400 11129），而
+	// 嵌套 $ref 实测 200——只有顶层要处理。能就地展开就展开（保住真实参数定义），
+	// 展不开（非 #/$defs/ 的 ref、目标缺失、循环）也必须删掉：留着等于保证这颗工具
+	// 每次请求都 400，删掉至少退化成一个无参工具。
+	if ref, ok := params["$ref"].(string); ok {
+		delete(params, "$ref")
+		if defs, ok := params["$defs"].(map[string]any); ok && strings.HasPrefix(ref, "#/$defs/") {
+			if t, ok := inlineKimiSchema(map[string]any{"$ref": ref}, defs, nil, 0).(map[string]any); ok {
+				for k, v := range t {
+					if _, dup := params[k]; !dup {
+						params[k] = v
+					}
+				}
+			}
+		}
+	}
 	t, ok := params["type"].(string)
 	if !ok || strings.TrimSpace(t) == "" {
 		params["type"] = "object"
@@ -785,11 +802,113 @@ var schemaDataKeys = map[string]bool{
 	"examples": true,
 }
 
+// schemaNumberKeys / schemaBoolKeys / schemaStringKeys 三组关键字的**取值类型**同样被
+// 上游按 Go 强类型反序列化校验，类型不符即整体拒收（code=11129，displayMsg「工具定义
+// 不合规」）。2026-11-18 在 www.workbuddy.cn 上逐形态单独实测，每个样本只带一处缺陷：
+//
+//	minimum:"1"        → 400 11129      minimum:1        → 200
+//	uniqueItems:"true" → 400 11129      uniqueItems:true → 200
+//	description:123    → 400 11129      description:"x"  → 200
+//	enum:"x"           → 400 11129      enum:["x"]       → 200
+//	additionalProperties:"false" → 400 11129
+//
+// 弱类型客户端（Python dict、PHP array、手写 JSON 模板）序列化出来就是这些形状；同一
+// 实测里联合类型 type:["string","null"]、oneOf、嵌套 $ref + $defs、items:{}、
+// required 指向不存在的属性全部 200，所以这里只纠这三组与顶层 $ref，不扩面。
+var schemaNumberKeys = []string{
+	"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+	"minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties",
+}
+var schemaBoolKeys = []string{"uniqueItems", "deprecated", "readOnly", "writeOnly"}
+var schemaStringKeys = []string{"description", "title", "format", "pattern"}
+
+// coerceSchemaKeywords 把三组关键字的取值纠成上游能接受的基本类型；纠不动就删键
+// （留着一个非法值等于保证整颗工具必然 400，删掉只是丢掉一条约束或注释）。
+func coerceSchemaKeywords(n map[string]any) {
+	for _, k := range schemaNumberKeys {
+		if v, ok := n[k]; ok {
+			if num, ok := schemaNumber(v); ok {
+				n[k] = num
+			} else {
+				delete(n, k)
+			}
+		}
+	}
+	for _, k := range schemaBoolKeys {
+		if v, ok := n[k]; ok {
+			if b, ok := schemaBool(v); ok {
+				n[k] = b
+			} else {
+				delete(n, k)
+			}
+		}
+	}
+	for _, k := range schemaStringKeys {
+		if v, ok := n[k]; ok {
+			if _, isStr := v.(string); !isStr {
+				delete(n, k)
+			}
+		}
+	}
+	if v, ok := n["additionalProperties"]; ok {
+		if _, isSchema := v.(map[string]any); !isSchema {
+			if b, ok := schemaBool(v); ok {
+				n["additionalProperties"] = b
+			} else {
+				delete(n, "additionalProperties")
+			}
+		}
+	}
+	for _, k := range []string{"enum", "examples"} {
+		if v, ok := n[k]; ok {
+			if _, isList := v.([]any); !isList {
+				delete(n, k)
+			}
+		}
+	}
+}
+
+// schemaNumber 纠数值关键字：数字原样，纯数字字符串转数值，其余（bool / 对象 /
+// NaN / Infinity）判非法。encoding/json 解出来的数字一律 float64，故一并返回 float64。
+func schemaNumber(v any) (any, bool) {
+	switch x := v.(type) {
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return nil, false
+		}
+		return x, true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, false
+		}
+		return f, true
+	}
+	return nil, false
+}
+
+// schemaBool 纠布尔关键字：bool 原样，"true"/"false" 转义，其余判非法。
+func schemaBool(v any) (bool, bool) {
+	switch x := v.(type) {
+	case bool:
+		return x, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	}
+	return false, false
+}
+
 // normalizeSchemaTree 递归归一化工具参数 schema 树：
 //   - 区分 Schema 节点与 Schema 容器：容器自身键为用户属性名，只对其子 Schema 做规整；
 //   - 剔除值为 nil 的关键字（description: null、title: null 等导致上游反序列化失败），
 //     数据关键字（default / const / enum / example(s)）的 null 保留；
 //   - 类型别名归一化（str/int/bool/dict/list 等 Python 非标类型别名映射至 JSON Schema 标准）；
+//   - 关键字取值类型纠偏（数值/布尔/字符串关键字，见 coerceSchemaKeywords）；
 //   - required 规整（剔除 nil、空字符串及非 string 元素，空列表直接清理）；
 //   - array items 规整（解包 tuple 模式，清理 nil items）；
 //   - pattern 值与 patternProperties 键里的 `\_` → `_`（patternProperties 的键也是正则；
@@ -798,6 +917,9 @@ var schemaDataKeys = map[string]bool{
 func normalizeSchemaTree(node any) {
 	switch n := node.(type) {
 	case map[string]any:
+		// 0. 关键字取值类型纠偏。放在最前：纠不动的键被删掉，后面的 nil 剔除与类型推断
+		// 就只看剩下的合法值，不必每步都防一次类型。
+		coerceSchemaKeywords(n)
 		// 1. 剔除值为 nil 的关键字（避免上游 Go 强类型反序列化失败报 11129）。
 		// 数据关键字除外：const:null（只能是 null）、default:null（缺省为 null）是有意义的
 		// 取值，删了就改了语义（见 schemaDataKeys）。
@@ -829,13 +951,18 @@ func normalizeSchemaTree(node any) {
 			}
 		}
 
-		// 3. 规整 required 字段
+		// 3. 规整 required 字段。重复项也要去重：`["a","a"]` 实测同样 400 11129。
 		if req, hasReq := n["required"]; hasReq {
 			if reqList, ok := req.([]any); ok {
 				var cleaned []any
+				seen := make(map[string]bool, len(reqList))
 				for _, item := range reqList {
-					if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
-						cleaned = append(cleaned, strings.TrimSpace(s))
+					if s, ok := item.(string); ok {
+						s = strings.TrimSpace(s)
+						if s != "" && !seen[s] {
+							seen[s] = true
+							cleaned = append(cleaned, s)
+						}
 					}
 				}
 				if len(cleaned) == 0 {

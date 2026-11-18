@@ -88,8 +88,15 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。
 		return "request content was rejected by content policy; adjust the prompt and retry"
+	case ErrBadParams:
+		// 11129/11152：整颗工具定义被拒（schema 形态或工具名），换号重试必然复现。
+		// 上游原文只说「工具定义不合规」，客户端看不出该改哪儿，这里点名是 tools。
+		if isToolSchemaRejected(msg, strings.ToLower(msg)) {
+			return "the request's tool definitions were rejected by upstream (schema shape or tool name); fix or drop the offending tool — retrying as-is fails the same way"
+		}
+		return ""
 	default:
-		// ErrNone/ErrNotFound/ErrServer/ErrBadParams/ErrClient 等未覆盖形态：无 hint。
+		// ErrNone/ErrNotFound/ErrServer/ErrClient 等未覆盖形态：无 hint。
 		return ""
 	}
 }
@@ -152,6 +159,9 @@ var frameRequestCodes = []struct {
 }{
 	{"11115", ErrPromptTooLong},
 	{"11129", ErrBadParams},
+	// 11152 工具名不合规/重名：与 11129 同类（错在客户端声明的 tools），不登记就会滑到
+	// 通用 4xx → 喂连败 + 轮转全池 + 末端 503（2026-11-18 真机实测）。
+	{"11152", ErrBadParams},
 	{"11133", ErrModelParamInvalid},
 	{"11135", ErrImageInvalid},
 	{"11148", ErrToolMismatch},
