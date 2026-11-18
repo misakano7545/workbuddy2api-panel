@@ -31,3 +31,27 @@ func TestNarrationStructurallyOpenTailKeepsLeadInNudge(t *testing.T) {
 		}
 	}
 }
+
+// 模型按 nudge 末尾的出口回「已完成」（或 toolOnly 的 DONE）：那是显式声明已写完，
+// 不再救。否则短正文（<400B，长度闸门不管）会再发一次整段上下文。
+func TestNarrationAckStopsRescueChain(t *testing.T) {
+	text := "我将开始修改 internal/verify/check.go"
+	if len(text) > narrationMaxBytes {
+		t.Fatalf("前提失败：样本应是短正文，实际 %d 字节", len(text))
+	}
+	raw, _ := json.Marshal(text)
+	seg := `data: {"id":"n9","choices":[{"index":0,"delta":{"content":` + string(raw) + `}}]}` + "\n\n" +
+		`data: {"id":"n9","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20000,"completion_tokens":20,"total_tokens":20020}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	// 救援段只回「已完成」：模型按出口声明写完了。
+	ack := `data: {"id":"n10","choices":[{"index":0,"delta":{"content":"已完成"}}]}` + "\n\n" +
+		`data: {"id":"n10","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20000,"completion_tokens":3,"total_tokens":20003}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, ack })
+	if _, err := io.ReadAll(newNarrateReader(t, up, agentBody, seg)); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("识别到「已完成」后不该再救，实际发了 %d 次上游请求", len(*reqs))
+	}
+}
