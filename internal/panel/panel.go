@@ -229,6 +229,11 @@ type loginSession struct {
 	// 国际域 codebuddy.ai 与 workbuddy.ai 同后端不同主机，混用会把请求打到非签发域。
 	// 空 = 老会话/未指定，按 cn 处理（siteOrDefault 归一）。
 	site string
+	// proxyID 本次登录出站钉住的号池节点（空 = 直连）。登录开始时选一次、poll 的
+	// 三个端点都用它，账号落盘后再写成该号的固定绑定（见 bindLoginProxy）：加号用的
+	// 出口与之后做任务用的出口必须是同一条，否则「先在这条 IP 上注册、再换一条用」
+	// 本身就是风控眼里的强关联信号，也查不出这号是哪个出口注册的。
+	proxyID string
 	// processing 该 state 正在落盘（含签到/余额校验等副作用）。前端每 3s 轮询，而成功
 	// 分支的副作用可能耗时数秒：没有这个闸门，第二个并发 poll 会把整段流程再跑一遍。
 	processing bool

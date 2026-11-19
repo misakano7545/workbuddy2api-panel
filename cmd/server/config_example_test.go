@@ -50,6 +50,10 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if !c.Features.NarrationEnabled {
 		t.Error("features.narration_enabled 示例值应为 true（默认开启）")
 	}
+	// 加号绑定号池出口默认开：示例里必须看得见，否则用户不知道登录本身也走代理池。
+	if !c.Features.LoginBindProxy {
+		t.Error("features.login_bind_proxy 示例值应为 true（默认开启）")
+	}
 	// features.three_d_enabled / three_d_temp_tokens / three_d_auto_token：3D 默认关闭，
 	// 凭证表必须可见（空对象即可），否则用户既不知道有开关、也不知道凭证配在哪；
 	// 自动签发默认 true，示例必须显式体现（缺省行为要让用户看得到）。
