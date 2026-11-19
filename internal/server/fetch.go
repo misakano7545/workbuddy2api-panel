@@ -3,8 +3,14 @@
 // DSH 的 Search / Fetch 共用一份 baseURL（默认 https://api.deepseek.com/v1/tools，
 // 追加 /search 与 /fetch）。把 baseURL 指向网关时：
 //
-//	POST /v1/search  {"query":"...", "count":3}      → 见 search.go
-//	POST /v1/fetch   {"url":"https://example.com"}   → 本文件
+//	POST /v1/search        {"query":"...", "count":3}      → 见 search.go
+//	POST /v1/fetch         {"url":"https://example.com"}   → 本文件
+//	POST /v1/tools/search  {"query":"...", "count":3}      → 别名，同 search.go
+//	POST /v1/tools/fetch   {"url":"https://example.com"}   → 别名，同本文件
+//
+// 四条路径同一份实现：官方形状（/v1/tools/*）与本网关的自有形状（/v1/*）并存，
+// 差别只在 search 侧是否补 DeepSeek 字段（见 search.go 的 isDeepSeekToolsPath）；
+// fetch 侧没有可补的字段，故两边行为天然一致。
 //
 // 期望响应是 JSON {"content":"<markdown>"}（DSH 只校验 content 是 string）；
 // 上游 agenttool/v1/webfetch 返回 {url,title,content}，这里原字段透传，缺
