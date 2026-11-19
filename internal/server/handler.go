@@ -1195,6 +1195,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
 	var modelBlock pool.ModelBlockStatus
+	// noPick 选号失败的成因拆解（issue #276）：15 个号有余额却只看到 no_healthy_account
+	// 时，得能从响应本身看出是谁挡的（保留积分/保底/在途/冷却/已试过）。
+	var noPick pool.NoPick
 	// busyWaited 本次请求是否已经为「模型繁忙」等过一轮（issue #46，见 acct==nil 分支）。
 	busyWaited := false
 	// queueWaited 本次请求是否已经为 6020/6021 渠道排队等过一轮（见 ErrUpstreamBusy 分支）。
@@ -1510,7 +1513,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 在这里取一次快照，供下方错误构造区分；按 realm 统计，否则另一域的
 			// 健康号会把「本域全被模型级冷却挡住」掩盖成还有号可服务。
 			modelBlock = h.cfg.Pool.ModelBlockedForRealm(curModel, realm)
-			h.logNoSelectable(realm, curModel, modelBlock.Blocked)
+			noPick = h.cfg.Pool.NoPickForRealm(curModel, realm, tried)
+			h.logNoSelectable(realm, curModel, modelBlock.Blocked, noPick)
 			break
 		}
 		st.uid = acct.UID
@@ -2366,6 +2370,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			msg = "this model is not allowed for any account in this group (model rules); try another model"
 			hint = fmt.Sprintf("model_rules: %d/%d account(s) blocked by model rules", blocked, eligible)
 		}
+	}
+	// 成因拆解（issue #276）：有号却选不到时，把五类计数直接塞进 gateway_hint —— 用户
+	// 不必登服务器翻日志就知道该充钱（reserve）、调阈值（floor）、提并发（in_flight_full）
+	// 还是等冷却（cooling）。同一件事此前只有一个 no_healthy_account。
+	if code == "no_healthy_account" && noPick.Total > 0 {
+		if hint != "" {
+			hint += "; "
+		}
+		hint += "no_pick{" + noPick.String() + "}"
 	}
 	if proxypool.IsError(lastErr) {
 		status, code, msg, hint = http.StatusServiceUnavailable, "proxy_unavailable", lastErr.Error(), ""
