@@ -332,6 +332,16 @@ type Config struct {
 		// 「功能存在、只是没开」，不用去猜路径拼错）。
 		EmbeddingsEnabled bool `json:"embeddings_enabled"`
 
+		// NarrationEnabled 预告式收尾救援的总开关（「……：」「我将…」这类停在半句上就
+		// 结束的回复，网关补发一次续写），缺省 true。
+		//
+		// 为什么终于给了开关（issue #273 第二条评论）：这条救援是往对话里插一条 user
+		// 消息再打一次上游，agent 类客户端分辨不出它与真实用户输入的区别——实测被当成
+		// 用户授权执行了 9 分钟工具调用，且客户端历史里完全查不到这条。默认开启是因为
+		// issue #245 的长会话断写确实靠它；不需要的部署关掉即可，关后行为回到「模型说停
+		// 就停」，同一请求不再多付一次整段 prompt。热生效（livecfg 快照）。
+		NarrationEnabled bool `json:"narration_enabled"`
+
 		// BusyRetry 6020/6021 渠道排队时，先在网关内按上游 retry_after 等一轮再试一次，
 		// 避免把「等 40 秒就好」的排队当成不可重试错误甩给客户端（默认 true）。
 		BusyRetry bool `json:"busy_retry"`
@@ -662,6 +672,8 @@ func Default() *Config {
 	// 缺省等一轮（60s 上限），避免把上游明说「40 秒后再来」的排队秒变成客户端可见失败。
 	c.Features.BusyRetry = true
 	c.Features.BusyWaitSeconds = 60
+	// 预告式收尾救援缺省开启（issue #245 的长会话断写靠它）；agent 客户端可关（#273）。
+	c.Features.NarrationEnabled = true
 	// 3D 临时凭证自动签发缺省 true：打开 three_d_enabled 即开箱可用，无须手工收集
 	// ck_t_。显式 false 退回「只用手工凭证表」。
 	c.Features.ThreeDAutoToken = true

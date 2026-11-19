@@ -73,6 +73,10 @@ type Config struct {
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int
 
+	// RescueToday 今日各类救援次数（narration/toolonly/starved）；nil 时不上报。
+	// 用来把「今天怎么突然多花了钱」变成面板上一眼能看到的数（issue #273）。
+	RescueToday func() map[string]int
+
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
@@ -432,7 +436,17 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"balance_refreshed_at": p.balanceRefreshedAt(),
 		// 账号目录热重载（issue #199）：面板显示「上次重载时间/结果摘要」。
 		"reload": p.reloadSnapshot(),
+		// 今日救援次数（issue #273）：每条救援都要多打一次上游、重付整段 prompt。
+		"rescue_today": p.rescueToday(),
 	})
+}
+
+// rescueToday 今日各类救援次数；未接回调（或跨天归零后）为空对象。
+func (p *Panel) rescueToday() map[string]int {
+	if p.cfg.RescueToday == nil {
+		return map[string]int{}
+	}
+	return p.cfg.RescueToday()
 }
 
 // reloadSnapshot 热重载状态（面板展示用）。无轮询时 interval_sec=0，前端据此

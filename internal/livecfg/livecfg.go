@@ -22,6 +22,9 @@ type Snapshot struct {
 	// EmbeddingsEnabled 实验特性 /v1/embeddings 总开关（features.embeddings_enabled）；
 	// 默认 false，面板保存后热生效。
 	EmbeddingsEnabled bool // 嵌入端点开关
+	// NarrationOff 预告式收尾救援是否被关闭（features.narration_enabled 取反）。
+	// 取反是为了让零值 = 开启：没接 livecfg 的裸用/测试路径不必初始化就保持既有行为。
+	NarrationOff bool
 	// WatermarkStripEnabled 实验特性「水印裁切」总开关（features.watermark_strip_enabled）；
 	// 默认 false，面板保存后热生效。
 	WatermarkStripEnabled bool

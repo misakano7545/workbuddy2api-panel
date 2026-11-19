@@ -45,6 +45,11 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if !c.Features.BusyRetry || c.Features.BusyWaitSeconds != 60 {
 		t.Errorf("features.busy_retry / busy_wait_seconds 示例应为 true / 60: %+v", c.Features)
 	}
+	// 预告式收尾救援默认开（issue #245 靠它），但 agent 客户端可以关（issue #273）——
+	// 示例必须让用户看得到这个开关。
+	if !c.Features.NarrationEnabled {
+		t.Error("features.narration_enabled 示例值应为 true（默认开启）")
+	}
 	// features.three_d_enabled / three_d_temp_tokens / three_d_auto_token：3D 默认关闭，
 	// 凭证表必须可见（空对象即可），否则用户既不知道有开关、也不知道凭证配在哪；
 	// 自动签发默认 true，示例必须显式体现（缺省行为要让用户看得到）。

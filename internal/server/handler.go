@@ -1898,6 +1898,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// max_tokens 补回可用值（与出站抬额度同一口径、按目录封顶，见 upstream.OutputBudgetFloor）。
 			cont := newContinueReaderWithFloor(r.Context(), h.cfg.Upstream, acct, body, clientIP, chatMeta, rc,
 				h.cfg.Upstream.OutputBudgetFloor(acct.Realm(), curModel, hopTiming.Effort))
+			cont.narrationOff = h.loadLive().NarrationOff
 			defer cont.Close()
 			stats := newChatStatsReaderSince(cont, st.start)
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
