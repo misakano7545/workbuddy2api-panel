@@ -18,9 +18,11 @@ import (
 func TestSpeechAndTranscribeWireFormat(t *testing.T) {
 	var asrCT string
 	var asrAudio string
+	var ttsAccept string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpeechPath:
+			ttsAccept = r.Header.Get("Accept")
 			w.Header().Set("Content-Type", "text/event-stream")
 			io.WriteString(w, "data: {\"type\":\"speech.audio.delta\",\"audio\":{\"data\":\"AAEC\"}}\n\n")
 			io.WriteString(w, "data: {\"type\":\"speech.audio.done\"}\n\n")
@@ -73,5 +75,39 @@ func TestSpeechAndTranscribeWireFormat(t *testing.T) {
 	}
 	if asrAudio != "RIFFdata" {
 		t.Fatalf("audio 字段 = %q", asrAudio)
+	}
+	// ChatHeaders 会把 Accept 覆盖成 application/json；TTS 必须在它之后设回来。
+	if ttsAccept != "text/event-stream" {
+		t.Fatalf("TTS Accept = %q, 必须是 text/event-stream（被 ChatHeaders 覆盖了）", ttsAccept)
+	}
+}
+
+// TestSpeechSurfacesStreamErrorEvent 上游可以在 SSE 里回错误帧，不认它就会退化成
+// "completed without audio"，把上游的原因咽掉（issue #277 反馈）。
+func TestSpeechSurfacesStreamErrorEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"type":"error","error":{"message":"input too long"}}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.ChatBaseCN = srv.URL
+	_, err := c.Speech(context.Background(), &auth.Auth{AccessToken: "at", UID: "u1"}, "你好", "")
+	if err == nil || !strings.Contains(err.Error(), "input too long") {
+		t.Fatalf("SSE 错误帧被咽掉了: %v", err)
+	}
+}
+
+// TestASRRecognitionFailureIsRequestLevel 15053 是「这段音频识别不出来」，同一文件
+// 换号也是同一句；归请求级才不会为一段坏音频轮转全池。
+func TestASRRecognitionFailureIsRequestLevel(t *testing.T) {
+	body := `{"code":15053,"msg":"ASR recognition failed"}`
+	if got := Classify(502, body); got != ErrBadParams {
+		t.Fatalf("Classify(502, 15053) = %v, want ErrBadParams", got)
+	}
+	if h := GatewayHint(ErrBadParams, body, HintContext{}); !strings.Contains(h, "WAV") {
+		t.Fatalf("15053 的 hint 应指向容器格式: %q", h)
 	}
 }

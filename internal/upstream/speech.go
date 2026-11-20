@@ -70,8 +70,10 @@ func (c *Client) Speech(ctx context.Context, a *auth.Auth, text, voice string) (
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
 	c.ChatHeaders(req, a, "", ChatMeta{})
+	// ChatHeaders 会把 Accept 覆盖成 application/json（chat 的官方口径）。TTS 实测上游
+	// 不看 Accept、照样回 SSE，但声明与实收对齐才能让中间层（Caddy/APISIX）不加缓冲。
+	req.Header.Set("Accept", "text/event-stream")
 	resp, err := c.do(req, a, false)
 	if err != nil {
 		return nil, err
@@ -102,9 +104,19 @@ func (c *Client) Speech(ctx context.Context, a *auth.Auth, text, voice string) (
 			Audio struct {
 				Data string `json:"data"`
 			} `json:"audio"`
+			Error *struct {
+				Message string `json:"message"`
+				Code    any    `json:"code"`
+			} `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
 			return nil, fmt.Errorf("tts stream returned invalid json: %w", err)
+		}
+		// 上游可以在 SSE 里回错误帧（`{"type":"error","error":{...}}`）；不认它就会一路
+		// 掉到 "completed without audio"，把上游的原因咽掉。
+		if ev.Error != nil && (ev.Error.Message != "" || ev.Error.Code != nil) {
+			return nil, &Error{Kind: Classify(http.StatusBadGateway, payload), Status: http.StatusBadGateway,
+				Msg: fmt.Sprintf("tts stream error: %s", truncate(ev.Error.Message, 160))}
 		}
 		switch ev.Type {
 		case "speech.audio.delta":
@@ -183,7 +195,9 @@ func (c *Client) Transcribe(ctx context.Context, a *auth.Auth, filename, content
 		return "", fmt.Errorf("asr response is not json: %w", err)
 	}
 	if env.Code != 0 {
-		return "", &Error{Kind: Classify(resp.StatusCode, env.Msg), Status: resp.StatusCode,
+		// 把业务码按 CodeMarker 认的形态一起交给 Classify：有些码（15053）只能靠码本身判。
+		mark := fmt.Sprintf(`"code":%d %s`, env.Code, env.Msg)
+		return "", &Error{Kind: Classify(resp.StatusCode, mark), Status: resp.StatusCode,
 			Msg: fmt.Sprintf("asr code=%d msg=%s", env.Code, truncate(env.Msg, 160))}
 	}
 	return env.Text, nil

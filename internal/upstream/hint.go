@@ -41,6 +41,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	if strings.Contains(strings.ToLower(msg), "get voice config failed") {
 		return `voice is not configured upstream (not an account problem); omit "voice" to use the default ` + TTSDefaultVoice
 	}
+	// 15053 ASR recognition failed：上游解不出这段音频（裸 PCM 无容器头必现，实测）。
+	if codeMarker(strings.ToLower(msg), "15053") {
+		return "upstream could not recognise this audio (15053); send a WAV or WebM container — bare PCM has no header to sniff"
+	}
 	// 11133 model_param_invalid 家族（图片回归实测：不支持图片的模型传图，或任意
 	// 参数被模型供应商拒绝）。只有请求确实带图、且目录**显式声明**该模型不支持图片
 	// 时才给「换模型」指向——目录只收录而不声明该能力（缺键）时无从判断，退中性

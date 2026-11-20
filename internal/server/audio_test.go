@@ -162,6 +162,37 @@ func TestTranscriptionsForwardsAudio(t *testing.T) {
 	}
 }
 
+// TestTranscriptionsRejectsOversizeAudio 上游硬上限 3MB（实测 3.1MB 回 15052）；
+// 入口直接 413，别让上游把尺寸问题报成「multipart 解析失败」。
+func TestTranscriptionsRejectsOversizeAudio(t *testing.T) {
+	f := &audioFake{ctype: "application/json"}
+	p := testPoolWith(&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
+	h := NewHandler(Config{Pool: p, Upstream: f.client(), ASREnabled: true})
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	part, err := mw.CreateFormFile("file", "a.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(make([]byte, 3<<20+1)); err != nil {
+		t.Fatal(err)
+	}
+	_ = mw.Close()
+
+	req := httptest.NewRequest("POST", "/v1/audio/transcriptions", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), "audio_too_large") {
+		t.Fatalf("code=%d body=%s want 413 audio_too_large", rec.Code, rec.Body.String())
+	}
+	if len(f.paths) != 0 {
+		t.Fatalf("超限时不得打上游: %v", f.paths)
+	}
+}
+
 // TestTranscriptionsDisabledReturns403 默认关闭时回 403 asr_disabled。
 func TestTranscriptionsDisabledReturns403(t *testing.T) {
 	f := &audioFake{ctype: "application/json"}

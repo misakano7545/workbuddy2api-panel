@@ -793,6 +793,12 @@ func Classify(status int, body string) ErrKind {
 	if status >= 500 && strings.Contains(lower, "get voice config failed") {
 		return ErrBadParams
 	}
+	// 15053「ASR recognition failed」：上游 502 + 业务码，指**这段音频**识别不出来
+	// （2026-11-20 实测：裸 PCM 不带容器头必现）。同一个文件换号也是同一句，归请求级；
+	// 落 ErrServer 会为一段坏音频轮转全池并给健康号各记一笔连败。
+	if codeMarker(lower, "15053") {
+		return ErrBadParams
+	}
 	if status == http.StatusNotFound {
 		return ErrNotFound
 	}
