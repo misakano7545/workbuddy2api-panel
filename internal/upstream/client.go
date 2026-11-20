@@ -786,6 +786,13 @@ func Classify(status int, body string) ErrKind {
 		strings.Contains(body, "工具调用与工具结果不匹配") {
 		return ErrToolMismatch
 	}
+	// 音色未配置（TTS 专用）：上游用 **500 外壳** + code 10000 报
+	// "get voice config failed: voice X not found in Rainbow"，2026-11-20 真号实测。
+	// 音色表是全局配置、与账号无关，同一请求换任何号都是同一句；落 ErrServer 会让
+	// 网关轮转全池并给健康号各记一笔连败（与 11103 同一条代价链）。归请求级。
+	if status >= 500 && strings.Contains(lower, "get voice config failed") {
+		return ErrBadParams
+	}
 	if status == http.StatusNotFound {
 		return ErrNotFound
 	}

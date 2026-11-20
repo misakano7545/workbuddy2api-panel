@@ -156,7 +156,8 @@ func (h *Handler) speech(w http.ResponseWriter, r *http.Request) {
 					status = http.StatusBadRequest
 				}
 				log.Printf("speech realm=%s: 请求级错误 kind=%v，不再换号", realm, ue.Kind)
-				writeOpenAIError(w, status, "upstream_error", ue.Msg)
+				writeOpenAIErrorHint(w, status, "upstream_error", ue.Msg,
+					upstream.GatewayHint(ue.Kind, ue.Msg, upstream.HintContext{}))
 				return
 			}
 		}

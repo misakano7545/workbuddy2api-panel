@@ -36,6 +36,11 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	if hasBusinessCode(msg, "11103") || codeMarker(strings.ToLower(msg), "11103") {
 		return "this model's backend is not enabled upstream (11103); switching accounts will not help — switch model"
 	}
+	// 音色未配置（TTS）：上游 500 + code 10000，与账号无关。必须排在 ErrBadParams
+	// 的通用文案之前，否则客户端只会看到「参数被拒」而不知道该省掉 voice。
+	if strings.Contains(strings.ToLower(msg), "get voice config failed") {
+		return `voice is not configured upstream (not an account problem); omit "voice" to use the default ` + TTSDefaultVoice
+	}
 	// 11133 model_param_invalid 家族（图片回归实测：不支持图片的模型传图，或任意
 	// 参数被模型供应商拒绝）。只有请求确实带图、且目录**显式声明**该模型不支持图片
 	// 时才给「换模型」指向——目录只收录而不声明该能力（缺键）时无从判断，退中性
