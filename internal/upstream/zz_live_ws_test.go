@@ -97,7 +97,21 @@ func TestZZLiveProbeSpeechStream(t *testing.T) {
 	}
 	pcm16 := resample16k(pcm24)
 	t.Logf("素材 pcm24=%d B → pcm16=%d B (%.2fs @16kHz)", len(pcm24), len(pcm16), float64(len(pcm16))/2/16000)
+	streamASR(t, c, acct, pcm16, want)
 
+	// 同一个素材再打一遍海外域：确认 /clientcap 是否也存在（素材仍由 CN 号合成）。
+	if g := os.Getenv("WB_PROBE_GLOBAL_UID"); g != "" {
+		gacct := loadProbeAuth(t, dir, g)
+		if err := c.RefreshTokenIfNeeded(gacct, 10*time.Minute); err == nil {
+			t.Logf("--- global 账号 %s base=%s", gacct.UID, c.chatBase(gacct))
+			streamASR(t, c, gacct, pcm16, want)
+		}
+	}
+}
+
+// streamASR 把 16kHz PCM 按官方的节奏推给 /clientcap/v2/asr/stream，读到最后一条 final。
+func streamASR(t *testing.T, c *Client, acct *auth.Auth, pcm16 []byte, want string) {
+	t.Helper()
 	wsURL := c.chatBase(acct) + "/clientcap/v2/asr/stream?session_id=" +
 		fmt.Sprintf("probe-%d", time.Now().UnixNano()) + "&source=desktop&interim_results=1"
 	wsURL = strings.Replace(strings.Replace(wsURL, "https://", "wss://", 1), "http://", "ws://", 1)
@@ -127,6 +141,7 @@ func TestZZLiveProbeSpeechStream(t *testing.T) {
 
 	type frame struct {
 		Code    any    `json:"code"`
+		Msg     string `json:"msg"`
 		Text    string `json:"text"`
 		Stable  bool   `json:"stable"`
 		Final   bool   `json:"final"`
@@ -145,7 +160,8 @@ func TestZZLiveProbeSpeechStream(t *testing.T) {
 			t.Logf("下行非 JSON: %q", truncate(string(raw), 200))
 			continue
 		}
-		t.Logf("下行 voice_id=%q stable=%v final=%v noise=%v text=%q", f.VoiceID, f.Stable, f.Final, f.Noise, f.Text)
+		t.Logf("下行 voice_id=%q stable=%v final=%v noise=%v text=%q code=%v msg=%q",
+			f.VoiceID, f.Stable, f.Final, f.Noise, f.Text, f.Code, truncate(f.Msg, 120))
 		last = f.Text
 		if f.Final {
 			if strings.TrimSpace(f.Text) == "" {
