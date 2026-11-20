@@ -319,6 +319,18 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// LoginBindProxy 加号（OAuth 登录）是否绑定号池出口，缺省 true。
+		//
+		// true = 登录请求本身也从号池里挑一条启用节点出网，账号落盘后写成该号的
+		// 固定绑定；false = 保持旧行为（登录直连，账号未绑定前一切出站按 realm 默认）。
+		//
+		// 为什么值得默认开：登录那一刻 uid 还不存在，绑定表里没有可查的键，旧行为
+		// 必然直连机房 IP；而「先在这个 IP 上注册、之后换成代理用」本身就是风控眼里
+		// 的强关联信号，且事后查不出这号是哪个出口注册的。开着它，加号与后续任务
+		// 走同一条出口。池里没有任何启用节点时仍回落直连（不能让没配代理的部署
+		// 因此加不了号）。热生效（livecfg 快照，取反成 LoginBindOff）。
+		LoginBindProxy bool `json:"login_bind_proxy"`
+
 		// ProxyExitLookup 代理健康探测时经该代理查一次出口画像（国家 / 住宅或机房 / ISP，
 		// proxypool/intel.go），缺省 false，热生效。每个节点每 6 小时一次第三方请求（ip-api 免费档仅明文 HTTP）。
 		ProxyExitLookup bool `json:"proxy_exit_lookup"`
@@ -674,6 +686,10 @@ func Default() *Config {
 	c.Features.BusyWaitSeconds = 60
 	// 预告式收尾救援缺省开启（issue #245 的长会话断写靠它）；agent 客户端可关（#273）。
 	c.Features.NarrationEnabled = true
+	// 加号绑定号池出口缺省开启：登录也走代理，落盘后钉成该号的固定绑定。
+	// 显式 false 回到「登录直连」，供出口不支持登录域名的部署（如只放行 workbuddy.cn
+	// 的线路登录 codebuddy.ai 站点会 503）按需关掉。
+	c.Features.LoginBindProxy = true
 	// 3D 临时凭证自动签发缺省 true：打开 three_d_enabled 即开箱可用，无须手工收集
 	// ck_t_。显式 false 退回「只用手工凭证表」。
 	c.Features.ThreeDAutoToken = true
