@@ -89,6 +89,7 @@ func TestProxyFailureDoesNotReplayAccountRequests(t *testing.T) {
 	for _, tc := range []struct{ path, body string }{
 		{"/v1/chat/completions", `{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`},
 		{"/v1/search", `{"query":"hi"}`},
+		{"/v1/tools/search", `{"query":"hi"}`},
 		{"/v1/images/generations", `{"model":"cn:hunyuan-image-alpha","prompt":"hi"}`},
 		{"/v1/embeddings", `{"model":"bge-m3","input":"hi"}`},
 	} {
