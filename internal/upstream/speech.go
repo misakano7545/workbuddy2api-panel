@@ -158,8 +158,10 @@ func (c *Client) Transcribe(ctx context.Context, a *auth.Auth, filename, content
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
 	c.ChatHeaders(req, a, "", ChatMeta{})
+	// CommonHeaders 会给所有请求写死 Content-Type: application/json，multipart 的 boundary
+	// 被它抹掉后上游只能报 15052「failed to parse multipart form」——必须在它之后再设回来。
+	req.Header.Set("Content-Type", mw.FormDataContentType())
 	resp, err := c.do(req, a, false)
 	if err != nil {
 		return "", err
