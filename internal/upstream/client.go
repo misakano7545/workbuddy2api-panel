@@ -820,6 +820,15 @@ func Classify(status int, body string) ErrKind {
 			}
 		}
 	}
+	// 11103「Backend [x] is not supported」：该模型的**上游后端未启用**（issue #280
+	// 实测：25 个号轮转 25 次全是同一句，上游自带 retry_policy.retry=false）。与
+	// 11102「该后端无此模型」不同——那不是账号权限问题，换遍全池结果一样，故不走
+	// ErrModelBlocked 的 (账号,模型) 负缓存避让，而归请求级零动作 + fail-fast 400：
+	// 落 ErrClient 的代价是每个健康号白记一笔连败，5 次达阈出池，末端 503
+	// no_healthy_account（把「换个模型」报成「账号都挂了」）。
+	if status == http.StatusBadRequest && hasBusinessCode(body, "11103") {
+		return ErrModelParamInvalid
+	}
 	// 11133「模型供应商拒绝了请求参数」（缺/空 messages、模型不支持图片、参数形态与
 	// 该模型版本不符等）与 11135 同族：确定性请求级错误，同一 body 换任何账号都会被
 	// 同一处拒绝（本仓 payload.go 实测：上游 GPT 系 max_tokens<16 → 400 code=11133，

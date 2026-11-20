@@ -88,7 +88,7 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 	//
 	// DSH 不会传 realm，默认走 CN，于是「抓 Google 文档」在默认配置下必失败；这条
 	// 兜底让它在用户无感的情况下用 global 账号拿到正文。
-	if lastErr != nil && isFetchDomainRejected(lastErr) {
+	if lastErr != nil && isFetchEdgeFault(lastErr) {
 		alt := "global"
 		if realm == "global" {
 			alt = "cn"
@@ -153,6 +153,11 @@ func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, r
 		if errors.As(ferr, &ue) {
 			// 与 search/images 同一套失败处置（冷却/熔断/模型负缓存/12153 计数）。
 			h.applyErrorPolicy(a.UID, ue.Kind, ue.Msg, "", ue)
+			// 域名/边缘级错误换号必然复现，立刻交回调用方（跨域兜底只在那一层做）。
+			if isFetchEdgeFault(ferr) {
+				log.Printf("fetch realm=%s: 域名/边缘级错误，不再换号: %v", realm, ferr)
+				return ferr, false
+			}
 			// 请求级错误（参数/内容/模型，及 400+ErrClient 的 url 校验失败）换号
 			// 必然同样被拒，直接透传上游原文。
 			if requestLevelFailFastKind(ue.Kind) ||
@@ -178,14 +183,19 @@ func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, r
 	return lastErr, false
 }
 
-// isFetchDomainRejected 上游 edgebrowser 的域名路由策略拒绝（业务码 15021）。
-// 该错误是**域名级**的（同域所有账号一致），与账号健康无关，换号无效、换域有效。
-func isFetchDomainRejected(err error) bool {
+// isFetchEdgeFault 上游 edgebrowser 的**域名/边缘**级失败，与账号健康无关：
+//   - 15021「domain rejected by via routing policy」：域名被上游路由策略拒绝；
+//   - 15022「net::ERR_CONNECTION_REFUSED」：上游浏览器连不上目标站。
+//
+// 两个 code 都是「同一个 URL 换任何账号结果一致」的判定（issue #280 实测：一次请求
+// 轮了 3 个 CN 号，三行的 code 与文案完全相同）。换号只是白烧名额、给健康号喂连败，
+// 所以命中即退出本域，由 fetch() 决定是否换域再试（不同域的出口不同，15022 换域有救）。
+func isFetchEdgeFault(err error) bool {
 	var ue *upstream.Error
 	if !errors.As(err, &ue) {
 		return false
 	}
-	return upstream.HasCodeMarker(ue.Msg, "15021")
+	return upstream.HasCodeMarker(ue.Msg, "15021") || upstream.HasCodeMarker(ue.Msg, "15022")
 }
 
 // normalizeFetchResponse 确保响应是 DSH 需要的 {"content": "<markdown>"} 形状。
