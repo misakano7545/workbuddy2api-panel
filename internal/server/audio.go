@@ -4,7 +4,7 @@
 //	POST /v1/audio/transcriptions  语音转文本（multipart，字段 file 或 audio）
 //
 // 上游的两个端点不在 /v1/models 目录里（是独立端点，不是模型），协议来自官方桌面端
-// 包内 `main/server.js` 的静态反查（issue #277）：`/v2/audio/speech`（SSE + PCM）与
+// 包内 `main/server.js` 的静态反查 + 真号跑通（issue #277）：`/v2/audio/speech`（SSE + PCM）与
 // `/agenttool/v1/asr`（multipart）。**未做真机抓包对照**，故默认关闭：关着时回 403
 // （功能存在、只是没开），不是 404。
 //

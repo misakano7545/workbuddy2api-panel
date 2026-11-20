@@ -347,7 +347,7 @@ type Config struct {
 		// TTSEnabled / ASREnabled 官方语音端点（/v1/audio/speech、/v1/audio/transcriptions）
 		// 的总开关，缺省 false。
 		//
-		// 为什么默认关：这两个端点的协议来自官方桌面端包的静态反查（issue #277：
+		// 为什么默认关：这两个端点是官方独立端点、不在 /v1/models 目录里，协议来自官方桌面端包的静态反查（issue #277：
 		// POST /v2/audio/speech 的 SSE + PCM、POST /agenttool/v1/asr 的 multipart），
 		// 没有真机抓包对照过，也还没人验证过不同账号/套餐是否都能用。关闭时端点仍在，
 		// 回 403（不是 404），打开开关即热生效。

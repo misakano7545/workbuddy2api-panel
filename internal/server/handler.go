@@ -323,7 +323,7 @@ func NewHandler(cfg Config) *Handler {
 	// 实验特性：水印裁切（features.watermark_strip_enabled，默认关闭；关着时回 403）。
 	h.mux.HandleFunc("POST /v1/images/strip-watermark", h.withAuth(h.watermarkStrip))
 	// 实验特性：官方语音端点（features.tts_enabled / asr_enabled，默认关闭；关着时回 403）。
-	// 协议来自官方桌面端包的静态反查（见 upstream/speech.go 文件头），未做真机对照。
+	// 协议来自官方桌面端包的静态反查（见 upstream/speech.go 文件头），已用真号跑通 TTS→ASR。
 	h.mux.HandleFunc("POST /v1/audio/speech", h.withAuth(h.speech))
 	h.mux.HandleFunc("POST /v1/audio/transcriptions", h.withAuth(h.transcriptions))
 	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))

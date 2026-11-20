@@ -1,5 +1,5 @@
 // speech.go 官方语音能力（协议取自官方桌面端包内 `main/server.js` 的静态反查，
-// 2026-11-19，见 issue #277 的协议说明；**未抓包**）：
+// 2026-11-19，见 issue #277 的协议说明；2026-11-20 真号实测跑通 TTS→ASR 闭环，未抓包对照）：
 //
 //	POST {chatBase}/v2/audio/speech    文本转语音（SSE，PCM base64 分片）
 //	POST {chatBase}/agenttool/v1/asr   语音转文本（multipart 字段 audio）
