@@ -588,6 +588,22 @@ func TestNormalizeToolPatterns(t *testing.T) {
 		}
 	})
 
+	// 对照：单层转义（JSON 里的 "\ud800"）在解码时就被 Go 换成 U+FFFD，出站时是一条
+	// 合法且可编译的 pattern——这条路径不需要任何修复，只是「为什么 REA 的 pattern
+	// 经本网关不会 11129」的机制证据（issue #276 回复里引用了它）。
+	t.Run("single-escaped surrogate already neutralized", func(t *testing.T) {
+		bs := string(byte(92))
+		body := `{"messages":[],"tools":[{"type":"function","function":{"name":"t","parameters":{"properties":{"path":{"type":"string","pattern":"^[^` + bs + `uD800-` + bs + `uDFFF]*$"}}}}}]}`
+		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
+		got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "path", "pattern")
+		if got == "" || strings.Contains(got, bs+`u`) {
+			t.Fatalf("单层转义应被 JSON 解码正常化（不再是 \\u 字面量），得到 %q", got)
+		}
+		if _, err := regexp.Compile(got); err != nil {
+			t.Fatalf("正常化后的 pattern 必须可编译: %v", err)
+		}
+	})
+
 	t.Run("untranslatable pattern dropped", func(t *testing.T) {
 		bs := string(byte(92))
 		// 译完仍编不过（括号不配对）→ 丢掉 pattern，其余字段保留。
