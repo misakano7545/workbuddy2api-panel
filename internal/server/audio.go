@@ -38,6 +38,9 @@ const audioAttempts = 3
 // 15052 "ensure file size is under 3MB"）。在入口挡掉，比让上游判 multipart 解析失败干净。
 const maxAudioBytes = 3 << 20
 
+// audioBodySlack multipart 分帧（boundary + 头字段）的余量。
+const audioBodySlack = 64 << 10
+
 type speechRequest struct {
 	// Model 只用来取 realm 前缀（OpenAI 客户端填的是 tts-1 之类的占位名，不转发上游：
 	// 上游模型是固定的 hunyuan-tts-2.5）。
@@ -180,11 +183,23 @@ func (h *Handler) transcriptions(w http.ResponseWriter, r *http.Request) {
 			"语音识别未开启：请在面板配置里打开 features.asr_enabled（默认关闭）")
 		return
 	}
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	// 先钳住请求体再解析：ParseMultipartForm 会把超过 maxMemory 的部分落到临时文件，
+	// 3MB 的限额必须在读盘之前生效，否则一个 500MB 的 body 要先把磁盘填满才被拒。
+	// 留 64KiB 余量给 multipart 头与 boundary，超出的部分是畸形请求，不是音频。
+	r.Body = http.MaxBytesReader(w, r.Body, maxAudioBytes+audioBodySlack)
+	if err := r.ParseMultipartForm(maxAudioBytes); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "audio_too_large",
+				fmt.Sprintf("request body exceeds %d bytes; upstream accepts at most 3MB of audio", maxAudioBytes))
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
 			"expected multipart/form-data with an audio file: "+err.Error())
 		return
 	}
+	// 超过内存上限的文件部分会被落到 /tmp，不删就每次超限上传漏 3MB 临时文件。
+	defer func() { _ = r.MultipartForm.RemoveAll() }()
 	file, fh, err := audioPart(r)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())

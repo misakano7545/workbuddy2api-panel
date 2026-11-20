@@ -193,6 +193,43 @@ func TestTranscriptionsRejectsOversizeAudio(t *testing.T) {
 	}
 }
 
+// TestTranscriptionsCapsRawBody 超大 body 必须在落盘前被钳住（不是解析完再按文件大小拒）：
+// 断言 413、不打上游，且实际读到的字节不超过 maxAudioBytes+audioBodySlack。
+func TestTranscriptionsCapsRawBody(t *testing.T) {
+	f := &audioFake{ctype: "application/json"}
+	p := testPoolWith(&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
+	h := NewHandler(Config{Pool: p, Upstream: f.client(), ASREnabled: true})
+
+	const total = 64 << 20
+	const head = "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n" +
+		"Content-Type: audio/wav\r\n\r\n"
+	const tail = "\r\n--B--\r\n"
+	body := io.MultiReader(strings.NewReader(head), io.LimitReader(zeroReader{}, total), strings.NewReader(tail))
+	cr := &countingReader{r: body}
+	req := httptest.NewRequest("POST", "/v1/audio/transcriptions", cr)
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=B")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), "audio_too_large") {
+		t.Fatalf("code=%d body=%s want 413 audio_too_large", rec.Code, rec.Body.String())
+	}
+	if len(f.paths) != 0 {
+		t.Fatalf("超限时不得打上游: %v", f.paths)
+	}
+	// MaxBytesReader 要多读 1 字节才知道超限，故上限 +1。
+	if limit := maxAudioBytes + audioBodySlack + 1; cr.n > limit {
+		t.Fatalf("读了 %d 字节，超过上限 %d（说明先落盘后拒）", cr.n, limit)
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
 // TestTranscriptionsDisabledReturns403 默认关闭时回 403 asr_disabled。
 func TestTranscriptionsDisabledReturns403(t *testing.T) {
 	f := &audioFake{ctype: "application/json"}
