@@ -99,6 +99,8 @@
     "login_bind_proxy": true,
     "proxy_exit_lookup": false,
     "embeddings_enabled": false,
+    "tts_enabled": false,
+    "asr_enabled": false,
     "busy_retry": true,
     "busy_wait_seconds": 60,
     "narration_enabled": true,

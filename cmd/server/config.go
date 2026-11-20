@@ -344,6 +344,16 @@ type Config struct {
 		// 「功能存在、只是没开」，不用去猜路径拼错）。
 		EmbeddingsEnabled bool `json:"embeddings_enabled"`
 
+		// TTSEnabled / ASREnabled 官方语音端点（/v1/audio/speech、/v1/audio/transcriptions）
+		// 的总开关，缺省 false。
+		//
+		// 为什么默认关：这两个端点的协议来自官方桌面端包的静态反查（issue #277：
+		// POST /v2/audio/speech 的 SSE + PCM、POST /agenttool/v1/asr 的 multipart），
+		// 没有真机抓包对照过，也还没人验证过不同账号/套餐是否都能用。关闭时端点仍在，
+		// 回 403（不是 404），打开开关即热生效。
+		TTSEnabled bool `json:"tts_enabled"`
+		ASREnabled bool `json:"asr_enabled"`
+
 		// NarrationEnabled 预告式收尾救援的总开关（「……：」「我将…」这类停在半句上就
 		// 结束的回复，网关补发一次续写），缺省 true。
 		//

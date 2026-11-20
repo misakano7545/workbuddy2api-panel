@@ -32,6 +32,10 @@ type Snapshot struct {
 	// WatermarkStripEnabled 实验特性「水印裁切」总开关（features.watermark_strip_enabled）；
 	// 默认 false，面板保存后热生效。
 	WatermarkStripEnabled bool
+	// TTSEnabled / ASREnabled 官方语音端点开关（features.tts_enabled / asr_enabled）；
+	// 默认 false，关着时回 403（不是 404）。
+	TTSEnabled bool
+	ASREnabled bool
 	// ThreeDEnabled 混元 3D 生成总开关（features.three_d_enabled）；默认 false。
 	// 关着时 /v1/3d/* 回 403、MCP 的 generate_3d / get_3d_task 不出现在工具面里。
 	ThreeDEnabled    bool
