@@ -313,6 +313,58 @@ func TestAudioEventsCarryAccount(t *testing.T) {
 	}
 }
 
+// TestSpeechRetriesNextAccountOnTruncatedStream 第一个号的 SSE 在 delta 中途被切断
+// （没有 speech.audio.done），第二个号正常：客户端应拿到这一整段音频，而不是半段。
+//
+// 这是 issue #277 那条「200 + 132480 字节的半段音频」的回归位：修复前 Speech 把
+// EOF-without-done 当成功，第一段半音频就直接 200 出去了，第二个号根本不会被选中。
+func TestSpeechRetriesNextAccountOnTruncatedStream(t *testing.T) {
+	pcm := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	truncated := ttsFrame(map[string]any{"type": "speech.audio.delta",
+		"audio": map[string]string{"data": base64.StdEncoding.EncodeToString(pcm[:4])}})
+	complete := ttsFrame(map[string]any{"type": "speech.audio.delta",
+		"audio": map[string]string{"data": base64.StdEncoding.EncodeToString(pcm[:4])}}) +
+		ttsFrame(map[string]any{"type": "speech.audio.delta",
+			"audio": map[string]string{"data": base64.StdEncoding.EncodeToString(pcm[4:])}}) +
+		ttsFrame(map[string]any{"type": "speech.audio.done"}) + "data: [DONE]\n\n"
+	var seen []string
+	cl := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			seen = append(seen, r.Header.Get("Authorization"))
+			body := truncated
+			if len(seen) > 1 {
+				body = complete
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+		ChatBaseCN:    "https://cn.example",
+		BillingBaseCN: "https://cn.example",
+	}
+	p := testPoolWith(
+		&auth.Auth{UID: "c1", AccessToken: "at-1", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		&auth.Auth{UID: "c2", AccessToken: "at-2", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: cl, TTSEnabled: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/audio/speech",
+		strings.NewReader(`{"input":"你好","response_format":"pcm"}`)))
+
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s（换号后应拿到完整音频）", rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(rec.Body.Bytes(), pcm) {
+		t.Fatalf("PCM=%v want %v（不能把第一段的半截音频回给客户端）", rec.Body.Bytes(), pcm)
+	}
+	if len(seen) != 2 || seen[0] == seen[1] {
+		t.Fatalf("应换到第二个号重试一次，实际调用了 %d 次: %v", len(seen), seen)
+	}
+}
+
 // TestTranscriptionsDisabledReturns403 默认关闭时回 403 asr_disabled。
 func TestTranscriptionsDisabledReturns403(t *testing.T) {
 	f := &audioFake{ctype: "application/json"}
