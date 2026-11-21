@@ -60,6 +60,12 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 > ⚠️ 合规须知：本项目是**非官方**网关，使用 CodeBuddy 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
+## 合作伙伴
+
+<a href="https://www.ipwo.net/?ref=githubworkbuddy2apipanel"><img width="5120" height="601" alt="30f235b8d74c22bdf31db956230949a6" src="https://github.com/user-attachments/assets/e74e1c0a-d60f-46df-ae2f-84cbfb796db2" /></a>
+
+注册地址：https://www.ipwo.net/?ref=githubworkbuddy2apipanel
+
 ## 核心能力
 
 | 能力 | 说明 |
