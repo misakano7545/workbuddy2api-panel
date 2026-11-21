@@ -47,7 +47,8 @@ const (
 	ErrContentBlocked                   // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
 	ErrBadParams                        // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
 	ErrAccountFault                     // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
-	ErrModelBlocked                     // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
+	ErrModelBlocked                     // 11158「该账号类型无权使用该模型」→ (账号,模型) 负缓存避让，切到有权限的号
+	ErrModelMissing                     // 11102/14401「该模型 id 在上游不存在」→ 请求级错误：不罚号、不轮转，末端 400 透传原文
 	ErrWafBlock                         // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                    // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                     // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
@@ -76,6 +77,8 @@ func (k ErrKind) String() string {
 		return "bad_params"
 	case ErrModelBlocked:
 		return "model_blocked"
+	case ErrModelMissing:
+		return "model_missing"
 	case ErrWafBlock:
 		return "waf_block"
 	case ErrPromptTooLong:
@@ -380,6 +383,24 @@ func IsModelBlocked(status int, body string) bool {
 		strings.Contains(lowerMsg, modelForbiddenMsgMarker)
 }
 
+// IsModelMissing 报告 body 是否是「这个模型 id 在上游不存在」的确定性答复（11102 / 14401，
+// 见 modelBlockMsgMarkers）。
+//
+// 与 IsModelBlocked 的 11158「该账号类型无权限」必须分开处置（issue #280）：11158 换个有权限
+// 的号仍可能成功（实测 global:gpt-6-luna → 11158 not allowed for user type [personal_free_user]），
+// 11102 换了整池都是同一句（实测 display name "DeepSeek-V4.1-Flash" 三个号 4.1s 全 11102，
+// 换成 id "deepseek-v4.1-flash" 立刻 200）——换号只是白打全池。
+func IsModelMissing(status int, body string) bool {
+	if !IsModelBlocked(status, body) {
+		return false
+	}
+	code, msg := modelBlockFields(body)
+	if code == modelForbiddenCode || strings.Contains(strings.ToLower(msg), modelForbiddenMsgMarker) {
+		return false
+	}
+	return true
+}
+
 // modelBlockFields 提取顶层或 error 子对象中的业务 code 与消息。
 func modelBlockFields(body string) (code, msg string) {
 	var root map[string]any
@@ -651,8 +672,9 @@ func ParseRateReset(body string) (time.Time, bool) {
 // Classify 按 HTTP 状态码 + body 判定错误类别。
 //
 // 判定顺序自「严」到「宽」，每层的先后都有语义依据：
-//  0. 11102（IsModelBlocked）——「该后端无此模型」确定性答复，语义最具体，最先判
-//     （只认 400/404，429+11102 属限流语义走第 4 层）。
+//  0. 11102/14401（IsModelMissing）——「该模型 id 上游不存在」确定性答复，语义最具体，
+//     最先判（只认 400/404，429+11102 属限流语义走第 4 层）；11158「该账号类型无权限」
+//     紧随其后（IsModelBlocked），两者处置不同：前者请求级不轮转，后者换号。
 //  1. 402 —— 真正的计费余额耗尽状态码，最严、最不可自愈，最先判。
 //  2. sessionDeadMarkers —— 需要人工重登的终态。若 401 body 同时含 "12153" 与
 //     "rate limit"（如网关错误页混排），归 session_dead：短冷却救不活失效 session，
@@ -688,10 +710,17 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     错误/通用 4xx 之前，避免落 ErrClient 把健康号轮转一遍。
 //  12. 内容策略/参数错误/其他 4xx —— 通用兜底。
 func Classify(status int, body string) ErrKind {
-	// 11102「该后端无此模型」须最先判：它是「模型在后端不存在」的确定性答复，语义比
+	// 11102「该后端无此模型」须最先判：它是「模型在上游不存在」的确定性答复，语义比
 	// 计费/限流都更具体——若不先判，msg 里的 "service info not found" 会被更宽的
 	// 4xx 兜底归为 ErrClient（只换号不避让），该坏号会留在池内反复被选中。
+	// 归请求级（ErrModelMissing）而非 (账号,模型) 负缓存：模型 id 不存在时换遍全池是
+	// 同一句（issue #280 实测三号 4.1s 全 11102），轮转只是白打号。
 	// 只认 400/404（见 IsModelBlocked），429+11102 落下方 status==429 层走限流语义。
+	if IsModelMissing(status, body) {
+		return ErrModelMissing
+	}
+	// 11158「该账号类型无权使用该模型」保持 (账号,模型) 负缓存 + 换号：同模型在不同
+	// 账号类型上权限不同，换到有权限的号真能成功（见 IsModelMissing 注释的实测对照）。
 	if IsModelBlocked(status, body) {
 		return ErrModelBlocked
 	}

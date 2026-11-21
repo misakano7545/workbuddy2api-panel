@@ -1850,20 +1850,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
-			// 请求级参数拒绝（11101 请求体解析失败 / 11133 模型供应商拒绝参数 / 11151 空 text 段）：
-			// 与 11115 / 图片无效同一哲学——同一 body 换任何账号都是同样的拒绝，轮转只会
-			// 放大无效请求（每号一次上游调用 + rotateBackoff 占用在途名额）。更要紧的
+			// 请求级参数拒绝（11101 请求体解析失败 / 11133 模型供应商拒绝参数 / 11151 空 text 段 /
+			// 11102 模型 id 不存在）：与 11115 / 图片无效同一哲学——同一 body 换任何账号都是同样的
+			// 拒绝，轮转只会放大无效请求（每号一次上游调用 + rotateBackoff 占用在途名额）。更要紧的
 			// 是：继续轮转后末端会落到「其余保持 503」，把确定失败的请求伪装成
 			// "账号不可用、稍后再试"，客户端于是对必然失败的请求无限重试。立即透传
 			// 上游原文回 400。（11101 吸收上游 fd5c5a6；11133 见 payload.go 实测
-			// 「全号轮转同样被拒」；11151 的空段本该在出站前就补掉，走到这里是兜底）
-			if kind == upstream.ErrBadParams || kind == upstream.ErrModelParamInvalid || kind == upstream.ErrEmptyContent {
+			// 「全号轮转同样被拒」；11151 的空段本该在出站前就补掉，走到这里是兜底；
+			// 11102 见 issue #280：模型 id 不存在时三个号 4.1s 一字不差）
+			if kind == upstream.ErrBadParams || kind == upstream.ErrModelParamInvalid || kind == upstream.ErrEmptyContent || kind == upstream.ErrModelMissing {
 				code, fallback := "bad_params", "chat request body was rejected by upstream"
 				switch kind {
 				case upstream.ErrModelParamInvalid:
 					code, fallback = "model_param_invalid", "request parameters were rejected by the upstream model provider"
 				case upstream.ErrEmptyContent:
 					code, fallback = "empty_content", "a message in the request history has empty content"
+				case upstream.ErrModelMissing:
+					code, fallback = "model_unavailable", "upstream does not have this model id"
 				}
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
@@ -2270,12 +2273,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				code = "waf_ip_blocked"
 				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
 			}
-		case upstream.ErrModelBlocked:
-			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因，但
-			// code 此前停在默认的 no_healthy_account —— 那是"服务端过载"的语义，
-			// 客户端据此会不断重试（#81 里就是 503 → 客户端自动重试 5 次），而真正
-			// 该做的是换个模型。用 400 + 明确的 code 把不可重试的性质讲清楚。
-			// （吸收上游 44d6e04）
+		case upstream.ErrModelMissing, upstream.ErrModelBlocked:
+			// 11102「该模型 id 上游不存在」：上游原文（下方统一透传）已经写清了原因，
+			// 换号无用（模型级，实测全池一字不差）；11158 是「该账号类型无权限」，
+			// 也走同一 code。两种情况都不该给 no_healthy_account —— 那是"服务端过载"
+			// 的语义，客户端据此会不断重试（#81 里就是 503 → 客户端自动重试 5 次），
+			// 而真正该做的是换个模型（11102）或换个有权限的号（11158）。
+			// 用 400 + 明确的 code 把不可重试的性质讲清楚。（吸收上游 44d6e04）
 			code = "model_unavailable"
 			status = http.StatusBadRequest
 		}
@@ -2655,6 +2659,7 @@ var requestErrorCodes = map[upstream.ErrKind]string{
 	upstream.ErrBadParams:         "bad_params",
 	upstream.ErrModelParamInvalid: "model_param_invalid",
 	upstream.ErrEmptyContent:      "empty_content",
+	upstream.ErrModelMissing:      "model_unavailable",
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
@@ -2682,7 +2687,9 @@ var requestErrorCodes = map[upstream.ErrKind]string{
 //     不冷却/不熔断/不 NoteError/不喂连败；换号必然同样失败，故 chatCompletions
 //     在轮转循环内即刻 400 透传上游原文终止（吸收上游 fd5c5a6）。
 //   - ErrModelParamInvalid → 11133：同上（请求级），零动作 + 循环内即刻 400 终止。
-//   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11102/11158 负缓存避让。
+//   - ErrModelMissing → 零动作：11102/14401「该模型 id 上游不存在」是模型级（换遍全池同一句），
+//     循环内即刻 400 终止。
+//   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11158 负缓存避让（换到有权限的号仍可成功）。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
 //     达到 breakerThreshold 触发熔断（指数退避）。
 //   - 其他（default：ErrClient/ErrNone）→ 只换号不罚（防雪崩），不喂熔断；ErrClient
@@ -2891,11 +2898,17 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// （不冷却/不熔断/不 NoteError/**不喂连败计数**：连败降权是 ErrClient 这种
 		// 「不知道原因的失败」的兜底，有权威分类的请求级错误不该重复计罚）。
 		// 终止轮转与 400 透传原文由 chatCompletions 的请求级参数分支负责。
+	case upstream.ErrModelMissing:
+		// 11102/14401「该模型 id 在上游不存在」：模型级而非账号级——换遍全池是同一句
+		// （issue #280 实测三号一字不差），轮转只会白打号、并把该号该模型刷进负缓存。
+		// 零动作（不冷却/不熔断/不 NoteError/不喂连败），终止轮转与 400 透传原文由
+		// chatCompletions 的请求级分支负责。
 	case upstream.ErrModelBlocked:
-		// 11102「该后端无此模型」/11158「该账号类型无此模型权限」：
+		// 11158「该账号类型无此模型权限」（不是 11102——那个走上面的请求级分支）：
 		// (账号, 模型) 负缓存避让。复用 modelCooldowns 机制（与 6004 同域），
 		// 选号侧 healthyForModel 对该账号自动避开该模型。
-		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
+		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开——换到有权限的
+		// 账号（如 Pro 号）真能成功，故这里保留轮转。
 		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReasonFor(body))
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。

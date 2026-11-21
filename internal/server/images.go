@@ -310,7 +310,7 @@ func requestLevelFailFastKind(kind upstream.ErrKind) bool {
 	switch kind {
 	case upstream.ErrBadParams, upstream.ErrPromptTooLong, upstream.ErrImageInvalid,
 		upstream.ErrModelParamInvalid, upstream.ErrEmptyContent,
-		upstream.ErrContentBlocked, upstream.ErrModelBlocked:
+		upstream.ErrContentBlocked, upstream.ErrModelBlocked, upstream.ErrModelMissing:
 		return true
 	}
 	return false
