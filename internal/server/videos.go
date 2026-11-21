@@ -629,8 +629,11 @@ func videoUpstreamBody(req map[string]any, bare string) (map[string]any, error) 
 		out["last_image_url"] = s
 	}
 	// 参考素材上游要对象数组（[]*v2.ReferenceImages），客户端习惯给字符串数组。
-	// 转不了的（不是数组、条目既非字符串也无 URL 键）直接丢掉：宁可少一条素材，
-	// 也不要因为形状猜错整单失败。丢掉前必须 delete，否则尾部透传会把原样甩给上游。
+	// 已真号实测（2026-11-21，cn 池）：字符串数组直发上游 → 400 code 11101
+	// 「cannot unmarshal string into Go struct field CreateVideoRequest.reference_images」，
+	// 转换后同一张图 200 提交并出片。转不了的（不是数组、条目既非字符串也无 URL 键）
+	// 直接丢掉：宁可少一条素材，也不要因为形状猜错整单失败；丢掉前必须 delete，
+	// 否则尾部透传会把原样甩给上游。
 	for client, urlKey := range map[string]string{
 		"reference_images": "image_url",
 		"reference_videos": "video_url",
