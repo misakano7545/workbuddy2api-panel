@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
@@ -228,6 +229,88 @@ type zeroReader struct{}
 func (zeroReader) Read(p []byte) (int, error) {
 	clear(p)
 	return len(p), nil
+}
+
+// TestTranscriptionsResponseFormat OpenAI 的 response_format：默认 json，text 要
+// text/plain 原文（客户端按字符串读时用），带时间戳的形态上游给不了 → 400。
+func TestTranscriptionsResponseFormat(t *testing.T) {
+	f := &audioFake{ctype: "application/json", resp: []byte(`{"code":0,"text":"今天天气不错"}`)}
+	p := testPoolWith(&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
+	h := NewHandler(Config{Pool: p, Upstream: f.client(), ASREnabled: true})
+
+	send := func(format string) *httptest.ResponseRecorder {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		part, _ := mw.CreateFormFile("file", "a.wav")
+		_, _ = part.Write([]byte("RIFF....WAVEfmt "))
+		if format != "" {
+			_ = mw.WriteField("response_format", format)
+		}
+		_ = mw.Close()
+		req := httptest.NewRequest("POST", "/v1/audio/transcriptions", &buf)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := send("text"); rec.Code != 200 || rec.Body.String() != "今天天气不错" ||
+		!strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("text: code=%d ct=%q body=%q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	if rec := send("json"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"text"`) {
+		t.Fatalf("json: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := send("verbose_json"); rec.Code != 400 || !strings.Contains(rec.Body.String(), "verbose_json") {
+		t.Fatalf("verbose_json: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAudioEventsCarryAccount 音频两个端点要进请求台账并带账号/模型，否则查不了
+// 「某个号的 TTS 异常」（issue #277 反馈）。
+func TestAudioEventsCarryAccount(t *testing.T) {
+	f := &audioFake{ctype: "text/event-stream",
+		resp: []byte(`data: {"type":"speech.audio.delta","audio":{"data":"AAEC"}}` + "\n\n" +
+			`data: {"type":"speech.audio.done"}` + "\n\n")}
+	reqLog := reqlog.New(reqlog.Config{})
+	p := testPoolWith(&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
+	h := NewHandler(Config{Pool: p, Upstream: f.client(), RequestLog: reqLog, TTSEnabled: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/audio/speech", strings.NewReader(`{"input":"你好"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got *reqlog.Event
+	for _, e := range reqLog.Snapshot().Recent {
+		if e.Path == "/v1/audio/speech" {
+			e := e
+			got = &e
+		}
+	}
+	if got == nil {
+		t.Fatal("TTS 没进请求台账")
+	}
+	if !strings.Contains(got.Account, "c1") || got.Model != upstream.TTSModel || !got.OK {
+		t.Fatalf("台账缺账号/模型: account=%q model=%q ok=%v", got.Account, got.Model, got.OK)
+	}
+
+	// 截断的 SSE 走失败路径：事件必须带上失败状态（status=0 会被上游健康滑窗记成
+	// 一次无状态采样）。
+	bad := &audioFake{ctype: "text/event-stream",
+		resp: []byte(`data: {"type":"speech.audio.delta","audio":{"data":"AAEC"}}` + "\n\n")}
+	reqLog2 := reqlog.New(reqlog.Config{})
+	h2 := NewHandler(Config{Pool: p, Upstream: bad.client(), RequestLog: reqLog2, TTSEnabled: true})
+	rec = httptest.NewRecorder()
+	h2.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/audio/speech", strings.NewReader(`{"input":"你好"}`)))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("截断的 SSE 应回 502，实际 %d", rec.Code)
+	}
+	for _, e := range reqLog2.Snapshot().Recent {
+		if e.Path == "/v1/audio/speech" && e.Status != http.StatusBadGateway {
+			t.Fatalf("失败事件 status=%d，应为 502", e.Status)
+		}
+	}
 }
 
 // TestTranscriptionsDisabledReturns403 默认关闭时回 403 asr_disabled。

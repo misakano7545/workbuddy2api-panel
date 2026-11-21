@@ -136,7 +136,10 @@ func (c *Client) Speech(ctx context.Context, a *auth.Auth, text, voice string) (
 	if len(pcm) == 0 {
 		return nil, fmt.Errorf("tts stream completed without audio")
 	}
-	return pcm, nil
+	// 走到这里说明没见到 speech.audio.done：上游 SSE 被提前切断（2026-11-20 实测
+	// APISIX 分块流偶发在 delta 中途 close），pcm 只是半段音频。当成功返回会让客户端
+	// 拿到 200 + 残缺录音（issue #277 复现：132480 vs 136320 字节，识别成乱码）。
+	return nil, fmt.Errorf("tts stream truncated after %d bytes: no speech.audio.done", len(pcm))
 }
 
 // Transcribe 语音转文本，返回上游识别文本。

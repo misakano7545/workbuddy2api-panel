@@ -100,6 +100,24 @@ func TestSpeechSurfacesStreamErrorEvent(t *testing.T) {
 	}
 }
 
+// TestSpeechRejectsTruncatedStream 上游 SSE 在 delta 中途被切断（没发 speech.audio.done）
+// 时不能当成功返回：客户端会拿到 200 + 半段录音（issue #277 实测 132480 vs 136320 字节，
+// ASR 识别成乱码）。必须报错让 handler 换号重试。
+func TestSpeechRejectsTruncatedStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"type":"speech.audio.delta","audio":{"data":"AAEC"}}`+"\n\n")
+		// 到此断开：没有 done、没有 [DONE]
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.ChatBaseCN = srv.URL
+	if _, err := c.Speech(context.Background(), &auth.Auth{AccessToken: "at", UID: "u1"}, "你好", ""); err == nil {
+		t.Fatal("截断的 SSE 被当成成功返回了")
+	}
+}
+
 // TestASRRecognitionFailureIsRequestLevel 15053 是「这段音频识别不出来」，同一文件
 // 换号也是同一句；归请求级才不会为一段坏音频轮转全池。
 func TestASRRecognitionFailureIsRequestLevel(t *testing.T) {
