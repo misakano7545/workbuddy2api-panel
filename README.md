@@ -143,7 +143,7 @@ curl -s http://127.0.0.1:7863/v1/videos/1312831544-WandVideo-… \
   -H "Authorization: Bearer $WB2API_KEY"
 ```
 
-请求参数：`prompt`（必填）、`model`、`seconds`（实测 4-15）、`resolution`、`aspect_ratio`（`16:9` / `9:16` / `1:1`）、`negative_prompt`、`enable_audio`（默认 `true`）、`watermark`（默认 `true`）、`image`（图生视频，公网/签名 URL）、`last_image`（尾帧）、`wait`（缺省 `true`）、`timeout_seconds`（缺省 900，封顶 1800）。除 `wait` / `timeout_seconds` 外都原样交给上游。
+请求参数：`prompt`（必填）、`model`、`seconds`（实测 4-15）、`resolution`、`aspect_ratio`（`16:9` / `9:16` / `1:1`）、`negative_prompt`、`enable_audio`（默认 `true`）、`watermark`（默认 `true`）、`image`（图生视频，公网/签名 URL）、`last_image`（尾帧）、`reference_images` / `reference_videos` / `reference_audios`（参考素材，`["url", …]` 或上游原形 `[{"image_url": …}]` 都收，网关补成上游的对象数组）、`wait`（缺省 `true`）、`timeout_seconds`（缺省 900，封顶 1800）。除 `wait` / `timeout_seconds` 与三个 `reference_*` 的形状转换外，都原样交给上游。
 
 回执（出片后）：
 
