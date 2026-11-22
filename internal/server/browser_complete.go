@@ -17,7 +17,7 @@ import (
 // actually complete.
 const browserCompletePrefix = "::browser-complete"
 
-const browserCompleteNudge = "【wb2api 网关自动续写·非用户消息】你刚才只输出了 `::browser-complete{...}` 浏览器完成控制标记，但用户任务还没有结束。不要只输出完成标记，也不要假装已经完成；请继续执行用户要求的下一步，完成后给出最终结果。"
+const browserCompleteNudge = "你刚才只输出了 `::browser-complete{...}` 浏览器完成控制标记，但用户任务还没有结束。不要只输出完成标记，也不要假装已经完成；请继续执行用户要求的下一步，完成后给出最终结果。如果你确认已经完成，不要输出任何内容，直接结束。"
 
 // browserCompleteDirectiveOnly reports whether text is exactly one standalone
 // browser-complete control directive. The title may contain text, but no other

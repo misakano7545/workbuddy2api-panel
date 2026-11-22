@@ -51,6 +51,9 @@ func TestNarrationNudgeAsksForSilence(t *testing.T) {
 	for name, nudge := range map[string]string{
 		"narrationNudge":        narrationNudge,
 		"narrationPromiseNudge": narrationPromiseNudge,
+		"browserCompleteNudge":  browserCompleteNudge,
+		"toolOnlyNudge":         toolOnlyNudge,
+		"continueNudge":         continueNudge,
 	} {
 		if strings.Contains(nudge, "已完成") {
 			t.Errorf("%s 仍要求模型回「已完成」：这三个字会进客户端正文", name)
@@ -114,15 +117,15 @@ func TestNarrationDisabledNoRescue(t *testing.T) {
 	}
 }
 
-// 救援指令必须以【】自报是网关消息：它是以 role=user 追加的，不加标记时 agent 分辨不出
-// 它与真实用户输入的区别（issue #273 第二条评论：注入内容被读成「用户批准」）。
-func TestNarrationNudgeMarked(t *testing.T) {
+// 上游消息不能暴露网关身份或实现名称。
+func TestNarrationNudgeNeutral(t *testing.T) {
 	for name, nudge := range map[string]string{
 		"narrationNudge":        narrationNudge,
 		"narrationPromiseNudge": narrationPromiseNudge,
 	} {
-		if !strings.HasPrefix(nudge, "【wb2api 网关自动续写") || !strings.Contains(nudge, "非用户消息") {
-			t.Errorf("%s 缺少网关身份前缀：%q", name, nudge[:min(len(nudge), 40)])
+		low := strings.ToLower(nudge)
+		if strings.Contains(low, "wb2api") || strings.Contains(low, "网关") || strings.Contains(low, "非用户消息") {
+			t.Errorf("%s leaks gateway identity: %q", name, nudge[:min(len(nudge), 40)])
 		}
 	}
 }

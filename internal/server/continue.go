@@ -82,7 +82,7 @@ const continueTotalCapRatio = 4
 const continueThinkingShare = 0.5
 
 // continueNudge 续写指令：线上实测该措辞能让模型从断点无缝接续（不重头、不道歉）。
-const continueNudge = "你上一条回复因达到输出长度上限被截断。请从中断处继续输出剩余内容；不要重复已输出过的部分，不要道歉或解释，直接继续。"
+const continueNudge = "你上一条回复因达到输出长度上限被截断。请从中断处继续输出剩余内容；不要重复已输出过的部分，不要道歉或解释，直接继续。如果已经写完整，不要输出任何内容，直接结束。"
 
 // keepaliveEvery 客户端可见静默的最大间隔：超时就向流里补一条 SSE 注释帧
 // （": keepalive"），只喂活连接不带语义。≤0 = 每条被吞帧都补（测试确定性用）。
