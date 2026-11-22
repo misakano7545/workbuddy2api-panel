@@ -129,6 +129,16 @@ type continueReader struct {
 
 	// toolOnlyTried 安全续写（只采纳工具调用）已用（每请求一次；见 tryToolOnlyRescue）。
 	toolOnlyTried bool
+	// browserHold buffers a possible leading ::browser-complete directive until
+	// the brace closes or the prefix is disproved.
+	browserHold string
+	// browserCompleteSeen reports a complete standalone directive was consumed.
+	browserCompleteSeen bool
+	// browserCompleteTried limits the special continuation to one attempt.
+	browserCompleteTried bool
+	// browserIncomplete reports a partial candidate was flushed verbatim; other
+	// narration/tool-only rescues must not reinterpret that text.
+	browserIncomplete bool
 	// toolOnly 当前段处于「只采纳工具调用」模式：帧全部改道 toolOnlyFrame，裁决前客户端什么都收不到。
 	toolOnly bool
 	// toolOnlyFailed 当前 toolOnly 段出现过 error 帧 / 流内失败帧 / 非法帧（整段回滚）。
@@ -375,6 +385,7 @@ func (r *continueReader) frame(payload string) {
 		hasUsage = true
 	}
 	deltaNonEmpty := false
+	hiddenContentOnly := false
 	rebuilt := false
 	if chs, ok := obj["choices"].([]any); ok && len(chs) > 0 {
 		if c, ok := chs[0].(map[string]any); ok {
@@ -398,8 +409,20 @@ func (r *continueReader) frame(payload string) {
 					deltaNonEmpty = true
 				}
 				if s, ok := d["content"].(string); ok && s != "" {
+					visible, hidden := r.filterBrowserContent(s)
 					r.text.WriteString(s)
-					deltaNonEmpty = true
+					if hidden {
+						hiddenContentOnly = visible == ""
+						if hiddenContentOnly {
+							delete(d, "content")
+						} else {
+							d["content"] = visible
+						}
+						rebuilt = true
+					}
+					if visible != "" {
+						deltaNonEmpty = true
+					}
 				}
 				if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
 					r.toolSeen = true
@@ -434,6 +457,10 @@ func (r *continueReader) frame(payload string) {
 	}
 	if hasUsage && !deltaNonEmpty {
 		return // 纯 usage 帧（已入账）：不再下发
+	}
+	if hiddenContentOnly && !deltaNonEmpty && r.finish == "" {
+		r.maybeKeepalive()
+		return
 	}
 	r.emit(payload)
 }
@@ -633,6 +660,9 @@ func (r *continueReader) endSegment(sawDone bool) {
 	if r.cur != nil {
 		r.cur.Close()
 	}
+	// A candidate that was cut before its closing brace must be returned to the
+	// client verbatim; otherwise the filtering layer would swallow normal text.
+	r.flushBrowserHold()
 	// 本段 usage 计入记账合计：必须在任何换段（救援、续写、盲重试）之前。
 	r.flushSegUsage()
 	// 安全续写段的裁决：拿到完整工具调用就采纳（继续正常收尾），否则回滚到首段终态。
@@ -642,10 +672,11 @@ func (r *continueReader) endSegment(sawDone bool) {
 
 // 段结束后的换段决策链，按优先级排列（decideNext 依次判）。
 const (
-	switchStarved   = iota // 空截断救援（tryStarvedRetry）
-	switchToolOnly         // 安全续写（tryToolOnlyRescue）
-	switchNarration        // 预告式收尾救援（tryNarrationRetry）
-	switchContinue         // length 截断续写 / 断流盲重试（canContinue）
+	switchStarved         = iota // 空截断救援（tryStarvedRetry）
+	switchBrowserComplete        // 浏览器完成控制标记误收尾
+	switchToolOnly               // 安全续写（tryToolOnlyRescue）
+	switchNarration              // 预告式收尾救援（tryNarrationRetry）
+	switchContinue               // length 截断续写 / 断流盲重试（canContinue）
 )
 
 // decideNext 从第 from 条开始依次判换段，命中就异步发起；都不命中就收尾。
@@ -656,6 +687,10 @@ const (
 func (r *continueReader) decideNext(sawDone bool, from int) {
 	r.rescueWhy = r.rescueWhy[:0]
 	if from <= switchStarved && r.tryStarvedRetry() {
+		return
+	}
+	// 浏览器控制标记不是最终答案：不把它透给客户端，补发一次真正的续写。
+	if from <= switchBrowserComplete && r.tryBrowserCompleteRescue() {
 		return
 	}
 	// 安全续写（只采纳工具调用）：模型刚看完工具结果却只写一句就收尾。

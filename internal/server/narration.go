@@ -397,6 +397,10 @@ func (r *continueReader) tryNarrationRetry() bool {
 		return r.skip("narration", "err_frame")
 	case r.toolSeen:
 		return r.skip("narration", "tool_seen")
+	case r.browserIncomplete:
+		return r.skip("narration", "browser_incomplete")
+	case r.browserCompleteTried:
+		return r.skip("narration", "browser_complete_tried")
 	case r.clientGone():
 		return r.skip("narration", "client_gone")
 	case r.outputCapped():

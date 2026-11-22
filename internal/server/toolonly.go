@@ -48,6 +48,7 @@ import (
 //     （≈1400B / 950B），句号收尾、零工具调用；
 //   - 按 25 分钟样本放宽到 N token 的覆盖率（prompt≥8k 那批 46 条）：
 //     ≤650(2000B) 41% / ≤1000 76% / ≤2500 87% / 不设限 100%。
+//
 // 上限取 2000B。曾试过放到 7500B（覆盖 41%→77%），但上线后出现反向副作用：
 // 已经写完的任务被推着再调一次工具（用户反馈「任务该结束了却一直在工具调用」），
 // 因为「模型肯再调一次」并不等于「它还没做完」。在没有可靠判据区分「提前收尾」与
@@ -183,6 +184,10 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 		return r.skip("toolonly", "err_frame")
 	case r.toolSeen:
 		return r.skip("toolonly", "tool_seen")
+	case r.browserIncomplete:
+		return r.skip("toolonly", "browser_incomplete")
+	case r.browserCompleteTried:
+		return r.skip("toolonly", "browser_complete_tried")
 	case r.clientGone():
 		return r.skip("toolonly", "client_gone")
 	case r.outputCapped():
