@@ -198,7 +198,7 @@ func browserCompleteRetryBody(body []byte, resp map[string]any, budgetFloor int6
 	if rc := browserCompleteAggregateReasoning(resp); rc != "" {
 		asst["reasoning_content"] = rc
 	}
-	msgs = append(msgs, asst, map[string]any{"role": "user", "content": browserCompleteNudge})
+	msgs = append(msgs, asst, map[string]any{"role": "user", "content": internalNudgeText(browserCompleteNudge)})
 	obj["messages"] = msgs
 	upstream.EnsureMinBudget(obj, budgetFloor)
 	out, err := json.Marshal(obj)

@@ -122,6 +122,7 @@ func TestNarrationNudgeNeutral(t *testing.T) {
 	for name, nudge := range map[string]string{
 		"narrationNudge":        narrationNudge,
 		"narrationPromiseNudge": narrationPromiseNudge,
+		"internalNudgePrefix":   internalNudgePrefix,
 	} {
 		low := strings.ToLower(nudge)
 		if strings.Contains(low, "wb2api") || strings.Contains(low, "网关") || strings.Contains(low, "非用户消息") {

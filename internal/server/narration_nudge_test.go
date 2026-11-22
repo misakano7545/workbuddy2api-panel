@@ -26,8 +26,8 @@ func TestNarrationStructurallyOpenTailKeepsLeadInNudge(t *testing.T) {
 		}
 		msgs, _ := reqBody(t, (*reqs)[0])["messages"].([]any)
 		last, _ := msgs[len(msgs)-1].(map[string]any)
-		if got, _ := last["content"].(string); got != narrationNudge {
-			t.Errorf("结构未闭合（%q）应带 narrationNudge，实际 %q", text, got)
+		if got, _ := last["content"].(string); got != internalNudgeText(narrationNudge) {
+			t.Errorf("结构未闭合（%q）应带内部标记 + narrationNudge，实际 %q", text, got)
 		}
 	}
 }

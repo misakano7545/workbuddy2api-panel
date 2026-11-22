@@ -84,6 +84,15 @@ const continueThinkingShare = 0.5
 // continueNudge 续写指令：线上实测该措辞能让模型从断点无缝接续（不重头、不道歉）。
 const continueNudge = "你上一条回复因达到输出长度上限被截断。请从中断处继续输出剩余内容；不要重复已输出过的部分，不要道歉或解释，直接继续。如果已经写完整，不要输出任何内容，直接结束。"
 
+// internalNudgePrefix marks a synthetic continuation without disclosing the
+// gateway project name. The role is still user because the upstream chat API
+// accepts that shape, but the model can distinguish this from real user input.
+const internalNudgePrefix = "【内部续写指令·非用户输入】"
+
+func internalNudgeText(nudge string) string {
+	return internalNudgePrefix + nudge
+}
+
 // keepaliveEvery 客户端可见静默的最大间隔：超时就向流里补一条 SSE 注释帧
 // （": keepalive"），只喂活连接不带语义。≤0 = 每条被吞帧都补（测试确定性用）。
 var keepaliveEvery = 10 * time.Second
@@ -973,7 +982,7 @@ func (r *continueReader) continuationBodyWithNudge(nudge string) ([]byte, error)
 	if rc := r.reason.String(); rc != "" {
 		asst["reasoning_content"] = rc
 	}
-	msgs = append(msgs, asst, map[string]any{"role": "user", "content": nudge})
+	msgs = append(msgs, asst, map[string]any{"role": "user", "content": internalNudgeText(nudge)})
 	obj["messages"] = msgs
 	// 续写段至少带上本轮档位的输出预算下限：这一层是从原始 body 重建的，拿不到首段
 	// 被 upstream 抬过的 max_tokens（见 newContinueReaderWithFloor 的说明）。
