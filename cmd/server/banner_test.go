@@ -29,7 +29,7 @@ func TestListenBannerReportsKeySource(t *testing.T) {
 
 	got := listenBanner("127.0.0.1:7863", "/etc/wb/config.json", key)
 	want := "workbuddy2api listening on 127.0.0.1:7863 (api_key=gZ" + strings.Repeat("*", len(key)-4) +
-		"FO, 来源 配置文件 /etc/wb/config.json)，管理面板 http://127.0.0.1:7863/panel/"
+		"FO, 来源 配置文件 /etc/wb/config.json)，控制台 http://127.0.0.1:7863/panel/"
 	if got != want {
 		t.Fatalf("横幅=%q want %q", got, want)
 	}
