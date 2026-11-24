@@ -2189,6 +2189,37 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// 非流式路径不会经过 continueReader。浏览器完成控制标记如果被当成
+		// 普通正文返回，Codex 会把回合直接判完成；这里做同样的单次续写保护。
+		if marker := browserCompleteAggregateText(resp); marker != "" {
+			declared, toolTurn := bodyToolShape(body)
+			if declared || toolTurn {
+				if rb, ok := browserCompleteRetryBody(body, resp,
+					h.cfg.Upstream.OutputBudgetFloor(acct.Realm(), curModel, hopTiming.Effort)); ok {
+					if rc2, st2, _, e2 := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, rb, clientIP, chatMeta, nil); e2 == nil && st2 < 400 && rc2 != nil {
+						if resp2, e3 := upstream.Aggregate(rc2); e3 == nil {
+							rc2.Close()
+							u1, _ := resp["usage"].(map[string]any)
+							u2, _ := resp2["usage"].(map[string]any)
+							if u1 != nil || u2 != nil {
+								billUsage = sumUsage(sumUsage(nil, u1), u2)
+							}
+							resp = resp2
+							log.Printf("INFO: [browser-complete] non-stream acct=%s model=%s: 检测到独立浏览器完成控制标记 → 续写一次真正任务",
+								logfmt.Label(acct.UID, acct.Nickname), bareModel)
+						} else {
+							rc2.Close()
+							log.Printf("WARN: [browser-complete] non-stream acct=%s model=%s: 续写聚合失败: %v",
+								logfmt.Label(acct.UID, acct.Nickname), bareModel, e3)
+						}
+					} else if rc2 != nil {
+						rc2.Close()
+						log.Printf("WARN: [browser-complete] non-stream acct=%s model=%s: 续写请求失败（status=%d err=%v）→ 保留原始响应",
+							logfmt.Label(acct.UID, acct.Nickname), bareModel, st2, e2)
+					}
+				}
+			}
+		}
 		// 标记修复（非流式）：把正文里的原生工具调用标记还原成 message.tool_calls。
 		// 只在「没有结构化 tool_calls」且「finish_reason 为 stop」时生效（见 dsml.go）；
 		// 名单为空时走弱判定（tools 声明在中转环节丢失是常态）。

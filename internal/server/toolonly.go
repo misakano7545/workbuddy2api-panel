@@ -48,6 +48,7 @@ import (
 //     （≈1400B / 950B），句号收尾、零工具调用；
 //   - 按 25 分钟样本放宽到 N token 的覆盖率（prompt≥8k 那批 46 条）：
 //     ≤650(2000B) 41% / ≤1000 76% / ≤2500 87% / 不设限 100%。
+//
 // 上限取 2000B。曾试过放到 7500B（覆盖 41%→77%），但上线后出现反向副作用：
 // 已经写完的任务被推着再调一次工具（用户反馈「任务该结束了却一直在工具调用」），
 // 因为「模型肯再调一次」并不等于「它还没做完」。在没有可靠判据区分「提前收尾」与
@@ -151,7 +152,7 @@ func toolOnlyLastSentence(s string) string {
 // toolOnlyNudge 安全续写的指令。必须点明「别再用文字解释」——否则模型会再写一段
 // 总结，那段正文会被丢弃，等于白发一次请求；也必须点明「不要重复上一个工具调用」，
 // 否则一个以为「再来一次就好」的模型会把刚执行完的工具原样再跑一遍（写操作会二次生效）。
-const toolOnlyNudge = "继续执行下一步。需要查看文件、执行命令或使用工具时，直接调用工具，不要再用文字解释或重复已有结论。不要重复调用刚才已经执行过的同一个工具、也不要重发相同的参数。如果确实已经全部完成，请只回复 DONE。"
+const toolOnlyNudge = "继续执行下一步。需要查看文件、执行命令或使用工具时，直接调用工具，不要再用文字解释或重复已有结论。不要重复调用刚才已经执行过的同一个工具、也不要重发相同的参数。如果确实已经全部完成，不要输出任何内容，直接结束。"
 
 // lastMessageIsToolResult 请求体的最后一条消息是否工具结果。
 //
@@ -183,6 +184,10 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 		return r.skip("toolonly", "err_frame")
 	case r.toolSeen:
 		return r.skip("toolonly", "tool_seen")
+	case r.browserIncomplete:
+		return r.skip("toolonly", "browser_incomplete")
+	case r.browserCompleteTried:
+		return r.skip("toolonly", "browser_complete_tried")
 	case r.clientGone():
 		return r.skip("toolonly", "client_gone")
 	case r.outputCapped():
