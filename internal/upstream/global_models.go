@@ -79,9 +79,9 @@ type fetchGlobalModelsCache struct {
 
 // 目录来源标识（fetchGlobalModelsCache.source）。
 const (
-	globalCatalogSourceDesktop    = "v3-desktop"   // 桌面端 UA 族权威目录（官方 picker 口径）
-	globalCatalogSourceUnion      = "v3-union"     // 桌面族探测失败的回落：IDE+CLI 并集
-	globalCatalogSourceEnterprise = "enterprise"   // v3 全失败，只剩企业端点（窄目录 + 旧倍率）
+	globalCatalogSourceDesktop    = "v3-desktop" // 桌面端 UA 族权威目录（官方 picker 口径）
+	globalCatalogSourceUnion      = "v3-union"   // 桌面族探测失败的回落：IDE+CLI 并集
+	globalCatalogSourceEnterprise = "enterprise" // v3 全失败，只剩企业端点（窄目录 + 旧倍率）
 )
 
 // GlobalCatalogSource 返回最近一次成功探测的目录来源（空 = 尚未探测）。
@@ -380,7 +380,7 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 		// 这条路径就是 issue #216 的现场：企业端点只有 18 条旧目录，且 hy4-preview
 		// 的 credits 在那里是 x0.00（v3 是 x0.29）——来源必须能被面板看见，否则
 		// 用户只会看到「模型少了 11 个、倍率是 0」而不知道是降级。
-		log.Printf("WARN: [upstream] global models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
+		degradedWarnOnce("global-models/v3", "WARN: [upstream] global models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
 		names, infos, efforts, defaults = extractEfforts(enterprise.infos)
 		if len(names) == 0 {
 			names = enterprise.names
@@ -388,7 +388,7 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 		return names, infos, efforts, defaults, globalCatalogSourceEnterprise, nil
 	}
 	if enterprise.err != nil {
-		log.Printf("WARN: [upstream] global models: enterprise endpoint failed (v3/config only): %v", enterprise.err)
+		degradedWarnOnce("global-models/enterprise", "WARN: [upstream] global models: enterprise endpoint failed (degraded to v3/config, catalog served normally): %v", enterprise.err)
 		names, infos, efforts, defaults = extractEfforts(v3.infos)
 		if len(names) == 0 {
 			names = v3.names
@@ -415,6 +415,28 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	defaults = mergeEffortDefaults(v3Defaults, entDefaults)
 	return names, infos, efforts, defaults, catalogSource, nil
 }
+
+// degradedWarnOnce 只在一路模型目录探测**首次**降级时打一行 WARN。
+//
+// 为什么需要（issue #283）：企业端点是永续 500，而 /v3/config 每次都接住，功能正常；
+// 每轮 warm model rates 都重打一行 WARN，4 天 49 次，把真故障淹掉。同状态后续静默。
+//
+// shortcut: 不区分「恢复后再失败」，进程重启前每种降级只报一次；逐次可见性靠
+// warm model rates 那行（每轮都写，ok / failed 都能看出来）。
+func degradedWarnOnce(key, format string, args ...any) {
+	degradedWarnMu.Lock()
+	defer degradedWarnMu.Unlock()
+	if degradedWarnSeen[key] {
+		return
+	}
+	degradedWarnSeen[key] = true
+	log.Printf(format, args...)
+}
+
+var (
+	degradedWarnMu   sync.Mutex
+	degradedWarnSeen = map[string]bool{}
+)
 
 // extractEfforts 从条目列表抽取 effort 能力桶（supportedEfforts 数组优先；
 // 缺数组但 defaultEffort 单档非空也入 defaults 桶）并顺带返回有序 names。
