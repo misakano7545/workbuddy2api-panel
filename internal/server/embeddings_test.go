@@ -156,6 +156,40 @@ func TestEmbeddingsQueueDoesNotRotate(t *testing.T) {
 	}
 }
 
+// TestEmbeddingsTeiTooLargeDoesNotRotate 11353（TEI 返回 413、上游套 500 外壳）是
+// **请求内容**的问题：同一 body 换任何账号都是同一句。落 ErrServer 会为一条超大
+// input 轮转 3 个号并各喂一笔连败 —— issue #290 实测 15 个坏请求熔断 11 个健康号
+// 30 分钟（chat 一起停）。现在是请求级 fail-fast：只打一次上游、不罚号、回 4xx
+// （500 外壳原样透出会诱导 SDK 自动重试同一条坏 body）。
+func TestEmbeddingsTeiTooLargeDoesNotRotate(t *testing.T) {
+	const body11353 = `{"code":11353,"msg":"Generate embedding failed with error: 11353:generate bemdding by tei failed with status code: [413]"}`
+	f := &embedFake{status: 500, body: body11353}
+	p := testPoolWith(
+		&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		&auth.Auth{UID: "c2", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		&auth.Auth{UID: "c3", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: f.client(), EmbeddingsEnabled: true})
+	rec := postEmbeddings(h, `{"model":"bge-m3","input":"a"}`)
+
+	if len(f.paths) != 1 {
+		t.Fatalf("请求级错误只该打一次上游，实际 %d 次", len(f.paths))
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("应回 400（上游 500 只是外壳），实得 %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, st := range p.List() {
+		if st.CoolRemaining > 0 || !st.BreakerUntil.IsZero() || !st.DegradeUntil.IsZero() {
+			t.Errorf("账号 %s 被冷却：cool_remaining=%d breaker_until=%v degrade_until=%v",
+				st.UID, st.CoolRemaining, st.BreakerUntil, st.DegradeUntil)
+		}
+		if st.ErrTotal != 0 || st.BreakerFails != 0 || st.ConsecutiveFails != 0 {
+			t.Errorf("账号 %s 的失败计数被动过：err_total=%d breaker_fails=%d consecutive_fails=%d",
+				st.UID, st.ErrTotal, st.BreakerFails, st.ConsecutiveFails)
+		}
+	}
+}
+
 // TestEmbeddingsDisabledByDefault 默认关闭：回 403 embeddings_disabled 且不打上游。
 //
 // 为什么不是 404：404 会让调用方以为「路径拼错了」，而实际是功能存在、只是没开。

@@ -828,6 +828,14 @@ func Classify(status int, body string) ErrKind {
 	if codeMarker(lower, "15053") {
 		return ErrBadParams
 	}
+	// 11353「TEI 嵌入后端 413（输入过大）」：上游把它套在 HTTP 500 外壳里当服务端错误。
+	// 触发条件由**请求内容**决定（同一 body 换任何账号都是同一句），归请求级；落
+	// ErrServer 会为一条超大 input 轮转全池并给健康号各记一笔连败 —— issue #290 实测
+	// 15 个坏请求熔断 11 个号 30 分钟。只认带 [413] 的形态：不带 413 的 11353 是 TEI
+	// 自身故障，仍按 5xx 处理（换号也是同一堵墙，但至少别把它当成请求的问题）。
+	if codeMarker(lower, "11353") && strings.Contains(lower, "[413]") {
+		return ErrBadParams
+	}
 	if status == http.StatusNotFound {
 		return ErrNotFound
 	}

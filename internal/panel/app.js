@@ -602,7 +602,11 @@ function renderAccounts(list) {
     else if (s.paused) { cls = 'off'; tag = '<span class="tag warn">已暂停选号</span>'; }
     else if (cool > 0) {
       cls = 'cool';
-      const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
+      // 标签按服务端给的 cool_kind 判，不比较秒数：cool_remaining_sec 是服务端
+      // 向上取整的整秒，bl 是前端后算的浮点秒，只差几十毫秒 ⇒ bl > cool_remaining_sec
+      // 恒为 false，于是「只有熔断」永远显示成「限流冷却」（issue #290）。
+      // state.go 已经算出谁截止更晚并写进 cool_kind，前端直接照抄即可。
+      const kind = s.cool_kind === 'breaker' ? '熔断'
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     }

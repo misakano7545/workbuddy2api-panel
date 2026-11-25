@@ -59,6 +59,11 @@ func TestClassify(t *testing.T) {
 		// 11129 工具定义不合规：确定性请求级错误，分类后不轮转、不罚号。
 		{400, `{"code":11129,"msg":"invalid function call parameters"}`, ErrBadParams},
 		{400, `invalid function call parameters`, ErrBadParams},
+		// 11353（TEI 嵌入后端 413，上游套 500 外壳）：输入过大是请求内容的问题，
+		// 同一 body 换任何账号都是同一句 → 请求级 fail-fast（issue #290）。
+		{500, `{"code":11353,"msg":"Generate embedding failed with error: 11353:generate bemdding by tei failed with status code: [413]"}`, ErrBadParams},
+		// 不带 [413] 的 11353 是 TEI 自身故障，仍按 5xx 处理。
+		{500, `{"code":11353,"msg":"generate embedding by tei failed"}`, ErrServer},
 		{400, `{"extError":{"code":"invalid_function_parameters"}}`, ErrBadParams},
 		// 图片格式/数据错误是确定性请求错误，分类后不轮转、不罚号。
 		{400, `{"code":11101,"msg":"Parse message failed: invalid image_url content at index 2: json: cannot unmarshal string into Go value of type v2.ImageContent"}`, ErrImageInvalid},
