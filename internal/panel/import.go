@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/cst"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
@@ -592,4 +593,50 @@ func normalizeExpiresAtMillis(v int64) int64 {
 		return v * 1000
 	}
 	return v
+}
+
+// accountsExport 批量导出账号凭证。
+//
+//	GET /panel/api/accounts/export
+//
+// 输出 {"accounts":[{uid,nickname,domain,realm,enterprise_id,access_token,refresh_token,expires_at}]}，
+// 与导入同形——导出的文件直接喂给另一个实例的 /panel/api/import/cockpit 就能搬过去。
+//
+// 两个边界：
+//   - 这是**凭证转储**（含 refresh_token），只该发给可信的人；面板本身的 api_key 闸是唯一门槛。
+//   - 不含运行态（暂停 / 禁用 / 分组 / 备注）：那些在 state.json 与面板本机存储里，不跟着
+//     凭证走，所以导出再导入不会把「已被限流的号」一起带过去。
+func (p *Panel) accountsExport(w http.ResponseWriter, r *http.Request) {
+	auths, err := auth.LoadDir(p.cfg.AuthDir)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "读取 auth_dir 失败："+err.Error())
+		return
+	}
+	type exportAcct struct {
+		UID          string `json:"uid"`
+		Nickname     string `json:"nickname,omitempty"`
+		Domain       string `json:"domain,omitempty"`
+		Realm        string `json:"realm,omitempty"`
+		EnterpriseID string `json:"enterprise_id,omitempty"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token,omitempty"`
+		ExpiresAt    int64  `json:"expires_at,omitempty"` // 秒（导入侧按 1e11 分界也认毫秒）
+	}
+	list := make([]exportAcct, 0, len(auths))
+	for _, a := range auths {
+		list = append(list, exportAcct{
+			UID:          a.UID,
+			Nickname:     a.Nickname,
+			Domain:       a.DomainValue(),
+			Realm:        a.Realm(),
+			EnterpriseID: a.EnterpriseID,
+			AccessToken:  a.AccessTokenValue(),
+			RefreshToken: a.RefreshTokenValue(),
+			ExpiresAt:    a.ExpiresAt,
+		})
+	}
+	// 按 uid 排序：导出的是给人对比/存档的文件，顺序得稳定。
+	sort.Slice(list, func(i, j int) bool { return list[i].UID < list[j].UID })
+	w.Header().Set("Content-Disposition", `attachment; filename="wb2api-accounts-`+cst.Now().Format("20060102-1504")+`.json"`)
+	writeJSON(w, http.StatusOK, map[string]any{"accounts": list})
 }

@@ -779,6 +779,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   /* 错误汇总：严重度着色（bad 需处理 / warn 需留意），与日志行同色系 */
   .acc.req tr.lv-e td { color: var(--bad); }
   .acc.req tr.lv-w td { color: var(--warn); }
+  /* 已读（issue #288）：只压低不隐藏，颜色仍能分辨严重度 */
+  .acc.req tr.is-read td { opacity: .45; }
   .acc.req td.sample { max-width: 380px; overflow: hidden; text-overflow: ellipsis; }
   .src-off { color: var(--warn); }
 
@@ -1102,6 +1104,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <button class="xs" type="button" data-gact="resume">组内恢复选号</button>
           </span>
           <button class="xs" id="btnRemarks" title="批量编辑账号备注（本机）与分组（服务端）">备注 / 分组</button>
+          <button class="xs" id="btnAccExport" title="导出全部账号凭证（JSON，含 token，可直接导入另一个实例；不含暂停/禁用/分组这类运行态）">导出账号</button>
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
@@ -2027,6 +2030,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <header>
           <h3>错误汇总 <span class="hint">按账号 × 类型聚合，最该看的排最前</span></h3>
           <span class="grow"></span>
+          <!-- 「已读」只记在本机（issue #288），不清日志环：清空会把还没处理的真故障一起删掉。 -->
+          <button class="xs" id="btnErrRead" title="把当前表里的行记成已读（之后新出现的仍然正常显示）">标为已读</button>
+          <button class="xs" id="btnErrHideRead">隐藏已读：关</button>
           <span class="note" id="errNote">—</span>
         </header>
         <div class="tbl-wrap req-wrap">

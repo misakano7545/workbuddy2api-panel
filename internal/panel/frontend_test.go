@@ -417,21 +417,26 @@ const start = src.indexOf('function renderErrorSummary');
 const end = src.indexOf('function renderRequestMetrics');
 if ([escStart, escEnd, start, end].some(v => v < 0)) throw new Error('error summary region not found');
 const els = {};
-const ctx = { String, Math, $: id => (els[id] = els[id] || { innerHTML: '', textContent: '' }) };
+const store = { 'wb2api.errReadAt': '1700000000' };
+const ctx = { String, Math, localStorage: { getItem: k => (k in store ? store[k] : null) },
+  $: id => (els[id] = els[id] || { innerHTML: '', textContent: '' }) };
 vm.createContext(ctx);
 vm.runInContext("'use strict';\n" + src.slice(escStart, escEnd) + src.slice(start, end) +
   '\nthis.renderErrorSummary=renderErrorSummary; this.esc=esc;', ctx);
 const full = 'WARN: [upstream] chat_stream acct=a(1): upstream 400 model_blocked body={"code":11102,"msg":"model [x] not found","requestId":"req-1"}';
 const short = 'WARN: keepalive a(1): boom';
 ctx.renderErrorSummary({ scanned: 2, updated_at: '12:00:00', rows: [
-  { sev: 'warn', kind: 'k1', count: 1, sample: full.slice(0, 30), sample_full: full },
-  { sev: 'warn', kind: 'k2', count: 1, sample: short },
+  { sev: 'warn', kind: 'k1', count: 1, sample: full.slice(0, 30), sample_full: full, last_unix: 1699999999 },
+  { sev: 'warn', kind: 'k2', count: 1, sample: short, last_unix: 1700000001 },
 ]});
 const body = els.errBody.innerHTML;
 process.stdout.write(JSON.stringify({
   fullInTitle: body.includes('title="' + ctx.esc(full) + '"'),
   cellTruncated: body.includes('">' + ctx.esc(full.slice(0, 30)) + '</td>'),
   fallbackTitle: body.includes('title="' + ctx.esc(short) + '"'),
+  // 已读标记之前的行灰掉，之后的行保持原样；note 里报已读条数（issue #288）
+  readDimmed: body.includes('class="is-read lv-w"') && body.split('is-read').length === 2,
+  notedReadCount: els.errNote.textContent.includes('已读 1'),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "errsum-*.cjs")
 	if err != nil {
@@ -445,7 +450,7 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("error summary title node test failed: %v\n%s", err, out)
 	}
-	const want = `{"fullInTitle":true,"cellTruncated":true,"fallbackTitle":true}`
+	const want = `{"fullInTitle":true,"cellTruncated":true,"fallbackTitle":true,"readDimmed":true,"notedReadCount":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("error summary title=%s want %s", out, want)
 	}

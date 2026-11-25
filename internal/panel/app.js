@@ -1058,6 +1058,28 @@ $('btnActivityAll').onclick = async () => {
   try { await api('activity_all', { method: 'POST' }); toast('活跃上报已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
 };
+
+/* 导出账号（issue #287）：走 fetch+blob 而不是 location.href——设了 api_key 时裸跳转
+   带不上 Authorization 头，只会拿到 401。 */
+$('btnAccExport').onclick = async () => {
+  const btn = $('btnAccExport');
+  btn.disabled = true;
+  try {
+    const h = {};
+    const k = localStorage.getItem(LS_KEY);
+    if (k) h['Authorization'] = 'Bearer ' + k;
+    const r = await fetch('/panel/api/accounts/export', { headers: h });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || ('HTTP ' + r.status)); }
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'wb2api-accounts.json';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    toast('已导出（含 token，注意保管）', 'ok');
+  } catch (e) { toast('导出失败：' + e.message, 'err'); }
+  finally { btn.disabled = false; }
+};
 if ($('accRealmTabs')) {
   $('accRealmTabs').addEventListener('click', ev => {
     const btn = ev.target.closest('button[data-realm]');
@@ -1670,11 +1692,21 @@ async function loadLogs() {
   } catch (e) { /* 概览已提示 */ }
 }
 
-/* 错误汇总（后端 /panel/api/error_summary 已聚合+排序）：只渲染，不在这里再算。 */
+/* 错误汇总（后端 /panel/api/error_summary 已聚合+排序）：只渲染，不在这里再算。
+   「已读」标记存本机 localStorage（issue #288）：按 last_unix 比较而不是 last（HH:MM:SS
+   跨天不可比）。历史错误一直挂在表里时，靠它把「这次新增的」挑出来。 */
 function renderErrorSummary(d) {
   const rows = (d && d.rows) || [];
-  $('errBody').innerHTML = rows.length ? rows.map(r =>
-    '<tr class="' + (r.sev === 'bad' ? 'lv-e' : r.sev === 'warn' ? 'lv-w' : '') + '">' +
+  let readAt = 0, hideRead = false;
+  try {
+    readAt = Number(localStorage.getItem('wb2api.errReadAt')) || 0;
+    hideRead = localStorage.getItem('wb2api.errHideRead') === '1';
+  } catch (e) { /* 隐私模式 / 无 localStorage：一律当未读，全部显示 */ }
+  const isRead = r => readAt > 0 && r.last_unix > 0 && r.last_unix <= readAt;
+  const readN = rows.filter(isRead).length;
+  const show = hideRead ? rows.filter(r => !isRead(r)) : rows;
+  $('errBody').innerHTML = show.length ? show.map(r =>
+    '<tr class="' + (isRead(r) ? 'is-read ' : '') + (r.sev === 'bad' ? 'lv-e' : r.sev === 'warn' ? 'lv-w' : '') + '">' +
     '<td>' + esc(r.account || '—') + '</td>' +
     '<td>' + esc(r.kind) + '</td>' +
     '<td>' + esc(r.code || '—') + '</td>' +
@@ -1683,9 +1715,13 @@ function renderErrorSummary(d) {
     '<td>' + esc(r.last || '—') + '</td>' +
     '<td>' + esc(r.until || '—') + '</td>' +
     '<td class="sample" title="' + esc(r.sample_full || r.sample || '') + '">' + esc(r.sample || '') + '</td></tr>'
-  ).join('') : '<tr><td colspan="8" style="color:var(--ink-3)">窗口内没有 WARN/ERR</td></tr>';
+  ).join('') : '<tr><td colspan="8" style="color:var(--ink-3)">' +
+    (readN ? '没有未读错误（' + readN + ' 条已读被隐藏）' : '窗口内没有 WARN/ERR') + '</td></tr>';
   $('errNote').textContent = d
-    ? '扫描 ' + (d.scanned || 0) + ' 行 · ' + rows.length + ' 类 · 截至 ' + (d.updated_at || '—')
+    ? '扫描 ' + (d.scanned || 0) + ' 行 · ' + rows.length + ' 类' +
+      (readN ? ' · 已读 ' + readN : '') +
+      (hideRead ? ' · 隐藏已读' : '') +
+      ' · 截至 ' + (d.updated_at || '—')
     : '—';
 }
 
@@ -1949,6 +1985,26 @@ $('btnLogPin').onclick = () => {
   logPin = !logPin;
   $('btnLogPin').textContent = '自动滚动：' + (logPin ? '开' : '关');
 };
+
+/* 错误汇总「已读」（issue #288）：标记存本机，不动日志环——日志是排查证据，清空等于
+   把还没处理的故障也删了。标为已读后新出现的行 last_unix 更大，仍然正常显示。 */
+$('btnErrRead').onclick = () => {
+  try { localStorage.setItem('wb2api.errReadAt', String(Math.floor(Date.now() / 1000))); }
+  catch (e) { toast('本机存储不可用，标为已读未生效', 'err'); return; }
+  loadOverview(true);
+};
+$('btnErrHideRead').onclick = () => {
+  let on = false;
+  try {
+    on = localStorage.getItem('wb2api.errHideRead') === '1';
+    localStorage.setItem('wb2api.errHideRead', on ? '0' : '1');
+  } catch (e) { /* 隐私模式：翻转无效，下次渲染仍读不到标记 */ }
+  $('btnErrHideRead').textContent = '隐藏已读：' + (on ? '关' : '开');
+  loadOverview(true);
+};
+try {
+  if (localStorage.getItem('wb2api.errHideRead') === '1') $('btnErrHideRead').textContent = '隐藏已读：开';
+} catch (e) { /* 隐私模式 */ }
 
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
