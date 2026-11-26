@@ -138,7 +138,9 @@ func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(raw) > 8<<20 {
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "invalid_request", "request body exceeds 8 MiB")
+		// code 与全局 readBody 的 413 对齐（同一事实两种写法会让按 payload_too_large
+		// 写分支的客户端漏掉这一条）；message 保留「8 MiB」这句，客户端才知道坎在哪。
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body exceeds 8 MiB")
 		return
 	}
 	var req embeddingsRequest

@@ -109,6 +109,13 @@ func TestEmbeddingsRejectsOversizedBody(t *testing.T) {
 	if rec.Code != 413 || len(f.paths) != 0 {
 		t.Fatalf("status=%d upstream calls=%d", rec.Code, len(f.paths))
 	}
+	var got struct {
+		Error struct{ Code string } `json:"error"`
+	}
+	if json.Unmarshal(rec.Body.Bytes(), &got) != nil || got.Error.Code != "payload_too_large" {
+		t.Fatalf("code=%q want payload_too_large（与全局 readBody 的 413 同口径）: %s",
+			got.Error.Code, rec.Body.String())
+	}
 }
 
 func TestEmbeddingsPreservesUpstreamIndices(t *testing.T) {
