@@ -1078,6 +1078,67 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
+// 到期分布每行是 <details>：summary 里仍是色条 + 该日合计，展开后逐段给出
+// 账号 / 来源 / 金额 / 到期时间（issue #294：段宽接近时肉眼分不出 27 和 30）。
+func TestAppJSExpiryRowsExpandToAmounts(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry rows test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const PK_ACCOUNT_COLORS');
+const end = src.indexOf('function pkDetailCompare');
+if (start < 0 || end < 0) throw new Error('expiry render functions not found');
+const host = { innerHTML: '' };
+const ctx = {
+  Date, Math, Number, String, Map, Array, Object, isFinite,
+  $: () => host,
+  esc: s => String(s),
+  fmtTok: n => String(n),
+};
+vm.createContext(ctx);
+vm.runInContext("'use strict';\n" + src.slice(start, end) +
+  '\nthis.renderExpiryDistribution = renderExpiryDistribution;', ctx);
+const day = 86400000, now = 100000;
+ctx.renderExpiryDistribution([
+  { uid: 'a', nickname: 'acct-a', remain: 100, packages: [
+    { name: 'soon-a', remain: 30, expires_at: now + day },
+    { name: 'later', remain: 70, expires_at: now + 7 * day },
+  ] },
+  { uid: 'b', nickname: 'acct-b', remain: 55, packages: [
+    { name: 'soon-b', remain: 20, expires_at: now + day },
+  ] },
+], now);
+const html = host.innerHTML;
+process.stdout.write(JSON.stringify({
+  rows: (html.match(/<details class="pk-expiry-row">/g) || []).length,
+  summaries: (html.match(/<\/summary>/g) || []).length,
+  details: (html.match(/class="pk-expiry-detail"/g) || []).length,
+  lines: (html.match(/<div><i style="background:[^"]+"><\/i><b>/g) || []).length,
+  amounts: ['<b>30</b>', '<b>20</b>', '<b>70</b>'].filter(s => html.includes(s)).length,
+  names: ['acct-a', 'acct-b'].filter(s => html.includes(s)).length,
+  totalStillThere: html.includes('<b>50</b>') && html.includes('<b>70</b>'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expiry-rows-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry rows node test failed: %v\n%s", err, out)
+	}
+	const want = `{"rows":2,"summaries":2,"details":2,"lines":3,"amounts":3,"names":2,"totalStillThere":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("expiry rows=%s want %s", out, want)
+	}
+}
+
 func TestLogoutWired(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()
