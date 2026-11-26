@@ -29,6 +29,25 @@ func TestIdentityRewritten(t *testing.T) {
 	}
 }
 
+// TraeCode 自述句（hub 2026-11-24 本机 CN 号池实测）：上游按
+// 「interactive agent in TraeCode」连续短语判非官方渠道（400 11-128）。
+// 只删 in TraeCode 这一段，句子其余部分与行为指令原样保留；单独出现的
+// TraeCode / Trae IDE / Cursor 等词不在指纹内，不得误伤。
+func TestTraeCodeIntroRewritten(t *testing.T) {
+	in := "You are an interactive agent in TraeCode that helps the USER with coding tasks."
+	out := sanitizeText(in)
+	if strings.Contains(out, "in TraeCode") {
+		t.Errorf("TraeCode intro not rewritten: %q", out)
+	}
+	if !strings.Contains(out, "You are an interactive agent that helps the USER with coding tasks.") {
+		t.Errorf("sentence tail should survive: %q", out)
+	}
+	// 散词不在指纹内：单独出现不动。
+	if out := sanitizeText("TraeCode is a code editor."); strings.Contains(out, "\u200b") || out != "TraeCode is a code editor." {
+		t.Errorf("standalone mention should be untouched: %q", out)
+	}
+}
+
 // 桌面版（claude-desktop-3p / Agent SDK）的身份句以逗号接后继内容，结尾不是句号。
 // 回归用例：匹配串曾带结尾句号，导致该形态漏网、指纹原样发上游 → 400 code=11128。
 func TestIdentityDesktopVariantRewritten(t *testing.T) {

@@ -16,6 +16,7 @@ var sanitizeFeatures = []string{
 	"x-anthropic-billing-header", // header 键值段键名
 	"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
 	"You are Claude Code",        // 身份句（截断前缀即可命中）
+	"You are an interactive agent in TraeCode", // Trae 自述句（同上，前缀即可命中）
 	"Main branch (",              // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
@@ -182,6 +183,16 @@ var sanitizeRewrites = [][2]string{
 		// 实测需整句同时出现）。give→provide 一词之差即可绕过，语义不变。
 		"To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
 		"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+	},
+	{
+		// TraeCode 自述首句（2026-11-24 workbuddy2api-hub 本机 CN 号池实测）：
+		//   You are an interactive agent in TraeCode that helps the USER ...
+		// 上游按「interactive agent in TraeCode」这一连续短语判非官方渠道，命中即
+		// 400 11-128。逐条二分：单独 TraeCode / in Trae IDE / in Cursor 均 200；只删掉
+		// in TraeCode 后，真实 23KB system（21 个工具）整体 200。故只删这一段，
+		// 句子其余部分与行为指令原样保留。
+		"You are an interactive agent in TraeCode",
+		"You are an interactive agent",
 	},
 	{
 		// 上游反探测：只要请求体里出现裸数字 11128 就整单拦截（与该数字的上下文无关——
