@@ -106,7 +106,10 @@ func (k ErrKind) String() string {
 type Error struct {
 	Kind   ErrKind
 	Status int
-	Msg    string
+	// Code 上游业务信封里的 code（"code":11353 之类）。目前只有 embeddings 链路填 ——
+	// 面板日志要能分清「输入过大(11353)」和「坏音频(15053)」，而诊断只记码不记正文。
+	Code int
+	Msg  string
 	// RetryAfter 上游明示的等待时长（Retry-After 秒 / retry-after-ms /
 	// x-ratelimit-reset 头解析，见 ParseRetryAfter）。零值 = 上游未明示，
 	// 冷却时长回落调用方计算值。挂载点选在 Error 信封：Kind 决定「罚不罚」，

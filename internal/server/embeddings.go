@@ -226,8 +226,14 @@ func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
 				if status < 400 || status >= 500 {
 					status = http.StatusBadRequest
 				}
-				log.Printf("embeddings realm=%s: 请求级错误 kind=%v，不再换号", realm, ue.Kind)
-				writeOpenAIError(w, status, "upstream_error", ue.Msg)
+				// 已定性成请求级，错误码就不该还叫 upstream_error（语义像 5xx，排查时看懵）；
+				// 11353 = 单条输入超 bge-m3 的 8192 token，是 embeddings 唯一的超限成因。
+				code := "upstream_error"
+				if ue.Code == 11353 {
+					code = "input_too_large"
+				}
+				log.Printf("embeddings realm=%s: 请求级错误 kind=%v code=%d，不再换号", realm, ue.Kind, ue.Code)
+				writeOpenAIError(w, status, code, ue.Msg)
 				return
 			}
 		}

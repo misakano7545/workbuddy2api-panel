@@ -80,7 +80,7 @@ func (c *Client) Embeddings(ctx context.Context, a *auth.Auth, model string, inp
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		ue := &Error{Kind: kind, Status: resp.StatusCode, Code: env.Code, Msg: truncate(string(raw), 200)}
 		if d, ok := ParseRetryAfter(resp.Header); ok {
 			ue.RetryAfter = d
 		} else if kind == ErrUpstreamBusy {
