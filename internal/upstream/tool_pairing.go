@@ -75,7 +75,14 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 			if role == "tool" {
 				id, _ := mm["tool_call_id"].(string)
 				if !want[id] {
-					break
+					// 孤儿结果（对不上本批任何调用）：暂存待后移，**不能 break** ——
+					// 它后面可能还有本批的合法结果，break 会让那些结果永久停在原位、
+					// 中间夹着插入物，照样 11148。孤儿本身稍后由
+					// cleanupOrphanToolCalls 整条删掉，这里只保证不遮挡后续结果。
+					between = append(between, messages[i])
+					sawNonTool = true
+					i++
+					continue
 				}
 				results = append(results, messages[i])
 				if sawNonTool {
@@ -209,6 +216,77 @@ func reorderEarlyToolResults(messages []any) ([]any, bool) {
 	return out, true
 }
 
+// mergeAdjacentToolCalls 把「前一条带 tool_calls 的 assistant」与紧随其后的 assistant
+// 合并成一条（正文拼接、tool_calls 并批）。中间没有 tool 结果的相邻 assistant 在 wire
+// 上就是同一轮：拆开会让前一批 tool_calls 变成「无结果调用」——上游判 11148。
+//
+// 真实成因（hub #26 同款）：Responses 回放里 call / output 交错出现时，正文消息会把
+// 前一批调用提前 flush 成独立一条，后续调用落进正文那条，出站就是相邻两批。
+// 纯文本相邻回复（前一条无 tool_calls）不动——那是两轮真实对话，合并反而制造
+// 「连续 assistant」的异常形状。
+//
+// 只合并字符串（或缺省）正文：content 是结构化 parts 时形状未知，宁可漏修也不改形状。
+func mergeAdjacentToolCalls(messages []any) ([]any, bool) {
+	if len(messages) < 2 {
+		return messages, false
+	}
+	out := make([]any, 0, len(messages))
+	changed := false
+	for _, raw := range messages {
+		m, ok := raw.(map[string]any)
+		if !ok || m["role"] != "assistant" || len(out) == 0 {
+			out = append(out, raw)
+			continue
+		}
+		prev, ok := out[len(out)-1].(map[string]any)
+		if !ok {
+			out = append(out, raw)
+			continue
+		}
+		ptc, _ := prev["tool_calls"].([]any)
+		tc, _ := m["tool_calls"].([]any)
+		if len(ptc) == 0 {
+			out = append(out, raw)
+			continue
+		}
+		// 正文：字符串或缺省才并；双方都空则只并 tool_calls。
+		pc, pOK := prev["content"].(string)
+		cc, cOK := m["content"].(string)
+		if (!pOK && prev["content"] != nil) || (!cOK && m["content"] != nil) {
+			out = append(out, raw)
+			continue
+		}
+		merged := map[string]any{}
+		for k, v := range prev {
+			merged[k] = v
+		}
+		if pc != "" || cc != "" {
+			merged["content"] = pc + cc
+		} else {
+			delete(merged, "content")
+		}
+		merged["tool_calls"] = append(append([]any{}, ptc...), tc...)
+		var rcs []string
+		if pr, ok := prev["reasoning_content"].(string); ok && pr != "" {
+			rcs = append(rcs, pr)
+		}
+		if cr, ok := m["reasoning_content"].(string); ok && cr != "" {
+			rcs = append(rcs, cr)
+		}
+		if len(rcs) > 0 {
+			merged["reasoning_content"] = strings.Join(rcs, "\n")
+		} else {
+			delete(merged, "reasoning_content")
+		}
+		out[len(out)-1] = merged
+		changed = true
+	}
+	if !changed {
+		return messages, false
+	}
+	return out, true
+}
+
 // declaredToolCallIDs 返回一条 assistant 消息 tool_calls 里的非空 id（其他消息为 nil）。
 func declaredToolCallIDs(raw any) []string {
 	m, ok := raw.(map[string]any)
@@ -335,8 +413,10 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 		}
 		msg["tool_calls"] = keptCalls
 	}
-	// 2) role:tool 结果：只有对应 tool_call 被保留才保留；孤儿结果整条删除。
+	// 2) role:tool 结果：只有对应 tool_call 被保留才保留；孤儿结果整条删除；
+	// 同一 call_id 的重复结果只留第一条（上游一个调用只认一条结果，多出来的判 11148）。
 	kept := make([]any, 0, len(messages))
+	seenResult := map[string]bool{}
 	for _, m := range messages {
 		msg, ok := m.(map[string]any)
 		if !ok {
@@ -345,10 +425,11 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 		}
 		if role, _ := msg["role"].(string); role == "tool" {
 			id, _ := msg["tool_call_id"].(string)
-			if !keepCalls[id] {
+			if !keepCalls[id] || seenResult[id] {
 				changed = true
 				continue
 			}
+			seenResult[id] = true
 		}
 		kept = append(kept, m)
 	}
