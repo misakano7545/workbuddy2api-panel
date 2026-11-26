@@ -2088,8 +2088,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.toolCalls = 1
 			}
 			if len(declaredTools) > 0 && !stats.SawToolCalls() && stats.FinishReason() == "stop" {
-				log.Printf("INFO: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (本轮无工具调用，正常收尾)",
-					logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools))
+				// 带上用量：tok≈think 时正文几乎是空的（模型想完就收，客户端看到「说到一半」），
+				// tok 远大于 think 才是真的答完了。没有这两个数，事后无法区分这两类收尾。
+				ct, hasCT := stats.Tokens()
+				th, hasTh := stats.Thinking()
+				log.Printf("INFO: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (tok=%d think=%d hasTok=%v hasThink=%v 本轮无工具调用，正常收尾)",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools), ct, th, hasCT, hasTh)
 			}
 			// 正文截断留痕：finish_reason=length 表示上游在输出额度处切断了这一轮。
 			// 此前 reqlog 不记 finish_reason、日志也没有任何 length 行，「回答写到一半
