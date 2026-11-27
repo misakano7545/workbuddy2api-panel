@@ -1071,6 +1071,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.writeBodyError(w, berr, false)
 		return
 	}
+	// 入站必须是 JSON。上游对畸形体只回「invalid character 'P' looking for beginning of
+	// value」+ code 11101——从这句话看不出是谁把 body 发坏的，而网关此前会原样转发
+	// （2026-11-27 真机实测：body 以 "POST " 开头也照转）。这里提前拦住，并把开头片段
+	// 回给客户端：报的人一眼就能看到自己的客户端到底发了什么，不用等服务端抓包。
+	if trimmed := bytes.TrimSpace(bytes.TrimPrefix(body, []byte("\xef\xbb\xbf"))); !json.Valid(trimmed) {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+			fmt.Sprintf("request body is not valid JSON; it starts with %q", logfmt.Truncate(string(trimmed), 48)))
+		return
+	}
 	var peek struct {
 		Stream bool   `json:"stream"`
 		Model  string `json:"model"`

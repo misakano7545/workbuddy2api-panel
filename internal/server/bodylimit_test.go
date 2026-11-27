@@ -139,3 +139,70 @@ func TestCountTokensOversizeBodyIsAnthropic(t *testing.T) {
 		t.Errorf("形状不对: %+v (%s)", resp, rec.Body)
 	}
 }
+
+// TestChatNonJSONBodyRejectedLocally 入站 body 不是 JSON 时网关自己拒绝，不再原样转发。
+//
+// 此前这条路是透传：客户端发什么上游就收什么，于是 #295 现场只拿到上游的
+// 「invalid character 'P' looking for beginning of value」（code 11101）——那句话说的
+// 是「收到的 body 第一个字节是 P」，却看不出是谁发坏的。这里钉住两件事：不打上游
+// （省一次真扣积分）、回包带上开头片段（报的人直接能认出自己的客户端发了什么）。
+func TestChatNonJSONBodyRejectedLocally(t *testing.T) {
+	called := false
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		called = true
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "j1", AccessToken: "at-j1", ExpiresAt: 9999999999}),
+		Upstream: up,
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader("POST /v2/chat HTTP/1.1\nHost: example\n")))
+
+	if rec.Code != 400 {
+		t.Fatalf("code=%d want 400, body=%s", rec.Code, rec.Body)
+	}
+	if called {
+		t.Error("畸形 body 不该打到上游（会真花积分）")
+	}
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("400 body 不是 OpenAI 错误形状: %v (%s)", err, rec.Body)
+	}
+	if resp.Error.Code != "invalid_request" {
+		t.Errorf("error.code=%q want invalid_request", resp.Error.Code)
+	}
+	if !strings.Contains(resp.Error.Message, "POST /v2/chat") {
+		t.Errorf("message 要回显开头片段（否则定位不到是谁发坏的）: %q", resp.Error.Message)
+	}
+}
+
+// TestChatValidJSONStillForwarded 守住上面那道闸的边界：BOM + 前后空白的合法 JSON
+// 照旧转发（有些客户端会带 BOM，误判等于把所有请求打回去）。
+func TestChatValidJSONStillForwarded(t *testing.T) {
+	called := false
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		called = true
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "j2", AccessToken: "at-j2", ExpiresAt: 9999999999}),
+		Upstream: up,
+	})
+	body := "\xef\xbb\xbf\n{\"model\":\"glm-5.2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}\n"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+
+	if rec.Code != 200 {
+		t.Fatalf("code=%d want 200, body=%s", rec.Code, rec.Body)
+	}
+	if !called {
+		t.Error("合法 JSON 应照旧转发上游")
+	}
+}
