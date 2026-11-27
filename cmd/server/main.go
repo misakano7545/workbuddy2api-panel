@@ -603,6 +603,7 @@ func main() {
 		HeadKeepalive: cfg.HeadKeepaliveDur,
 		// 6020/6021 渠道排队：网关内先等一轮（features.busy_retry / busy_wait_seconds）。
 		BusyRetry:   cfg.Features.BusyRetry,
+		SystemTail:  cfg.Features.SystemTail,
 		BusyWaitMax: time.Duration(cfg.Features.BusyWaitSeconds) * time.Second,
 	})
 

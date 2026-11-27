@@ -222,3 +222,75 @@ func TestLoadFileMissingFailsFast(t *testing.T) {
 		t.Fatal("missing file should return error (fail fast)")
 	}
 }
+
+// system 后置：头部的 system 块整体挪到尾部，头部换固定桩。
+// 断言的是「前缀可复用的结构」而不是文案：两轮请求的 messages 前 N 条必须逐字相同，
+// 这正是缓存命中的前提（实测 99.3% vs 头部变化 0%）。
+func TestSystemToTailMovesLeadBlock(t *testing.T) {
+	turn1 := `{"model":"cn:x","messages":[` +
+		`{"role":"system","content":"你是助手。cwd=/a，git clean，10:00"},` +
+		`{"role":"user","content":"记住：做缓存测试"}]}`
+	got, ok := SystemToTail([]byte(turn1))
+	if !ok {
+		t.Fatal("应改写")
+	}
+	if roles := systemRoles(t, got); strings.Join(roles, ",") != "system,user,system" {
+		t.Fatalf("角色序列应为 system,user,system，实际 %v", roles)
+	}
+	// 原文一字不丢，且落在最后一条。
+	var obj struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(got, &obj); err != nil {
+		t.Fatalf("坏 JSON: %v", err)
+	}
+	if obj.Messages[0].Content != SystemTailStub {
+		t.Fatalf("头部应是固定桩，实际 %q", obj.Messages[0].Content)
+	}
+	if !strings.Contains(obj.Messages[2].Content, "cwd=/a") {
+		t.Fatalf("原文应原样落到尾部，实际 %q", obj.Messages[2].Content)
+	}
+
+	// 第二轮：历史追加一轮、system 换了内容 —— 前缀（桩 + 历史）必须仍逐字相同。
+	turn2 := `{"model":"cn:x","messages":[` +
+		`{"role":"system","content":"你是助手。cwd=/a，git 2 files changed，10:01"},` +
+		`{"role":"user","content":"记住：做缓存测试"},` +
+		`{"role":"assistant","content":"好的"},` +
+		`{"role":"user","content":"继续"}]}`
+	got2, ok := SystemToTail([]byte(turn2))
+	if !ok {
+		t.Fatal("第二轮也应改写")
+	}
+	var obj2 struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(got2, &obj2); err != nil {
+		t.Fatalf("坏 JSON: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if obj.Messages[i].Content != obj2.Messages[i].Content {
+			t.Fatalf("第 %d 条应逐字相同（缓存前缀），%q vs %q", i, obj.Messages[i].Content, obj2.Messages[i].Content)
+		}
+	}
+}
+
+// 结构不安全时一律不动：没有前导 system、只有 system 一条、坏 JSON。
+func TestSystemToTailGuards(t *testing.T) {
+	cases := map[string]string{
+		"首条不是 system": `{"messages":[{"role":"user","content":"hi"}]}`,
+		"只有一条 system": `{"messages":[{"role":"system","content":"s"}]}`,
+		"没有 messages":  `{"model":"cn:x"}`,
+		"坏 JSON":       `{`,
+	}
+	for name, body := range cases {
+		if _, ok := SystemToTail([]byte(body)); ok {
+			t.Fatalf("%s：不该改写", name)
+		}
+	}
+}

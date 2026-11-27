@@ -183,6 +183,67 @@ func splitSentences(text string) []string {
 	return out
 }
 
+// SystemTailStub 是「system 后置」时留在消息头部的固定桩。
+//
+// 必须是常量：这个技巧的全部收益来自「每轮前缀逐字节相同」，桩一变前功尽弃。
+// 内容取最中性的一句——真正的指令全部在末尾那条 system 里。
+const SystemTailStub = "你是助手。"
+
+// SystemToTail 把开头连续的 system/developer 块整体挪到消息末尾，头部换成固定桩。
+//
+// 解决的是「客户端每轮都改 system」造成的缓存全失：Claude Code 这类客户端把工作目录 /
+// git 状态 / 当天日期写进 system，system 在头部时前缀从第 0 个 token 就分叉，长历史一条
+// 都命中不了（真号实测 480K 上下文的请求只剩工具定义那 26~28K 命中）。
+//
+// 真号实测（cn 域，31.5K 前缀）：
+//   - 头部 system 每轮变 → 命中 0.0%（31,558 token 全部按未命中计费）；
+//   - 尾部 system 每轮变 → 命中 99.3% / 99.2%，只有新加的那 200 来 token 未命中；
+//   - 上游确实遵守位于历史之后的 system：头部说「只输出数字」，尾部 system 改口
+//     「必须用法语」，回复是 `sept`。
+//
+// 返回 false 的四种情况（结构不安全就不动）：body 解析不了、messages 少于两条、
+// 首条不是 system/developer、空前导块。
+//
+// 限制：只在 cn 域用（global 域没有实测覆盖，见调用点）。
+func SystemToTail(body []byte) ([]byte, bool) {
+	if len(body) == 0 {
+		return body, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body, false
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) < 2 {
+		// 只有一条 system（无对话）：挪过去等于没挪，白改一次字节。
+		return body, false
+	}
+	lead := 0
+	for _, m := range msgs {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			break
+		}
+		if role, _ := mm["role"].(string); role != "system" && role != "developer" {
+			break
+		}
+		lead++
+	}
+	if lead == 0 || lead == len(msgs) {
+		return body, false
+	}
+	rewritten := make([]any, 0, len(msgs)+1)
+	rewritten = append(rewritten, map[string]any{"role": "system", "content": SystemTailStub})
+	rewritten = append(rewritten, msgs[lead:]...)
+	rewritten = append(rewritten, msgs[:lead]...)
+	obj["messages"] = rewritten
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
 // MoveSystemToUser 把 system/developer 的**原文**搬进首条 user 消息前部，system 换成中性
 // 提示词，作为 11-128 的**后一层**抢救（前一层是 SplitSystemMessages：留在 system 更好，
 // 拆不动才搬家）。返回 false = 这条请求结构不安全，别动。

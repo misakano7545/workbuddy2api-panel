@@ -354,6 +354,18 @@ type Config struct {
 		TTSEnabled bool `json:"tts_enabled"`
 		ASREnabled bool `json:"asr_enabled"`
 
+		// SystemTail 把开头的 system 挪到消息末尾、头部留固定桩（默认 false，仅 cn 域生效）。
+		//
+		// 为什么需要：客户端每轮都改 system 时（Claude Code 把工作目录 / git 状态 / 日期写进
+		// system），system 在头部 ⇒ 前缀从第 0 个 token 就分叉，几十万 token 的长历史一条都
+		// 命中不了，只剩工具定义那段（26~28K）能命中，看起来就是「命中率 5%」（issue #293）。
+		// 挪到末尾后前缀 = 桩 + 历史（追加式），真号实测 31.5K 前缀：头部每轮变 0.0% 命中，
+		// 尾部每轮变 99.3% / 99.2%。上游确实遵守位于历史之后的 system（实测改口即生效）。
+		//
+		// 为什么默认关：system 在尾部属于「非官方形态」，global 域没测过；而且对 system
+		// 本来稳定的客户端是负收益（system 从「命中」变成每轮重算）。组装期字段，改后需重启。
+		SystemTail bool `json:"system_tail"`
+
 		// NarrationEnabled 预告式收尾救援的总开关（「……：」「我将…」这类停在半句上就
 		// 结束的回复，网关补发一次续写），缺省 true。
 		//
