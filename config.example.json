@@ -50,7 +50,7 @@
     "activity_hours": [10],
     "web_activity_enabled": false,
     "keepalive_hours": [22],
-    "keepalive_refresh_window": "168h",
+    "keepalive_refresh_window": "720h",
     "growth_hours": [11],
     "checkin_enabled": true,
     "travel_enabled": true,

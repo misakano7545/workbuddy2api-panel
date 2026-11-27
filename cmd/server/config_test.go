@@ -736,8 +736,8 @@ func TestKeepaliveRefreshWindow(t *testing.T) {
 	if err := c.normalize(); err != nil {
 		t.Fatal(err)
 	}
-	if c.Schedule.KeepaliveRefreshWindow != "168h" || c.KeepaliveRefreshWindowDur != 168*time.Hour {
-		t.Fatalf("default keepalive window=%q/%v want 168h", c.Schedule.KeepaliveRefreshWindow, c.KeepaliveRefreshWindowDur)
+	if c.Schedule.KeepaliveRefreshWindow != "720h" || c.KeepaliveRefreshWindowDur != 720*time.Hour {
+		t.Fatalf("default keepalive window=%q/%v want 720h", c.Schedule.KeepaliveRefreshWindow, c.KeepaliveRefreshWindowDur)
 	}
 
 	dir := t.TempDir()
@@ -761,8 +761,8 @@ func TestKeepaliveRefreshWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("缺键不应报错: %v", err)
 	}
-	if c3.KeepaliveRefreshWindowDur != 168*time.Hour {
-		t.Errorf("缺键窗口=%v want 168h", c3.KeepaliveRefreshWindowDur)
+	if c3.KeepaliveRefreshWindowDur != 720*time.Hour {
+		t.Errorf("缺键窗口=%v want 720h", c3.KeepaliveRefreshWindowDur)
 	}
 
 	for _, raw := range []string{"0s", "-1h", "not-a-duration"} {

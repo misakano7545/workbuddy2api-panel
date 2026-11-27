@@ -145,9 +145,16 @@ type Config struct {
 		TravelHours    []int `json:"travel_hours"`    // [9,21]
 		ActivityHours  []int `json:"activity_hours"`  // [10]
 		KeepaliveHours []int `json:"keepalive_hours"` // [22]
-		// KeepaliveRefreshWindow 周期 token 保活的临期窗口（如 "168h"=7 天）：排程到点
+		// KeepaliveRefreshWindow 周期 token 保活的临期窗口（如 "720h"=30 天）：排程到点
 		// 的保活只刷新剩余有效期 <= 窗口（或已过期/无 expiry）的凭证；面板手动
-		// 「全部保活」始终全量，不受影响。空 = 默认 "168h"；非法或 <=0 的值 fail fast。
+		// 「全部保活」始终全量，不受影响。空 = 默认 "720h"；非法或 <=0 的值 fail fast。
+		//
+		// 为什么默认是 720h 而不是早期配置示例里的 168h（20261127 issue #296）：
+		// access token 寿命 28 天，而 refresh token 的服务端寿命可能比它更短（实测
+		// 一批号不到 12 天就没法 refresh 了）。窗口 7 天意味着刚登录的号前 21 天
+		// 一次都不会去试 refresh——等它进窗口时才知道早死了，届时只能重登。720h
+		// 覆盖整个 AT 寿命，等价于「每轮保活都刷一遍」；代价是 RT 轮换更频繁、每轮
+		// 请求量=池大小，号多且只想省请求的部署可以显式调小。
 		KeepaliveRefreshWindow string `json:"keepalive_refresh_window"`
 		GrowthHours            []int  `json:"growth_hours"` // [11] 成长任务队列（任务中心待办）自动执行
 		// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/GrowthEnabled 显式禁用开关（缺省 true）。
@@ -628,7 +635,7 @@ type Config struct {
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	TaskSweepInterval      time.Duration `json:"-"` // 0 = 不启动（task_sweep_enabled=false）
 	ExpiringSoonDur        time.Duration `json:"-"`
-	// KeepaliveRefreshWindowDur 解析后的周期保活临期窗口；空回落 168h，<=0 报错。
+	// KeepaliveRefreshWindowDur 解析后的周期保活临期窗口；空回落 720h，<=0 报错。
 	KeepaliveRefreshWindowDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
@@ -679,7 +686,7 @@ func Default() *Config {
 	c.Schedule.ActivityHours = []int{10}
 	c.Schedule.KeepaliveHours = []int{22}
 	// 周期保活临期窗口默认 7 天：排程保活只刷新一周内到期的凭证，其余账号不动。
-	c.Schedule.KeepaliveRefreshWindow = "168h"
+	c.Schedule.KeepaliveRefreshWindow = "720h"
 	c.Schedule.GrowthHours = []int{11}
 	// 开关「缺省 true」靠这几行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
 	// 键缺席（或为 null）时字段原样保留 true，只有显式 false 才关。
@@ -1326,17 +1333,17 @@ func (c *Config) normalize() error {
 	if len(c.Schedule.KeepaliveHours) == 0 {
 		c.Schedule.KeepaliveHours = []int{22}
 	}
-	// 周期保活临期窗口：空回落默认 168h（Default 已置，兜底显式 ""）；非法值
+	// 周期保活临期窗口：空回落默认 720h（Default 已置，兜底显式 ""）；非法值
 	// fail fast（拼写错误静默吞掉等于窗口变 0 → 全量刷新，违背本字段意图）；
 	// <=0 无合理语义（0/负值想全量应直接删键），报错。
 	if c.Schedule.KeepaliveRefreshWindow == "" {
-		c.Schedule.KeepaliveRefreshWindow = "168h"
+		c.Schedule.KeepaliveRefreshWindow = "720h"
 	}
 	if c.KeepaliveRefreshWindowDur, err = time.ParseDuration(c.Schedule.KeepaliveRefreshWindow); err != nil {
 		return fmt.Errorf("schedule.keepalive_refresh_window: %w", err)
 	}
 	if c.KeepaliveRefreshWindowDur <= 0 {
-		return fmt.Errorf("schedule.keepalive_refresh_window: %q 必须为正时长（如 168h）", c.Schedule.KeepaliveRefreshWindow)
+		return fmt.Errorf("schedule.keepalive_refresh_window: %q 必须为正时长（如 720h）", c.Schedule.KeepaliveRefreshWindow)
 	}
 	if len(c.Schedule.GrowthHours) == 0 {
 		c.Schedule.GrowthHours = []int{11}
