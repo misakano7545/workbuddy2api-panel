@@ -96,6 +96,13 @@ type Status struct {
 	// 此前只落 state.json 不透出：上游批量注销会话后号已不可用，面板仍显示「可用」，
 	// 要等每日保活连败满阈（≈3 天）才转 disabled（issue #215 复盘）。
 	SessionDeadFails int `json:"session_dead_fails"`
+	// RenewDead 上游已判死 refresh token、access token 仍有效（chat 还能用）。
+	// 与 session_dead_fails 的差别是「还有救没救」：那个还能靠重登/重试恢复，
+	// 这个从置位起就只剩 access token 的自然寿命，到期即断服（issue #296）。
+	RenewDead bool `json:"renew_dead,omitempty"`
+	// AccessExpires access token 到期时刻（零值 = 未知）。RenewDead 时它就是断服时刻，
+	// 面板据此倒计时——「还剩 15 天且救不回来」与「还剩 15 天且能自动续」是两种决策。
+	AccessExpires time.Time `json:"access_expires,omitempty"`
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中
 	// 的到期压力。CreditsExpiring 是配置窗口内的剩余积分；后两者是全部未来到期批次中
 	// 最早的一批及其剩余量，供 WorkDaddy 同口径的“最早到期优先”路由使用。
@@ -322,6 +329,11 @@ type entry struct {
 	// 重学（再吃 2 次失败才禁用，期间每次都白打一轮上游）；清零点（refresh/chat 成功、
 	// 手工复活）同样落盘，重启后不残留旧计数。
 	sessionDeadFails int
+	// renewDead 上游已判死 refresh token、但 access token 还没过期（chat 仍 200）。
+	// 与 sessionDeadFails 正交：那个是「AT 也废了、离禁用还差几次」，这个是「还能用但
+	// 再也续不上」——access token 到期即断服，期间没有任何自动续期路径（issue #296）。
+	// 运行态不持久化：重启后下一轮余额刷新（5m）会重新置位，为此改 state 结构不值。
+	renewDead bool
 	// consecutiveFails 连续失败计数（连败降权，issue #114）——「不知道原因的兜底」：
 	// 覆盖 ErrClient（未知 4xx）与传输层失败（连不上上游）这类 applyErrorPolicy
 	// default 分支不罚号的形态。与 sessionDeadFails 同构但独立计数：12153 的终态

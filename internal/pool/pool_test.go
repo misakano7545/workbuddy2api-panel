@@ -2358,3 +2358,45 @@ func TestDisabledAccountReportsZeroCredits(t *testing.T) {
 		t.Errorf("暂停号应保留真实积分，实际 %d", st.Credits)
 	}
 }
+
+// TestStatusExposesRenewDead 钉住「不可续期」这一态的透出（issue #296）。
+//
+// 上游今天批量清 refresh session 之后，我们自己的号池也有 25/29 个号落入这个态：
+// refresh 恒 12153、access token 还没过期、chat 照样 200。此前它和普通「可用」在面板上
+// 长得一模一样，而两者的处置完全不同（一个等一等会自己好，一个只会走到某天断服）。
+func TestStatusExposesRenewDead(t *testing.T) {
+	p := New("")
+	exp := time.Now().Add(15 * 24 * time.Hour).Truncate(time.Second)
+	p.Add(&auth.Auth{UID: "u1", ExpiresAt: exp.Unix()})
+	if st, _ := p.Status("u1"); st.RenewDead {
+		t.Fatal("未标记前不该是 renew_dead")
+	}
+	p.MarkRenewDead("u1")
+	st, ok := p.Status("u1")
+	if !ok || !st.RenewDead {
+		t.Fatalf("MarkRenewDead 后 RenewDead=%v want true", st.RenewDead)
+	}
+	if !st.AccessExpires.Equal(exp) {
+		t.Errorf("AccessExpires=%v want %v（面板倒计时要靠它）", st.AccessExpires, exp)
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := wire["renew_dead"]; !ok || v != true {
+		t.Fatalf("JSON 字段 renew_dead 缺失或值不对: %s", b)
+	}
+	if _, ok := wire["access_expires"]; !ok {
+		t.Fatalf("JSON 字段 access_expires 缺失: %s", b)
+	}
+	// refresh 成功（ClearSessionDead）= 续期链路又通了，标记必须自己撤掉，
+	// 否则重登后的号会永远挂着「不可续期」的假警报。
+	p.ClearSessionDead("u1")
+	if st, _ := p.Status("u1"); st.RenewDead {
+		t.Error("ClearSessionDead 后 RenewDead 仍为 true")
+	}
+}

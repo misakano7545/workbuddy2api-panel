@@ -1617,6 +1617,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// （issue #83 生产实测：refresh 恒 12153 的号 chat 仍 200）。
 				// 这种号不罚、也不换号——直接拿现有 AT 发这一次请求。
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && upstream.SessionDeadButUsable(acct) {
+					h.cfg.Pool.MarkRenewDead(acct.UID)
 					log.Printf("INFO: [server] 账号 %s refresh token 已失效但 access token 仍有效，用现有 token 继续",
 						logfmt.Label(acct.UID, acct.Nickname))
 				} else {

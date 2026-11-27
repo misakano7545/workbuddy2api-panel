@@ -627,6 +627,17 @@ function renderAccounts(list) {
         '<div style="margin-top:2px;opacity:.85">' + esc(s.reason) + '</div></div>'
       : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now(), s.realm);
+    // 不可续期（issue #296）：上游已判死 refresh token，access token 一到期就再没有
+    // 自动续期路径。与冷却/限流不同，它等不回来——必须在那天之前手工重登，所以要把
+    // 到期倒计时直接写在行里，而不是让人自己去翻 auths 里的 JWT。
+    const renewNote = s.renew_dead
+      ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' +
+        '<span class="tag bad" style="margin-right:6px">不可续期</span>' +
+        (s.access_expires
+          ? esc(pkExpiryText(new Date(s.access_expires).getTime())) + '后断服务，需重新登录'
+          : 'access token 到期即断服务，需重新登录') +
+        '</div>'
+      : '';
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
     // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream
     // enterpriseUnlimitedTotal）。此时剩余额度不参与展示，直接标「不限」。
@@ -674,7 +685,7 @@ function renderAccounts(list) {
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm"><span class="nm-name" title="' + esc(rawWho) + '">' + nameHtml + '</span>' + tags + '</div><div class="id" title="uid: ' + esc(s.uid) + '">' + esc(short) + '</div>' + accountProxyHTML(s.uid) + '</td>' +
-      '<td>' + tag + note + rateLimits + '</td>' +
+      '<td>' + tag + note + rateLimits + renewNote + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +

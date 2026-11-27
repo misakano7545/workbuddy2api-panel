@@ -56,6 +56,7 @@ func (s *Scheduler) noteBalanceAuthFailure(a *auth.Auth, uid string, probeErr er
 		// refresh token 失效 ≠ 账号不可用：AT 未过期时 chat 仍正常（issue #83，
 		// 与 keepalive 同一判据）。计死会在连续 3 轮后禁用掉一个健康账号。
 		if upstream.SessionDeadButUsable(a) {
+			s.cfg.Pool.MarkRenewDead(uid)
 			log.Printf("balance %s: refresh token 已失效但 access token 仍有效，不计 session dead", label)
 			return
 		}

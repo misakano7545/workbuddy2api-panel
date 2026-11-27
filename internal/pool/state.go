@@ -59,6 +59,27 @@ func (p *Pool) NoteSessionDeadWith(uid, reason string) bool {
 	return true
 }
 
+// MarkRenewDead 标记「refresh token 已被上游判死、access token 仍有效」。
+//
+// 只做标记，不改选号/罚号口径：这种号 chat 仍 200，禁用它等于自己先断服（issue #83）；
+// 但面板必须能把它和「冷却/限流」分开——前者等一等会自己好，后者等不到，只能在那天
+// 之前重新登录（issue #296）。清零点与 sessionDeadFails 相同：refresh 成功或人工复活。
+func (p *Pool) MarkRenewDead(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok && !e.renewDead {
+		e.renewDead = true
+	}
+}
+
+// accessExpiry access token 到期时刻（零值 = 未知）。
+func accessExpiry(e *entry) time.Time {
+	if e.a == nil || e.a.ExpiresAt <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(e.a.ExpiresAt, 0)
+}
+
 // NoteSessionAlive 清零 session dead 计数（refresh 验证成功 → session 仍有效）。
 //
 // 为什么需要（20261024）：网关 401 有两种成因且响应体一样，只能靠 refresh 区分。
@@ -78,9 +99,13 @@ func (p *Pool) NoteSessionAlive(uid string) {
 func (p *Pool) ClearSessionDead(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok && e.sessionDeadFails != 0 {
-		e.sessionDeadFails = 0
-		p.dirty.Store(true) // 同上：清零不落盘的话，重启后旧计数会把下次失败直接推到阈值
+	if e, ok := p.byUID[uid]; ok {
+		if e.sessionDeadFails != 0 {
+			e.sessionDeadFails = 0
+			p.dirty.Store(true) // 同上：清零不落盘的话，重启后旧计数会把下次失败直接推到阈值
+		}
+		// 走到这里说明 refresh 刚刚成功 ⇒ 续期链路又通了，「不可续期」标记必须撤掉。
+		e.renewDead = false
 	}
 }
 
@@ -869,6 +894,8 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Share:                p.shareOf(uid),
 		Cooling:              now.Before(e.until) || now.Before(e.breakerUntil),
 		SessionDeadFails:     e.sessionDeadFails,
+		RenewDead:            e.renewDead,
+		AccessExpires:        accessExpiry(e),
 		Disabled:             e.disabled,
 		DisabledAt:           disabledAtRFC3339(e),
 		Paused:               e.paused,
