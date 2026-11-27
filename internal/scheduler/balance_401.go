@@ -55,7 +55,13 @@ func (s *Scheduler) noteBalanceAuthFailure(a *auth.Auth, uid string, probeErr er
 	if errors.As(rerr, &re) && (re.Kind == upstream.ErrSessionDead || strings.Contains(re.Msg, "12153")) {
 		// refresh token 失效 ≠ 账号不可用：AT 未过期时 chat 仍正常（issue #83，
 		// 与 keepalive 同一判据）。计死会在连续 3 轮后禁用掉一个健康账号。
-		if upstream.SessionDeadButUsable(a) {
+		// SessionDeadFails>0 例外：chat 侧已真打过 401 且 refresh 求证死亡，此时
+		// JWT 的 exp 不代表可用（#296 实测被提前 15 天拉黑）。
+		usable := upstream.SessionDeadButUsable(a)
+		if st, ok := s.cfg.Pool.Status(uid); ok && st.SessionDeadFails > 0 {
+			usable = false
+		}
+		if usable {
 			s.cfg.Pool.MarkRenewDead(uid)
 			log.Printf("balance %s: refresh token 已失效但 access token 仍有效，不计 session dead", label)
 			return

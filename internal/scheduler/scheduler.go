@@ -615,7 +615,7 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 			case taskActivity:
 				s.runActivity(ctx, spread)
 			case taskKeepalive:
-				s.runKeepalive(ctx, spread, true)
+				s.runKeepalive(ctx, spread, true, false)
 			case taskGrowth:
 				s.RunGrowthNow()
 			}
@@ -820,15 +820,19 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 // 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
-// 手动入口始终全量；排程到点走 selective=true（只刷新临期窗口内的账号）。
+// 手动入口始终全量且**覆盖禁用号**（force=true）：禁用是自动判定，运维点「立即保活」
+// 就是在问「这些号到底还救不救得回来」，此时跳过禁用号等于不回答（issue #296）。
+// 排程到点走 selective=true（只刷新临期窗口内的账号），禁用号仍按
+// schedule.include_disabled_in_tasks 决定是否覆盖。
 func (s *Scheduler) RunKeepaliveNow() {
-	s.runKeepalive(context.Background(), false, false)
+	s.runKeepalive(context.Background(), false, false, true)
 }
 
 // runKeepalive 保活遍历。spread=true（排程路径）时按账号级偏移错开，见 spread.go。
 // selective=true（排程路径）时按临期窗口过滤：token 距过期还早的账号本轮跳过，
 // 不轮换其 refresh token。窗口 <=0 视为不过滤（退化为全量）。
-func (s *Scheduler) runKeepalive(ctx context.Context, spread, selective bool) {
+// force=true（手动入口）时无视 disabled 过滤。
+func (s *Scheduler) runKeepalive(ctx context.Context, spread, selective, force bool) {
 	var window time.Duration
 	if selective {
 		window = s.keepaliveRefreshWindow()
@@ -837,7 +841,7 @@ func (s *Scheduler) runKeepalive(ctx context.Context, spread, selective bool) {
 		}
 	}
 	plan := s.spreadPlan(taskKeepalive, spread, cst.Now())
-	includeDisabled := s.includeDisabledInTasks()
+	includeDisabled := s.includeDisabledInTasks() || force
 	for _, st := range plan.order(s.cfg.Pool.List()) {
 		if st.Disabled && !includeDisabled {
 			continue
@@ -858,7 +862,9 @@ func (s *Scheduler) runKeepalive(ctx context.Context, spread, selective bool) {
 			// refresh token 失效 ≠ 账号不可用：AT 还没过期时 chat 仍正常（issue #83）。
 			// 这种号既不计 session dead（连续 3 次保活就会禁用掉健康号），也不打 WARN——
 			// 面板的错误汇总按 WARN 聚合，打 WARN 会让「保活失败」一直挂在页面上。
-			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && upstream.SessionDeadButUsable(a) {
+			// SessionDeadFails>0 例外：那说明 chat 侧已经真打过 401 且 refresh 求证死亡，
+			// 此时 JWT 的 exp 是假的（#296 实测被提前 15 天拉黑），再说「仍有效」是撒谎。
+			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && upstream.SessionDeadButUsable(a) && st.SessionDeadFails == 0 {
 				s.cfg.Pool.MarkRenewDead(st.UID)
 				log.Printf("INFO: keepalive %s: refresh token 已失效但 access token 仍有效，本轮跳过（对话仍可用）",
 					logfmt.Label(st.UID, st.Nickname))

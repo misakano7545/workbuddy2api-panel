@@ -38,7 +38,7 @@ func newKeepaliveSched(t *testing.T, expiresAt int64, window time.Duration) (*Sc
 }
 
 // scheduledKeepalive 走排程路径（selective=true），与 runBatch 里 taskKeepalive 的分支一致。
-func scheduledKeepalive(s *Scheduler) { s.runKeepalive(context.Background(), false, true) }
+func scheduledKeepalive(s *Scheduler) { s.runKeepalive(context.Background(), false, true, false) }
 
 // TestScheduledKeepaliveSkipsFreshToken 排程保活只刷新临期窗口内的账号：
 // token 还很新鲜（距过期 30 天，窗口 7 天）→ 排程路径不刷新；手动入口照常全量。
@@ -131,5 +131,52 @@ func TestSetKeepaliveRefreshWindowHot(t *testing.T) {
 	scheduledKeepalive(s)
 	if calls.Load() != 0 {
 		t.Errorf("窗口收窄后不应刷新: calls=%d", calls.Load())
+	}
+}
+
+// TestKeepaliveStopsClaimingUsableAfterChat401 chat 侧已确认 401（sessionDeadFails>0）时，
+// 保活不能再打「access token 仍有效」：JWT 的 exp 已被上游无视（#296 实测提前 15 天拉黑），
+// 继续宣称可用会让面板和日志一起撒谎，而且这条号永远等不到计死。
+func TestKeepaliveStopsClaimingUsableAfterChat401(t *testing.T) {
+	f := &healFake{sessionDie: true}
+	srv := f.server(t)
+	a := &auth.Auth{UID: "u1", AccessToken: "at-old", RefreshToken: "rt-1",
+		ExpiresAt: time.Now().Add(20 * 24 * time.Hour).Unix()}
+	s := healScheduler(t, srv.URL, a)
+	// 模拟 chat 打到网关 401 且 refresh 求证失败（handler.go 的 NoteSessionDeadWith）。
+	s.cfg.Pool.NoteSessionDeadWith("u1", "网关 401 × 3 且 refresh 验证失败（token 已确认失效）")
+
+	s.RunKeepaliveNow()
+
+	st, _ := s.cfg.Pool.Status("u1")
+	if st.RenewDead {
+		t.Fatal("chat 侧已确认 401 后不应再标「不可续期但对话仍可用」")
+	}
+	if st.SessionDeadFails != 2 {
+		t.Fatalf("session dead 计数=%d want 2（chat 1 次 + 保活 1 次）", st.SessionDeadFails)
+	}
+}
+
+// TestManualKeepaliveCoversDisabledAccount 手动「立即保活」必须问遍禁用号：禁用是自动判定，
+// 运维点这个按钮就是想知道 RT 还能不能救（issue #296 里对方只能改 state.json 才能验证）。
+// 排程路径仍然尊重 include_disabled_in_tasks。
+func TestManualKeepaliveCoversDisabledAccount(t *testing.T) {
+	f := &healFake{}
+	srv := f.server(t)
+	a := &auth.Auth{UID: "u1", AccessToken: "at-old", RefreshToken: "rt-1",
+		ExpiresAt: time.Now().Add(20 * 24 * time.Hour).Unix()}
+	s := healScheduler(t, srv.URL, a)
+	s.cfg.Pool.Disable("u1", "12153 session dead")
+
+	scheduledKeepalive(s)
+	if f.refresh != 0 {
+		t.Fatalf("排程保活不该碰禁用号: refresh=%d", f.refresh)
+	}
+	s.RunKeepaliveNow()
+	if f.refresh != 1 {
+		t.Fatalf("手动保活应覆盖禁用号: refresh=%d", f.refresh)
+	}
+	if a.AccessToken != "at-new" {
+		t.Fatalf("禁用号 refresh 成功后 token 应更新: %q", a.AccessToken)
 	}
 }

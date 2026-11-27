@@ -1616,7 +1616,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// refresh token 失效 ≠ 账号不可用：AT 尚未过期时本请求仍会成功
 				// （issue #83 生产实测：refresh 恒 12153 的号 chat 仍 200）。
 				// 这种号不罚、也不换号——直接拿现有 AT 发这一次请求。
-				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && upstream.SessionDeadButUsable(acct) {
+				// SessionDeadFails>0 例外：chat 侧已真打过 401，JWT 的 exp 不代表可用
+				// （#296 实测被提前 15 天拉黑），继续宣称「仍有效」只会让面板撒谎。
+				usable := upstream.SessionDeadButUsable(acct)
+				if st, ok := h.cfg.Pool.Status(acct.UID); ok && st.SessionDeadFails > 0 {
+					usable = false
+				}
+				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && usable {
 					h.cfg.Pool.MarkRenewDead(acct.UID)
 					log.Printf("INFO: [server] 账号 %s refresh token 已失效但 access token 仍有效，用现有 token 继续",
 						logfmt.Label(acct.UID, acct.Nickname))
