@@ -1,6 +1,6 @@
 // videos.go 视频生成网关：把上游 /v2/videos/* 的「异步任务」包装成 OpenAI 风格接口。
 //
-//	POST /v1/videos/generations   提交（缺省同步等到出片，wait=false 立刻返回 task id）
+//	POST /v1/videos/generations   提交（缺省立刻回 task id，wait=true 才同步等到出片）
 //	GET  /v1/videos/{task_id}     查任务
 //	POST /v1/videos/tasks         查任务（POST 形态，兼容只肯发 POST 的客户端/MCP）
 //
@@ -40,7 +40,7 @@ const (
 	defaultVideoModel = "cn:minimax-video-h3"
 	// videoAttempts 提交阶段失败换号上限（与出图同量级）。
 	videoAttempts = 3
-	// videoWaitDefault 同步等待上限：kling 实测 473s，留一倍余量。
+	// videoWaitDefault 同步等待上限（只在 wait=true 时生效）：kling 实测 473s，留一倍余量。
 	videoWaitDefault = 15 * time.Minute
 	// videoWaitMax 客户端能要求的最大等待（参数 timeout_seconds）。
 	videoWaitMax = 30 * time.Minute
@@ -543,6 +543,7 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 			logfmt.Label(a.UID, a.Nickname), bare, taskID, taskStatus, time.Since(start).Round(time.Millisecond))
 
 		if !waitSet || syncWait <= 0 {
+			// 缺省路径：任务号先给出去，客户端自己 GET /v1/videos/{id} 轮询（见 videoWait 的说明）。
 			writeJSON(w, http.StatusOK, videoTaskPayload(taskID, videoTaskStateFromSubmit(taskStatus), model, h.videoLedger))
 			return
 		}
@@ -740,23 +741,30 @@ func aspectFromSize(s string) string {
 
 // videoWait 解析网关自己的等待开关：
 //
-//	wait:false            → 立刻返回 task id（不等）
-//	timeout_seconds: 1..1800 → 等待上限
-//	都没给                 → 同步等到出片（缺省 15 分钟）
+//	wait 缺省 / false        → 立刻回 task id（不等，OpenAI Videos 的原生形态）
+//	wait:true                → 同步等到出片（缺省上限 15 分钟）
+//	timeout_seconds: 1..1800 → 同步等待上限，只对 wait:true 生效（封顶 30 分钟）
+//
+// 缺省为什么是异步：同步等到出片意味着一发 HTTP 请求在连接上挂几分钟到十几分钟，而上游出片实测
+// minimax 约 124s、kling 约 473s。所有真实客户端的**单次请求预算**都远小于这个时长（实测 DSH
+// 插件 dsh-imagegen 的提交预算是 120s），于是提交必然在 120s 被客户端掐断：上游任务已经建好、
+// 积分照扣，客户端却只收到一次断连，用户看到的是「视频生成失败」。上游本来就是异步任务，网关
+// 没有理由替客户端扛这段等待——要同步的客户端显式写 wait:true，那是它自己的选择。
 func (h *Handler) videoWait(req map[string]any) (time.Duration, bool) {
-	if v, ok := req["wait"].(bool); ok && !v {
+	wait, _ := req["wait"].(bool)
+	if !wait {
 		return 0, false
 	}
-	wait := videoWaitDefault
+	limit := videoWaitDefault
 	if v, ok := req["timeout_seconds"]; ok {
 		if n, ok := numberToInt(v); ok && n > 0 {
-			wait = time.Duration(n) * time.Second
-			if wait > videoWaitMax {
-				wait = videoWaitMax
+			limit = time.Duration(n) * time.Second
+			if limit > videoWaitMax {
+				limit = videoWaitMax
 			}
 		}
 	}
-	return wait, true
+	return limit, true
 }
 
 // awaitVideo 轮询到终态或超时。返回最后一次状态（未终态时 Done()=false）。
