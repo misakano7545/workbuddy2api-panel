@@ -85,6 +85,9 @@ upstream:
     - baiyea/workbuddy2api-ui
     - L0NE-6/WorkBuddy-Daily
     - hawklithm/workbuddy2api
+    # 请求削峰（max_concurrency + min_interval，可按模型分档）+ 凭证刷新单飞；
+    # 测试面最厚的一个（额度分类 / 静默拒答重试 / 入站上限与 UA）
+    - 3304711297/workbuddy2api
     # 读本机桌面端登录态 + 设备风控头 X-Device-Token 的注入形态；敏感词二分查找工具可复用
     - DistPub/workbuddy2api
     # —— 多平台合集：Trae / Qoder / MiniMax / 豆包 的 IDE 账号池与签到池，看跨平台账号模型的抽象
