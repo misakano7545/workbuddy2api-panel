@@ -1230,11 +1230,13 @@ func videoProgress(state upstream.VideoTaskState) int {
 }
 
 // clipText 截断超长文本（错误信息里带上游原文时用，避免把整段回执刷进日志）。
+// 按 rune 边界切：上游回执常是中文，按字节切会把最后一个汉字劈开，客户端
+// 收到的那条错误信息末尾就是一片「��」。
 func clipText(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return logfmt.Truncate(s, n) + "…"
 }
 
 // numberToInt JSON 数字（float64）转 int。

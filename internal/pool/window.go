@@ -24,6 +24,8 @@ package pool
 import (
 	"sort"
 	"time"
+
+	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
 
 // windowKey 窗口键：账号 + 裸模型名（不含域前缀）。
@@ -170,8 +172,10 @@ func (p *Pool) RecordWindowProbe(uid, model string, resetAt time.Time, attempts 
 		w.LastTry = now
 	}
 	w.Attempts = attempts
+	// LastResult 会原样显示在面板的额度窗口表里，上游回执是中文——按字节切会把
+	// 最后一个汉字劈开，面板上就是一片「��」。
 	if len(result) > 200 {
-		result = result[:200]
+		result = logfmt.Truncate(result, 200)
 	}
 	w.LastResult = result
 	p.dirty.Store(true)

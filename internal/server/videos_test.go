@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
@@ -576,5 +577,23 @@ func TestVideosRecordedInPanel(t *testing.T) {
 	}
 	if e.ClientIP == "" || !strings.Contains(e.UserAgent, "test-video") {
 		t.Fatalf("事件应带来源（IP/UA）：%+v", e)
+	}
+}
+
+// 上游回执是中文时按字节切会劈开最后一个汉字，客户端收到的错误信息末尾变乱码。
+// 断言「切完仍是合法 UTF-8」而不是断言具体字符数：修法可以换实现，边界不能破。
+func TestClipTextRuneSafe(t *testing.T) {
+	s := strings.Repeat("上游提交回执缺少任务 id", 30) // 纯中文，任意 200 字节切点必落在字符中间
+	for _, n := range []int{1, 2, 3, 5, 7, 200, 199} {
+		got := clipText(s, n)
+		if !utf8.ValidString(got) {
+			t.Fatalf("n=%d 切出非法 UTF-8: %q", n, got)
+		}
+		if !strings.HasSuffix(got, "…") {
+			t.Fatalf("n=%d 应带省略号: %q", n, got)
+		}
+	}
+	if got := clipText("短", 200); got != "短" {
+		t.Fatalf("未超限不该改动: %q", got)
 	}
 }

@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
@@ -307,9 +308,7 @@ func orNone(s string) string {
 	return s
 }
 
+// clip 截断探针回执（会进面板的额度窗口表）：按 rune 切，中文不被劈开。
 func clip(s string) string {
-	if len(s) > 200 {
-		return s[:200]
-	}
-	return s
+	return logfmt.Truncate(s, 200)
 }
