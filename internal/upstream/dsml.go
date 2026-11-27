@@ -96,6 +96,7 @@ type MarkupRepair struct {
 	hold         string // 已确认可能属于标记、但还不足以判定的尾部缓冲
 	inBlock      bool   // 已消费掉 markupOpen，正在块内部累积
 	seen         int    // 识别到的标记块数（含被拒绝的）
+	orphan       int    // 透出的正文里「缺外层 calls 包裹」的 invoke 头个数（只诊断，不转换）
 	rejected     int    // 识别到但未转换的块数（观测/排障用）
 	converted    int    // 已还原的调用数（观测用）
 }
@@ -141,6 +142,26 @@ func (r *MarkupRepair) Rejected() int {
 	return r.rejected
 }
 
+// Orphan 返回透出的正文里「缺外层 calls 包裹」的 invoke 头个数。
+//
+// 为什么只数不转：DeepSeek 系模型在长上下文下会漏写外层 `<… calls>` 包裹、只写
+// invoke 块（vLLM #55954 就是这个缺陷的解析器侧修复）。本仓库的修复器以包裹为锚，
+// 这种形态必然漏过去。转不转要先有发生率：线上一条都没有时，多写一个只在
+// 「模型讨论这段语法」时才可能误中的状态机分支，是纯风险。
+func (r *MarkupRepair) Orphan() int {
+	if r == nil {
+		return 0
+	}
+	return r.orphan
+}
+
+// countOrphanInvokes 数一段**已决定透出**的正文里有几个 invoke 头。
+// 这一段里出现的 invoke 头一定没有可用的外层包裹（有包裹的整块已被消费掉），
+// 所以不需要再判上下文。
+func countOrphanInvokes(s string) int {
+	return len(markupInvokeRe.FindAllStringIndex(s, -1))
+}
+
 // Feed 吃进一段正文增量，返回「应当作为正文透出的部分」与「还原出来的工具调用」。
 // 调用方必须把返回的正文按原顺序写出，并把返回的调用按出现顺序转成 tool_call。
 //
@@ -158,16 +179,21 @@ func (r *MarkupRepair) Feed(text string) (string, []MarkupCall) {
 		if !r.inBlock {
 			i := markupStartCandidate(s)
 			if i < 0 {
+				r.orphan += countOrphanInvokes(s)
 				emit.WriteString(s)
 				break
 			}
 			if len(s)-i < len(markupOpen) {
 				// 起点被截断在增量边界（上游把标记切成了两片）：留到下一片再判定。
-				emit.WriteString(s[:i])
+				frag := s[:i]
+				r.orphan += countOrphanInvokes(frag)
+				emit.WriteString(frag)
 				r.hold = s[i:]
 				break
 			}
-			emit.WriteString(s[:i])
+			frag := s[:i]
+			r.orphan += countOrphanInvokes(frag)
+			emit.WriteString(frag)
 			s = s[i+len(markupOpen):]
 			r.inBlock = true
 			continue

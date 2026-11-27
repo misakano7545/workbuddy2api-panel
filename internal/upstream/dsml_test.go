@@ -542,3 +542,36 @@ func TestMarkupRepairDisabled(t *testing.T) {
 		}
 	}
 }
+
+// 缺外层 calls 包裹的 invoke 块：现在不转换（照旧原文透出），但必须被数出来——
+// 这是「该不该写转换分支」的唯一证据来源。
+func TestMarkupRepairCountsOrphanInvoke(t *testing.T) {
+	orphan := "<" + markupPipe + "DSML" + markupPipe + ` invoke name="read_file">` +
+		"<" + markupPipe + "DSML" + markupPipe + ` parameter name="path" string="true">/a` +
+		"</" + markupPipe + "DSML" + markupPipe + " parameter>" +
+		"</" + markupPipe + "DSML" + markupPipe + " invoke>"
+
+	r := NewMarkupRepair(nil, true)
+	out, calls := r.Feed("前面一句\n" + orphan + "\n后面一句")
+	if len(calls) != 0 {
+		t.Fatalf("没包裹的块不该被转换，实际 %+v", calls)
+	}
+	if !strings.Contains(out, `invoke name="read_file"`) {
+		t.Fatalf("原文必须逐字节透出，实际 %q", out)
+	}
+	if r.Orphan() != 1 {
+		t.Fatalf("应数到 1 处孤儿 invoke，实际 %d", r.Orphan())
+	}
+
+	// 带包裹的正常块：转换成功，且不算孤儿。
+	ok := markupOpen + `<` + markupPipe + "DSML" + markupPipe + ` invoke name="read_file">` +
+		"</" + markupPipe + "DSML" + markupPipe + " invoke>" + markupClose
+	r2 := NewMarkupRepair(map[string]bool{"read_file": true}, false)
+	_, calls2 := r2.Feed(ok)
+	if len(calls2) != 1 {
+		t.Fatalf("带包裹的应转换 1 条，实际 %+v", calls2)
+	}
+	if r2.Orphan() != 0 {
+		t.Fatalf("带包裹的不该算孤儿，实际 %d", r2.Orphan())
+	}
+}
