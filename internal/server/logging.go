@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -561,24 +562,39 @@ func archiveContext(body []byte) json.RawMessage {
 	return b
 }
 
+// requestClientIP 提取入站请求的客户端 IP，供日志展示与入站黑名单判定共用。
+//
+// 代理头只在**直连对端是回环/私网**时才采信：常规部署的反代与网关同机（Caddy
+// 127.0.0.1）或同私网（Docker 桥接），此时 TCP 对端恒为反代、X-Forwarded-For 才是
+// 真实客户端。反过来，端口若被直连暴露，XFF 完全由对端自己填——无条件采信等于让
+// 黑名单可以被一行 header 绕过，也能让攻击者把任意 IP 塞进判定里栽赃。
+// shortcut: 公网另一端的反代（跨机 nginx/CDN 直连网关端口）会只看到反代地址，
+// 那种部署要把网关端口收回内网。
+func requestClientIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		// 不带端口的 RemoteAddr（httptest 常见）原样当作 IP。
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	if ip, perr := netip.ParseAddr(host); perr == nil && (ip.IsLoopback() || ip.IsPrivate()) {
+		if fwd := upstream.ExtractClientIP(r); fwd != "" {
+			return fwd
+		}
+	}
+	return host
+}
+
 // clientIPForLog 提取用于日志展示的客户端 IP。
 //
 // 与 upstream.ExtractClientIP 的差别：后者只认代理头（X-Forwarded-For 首段 →
 // X-Real-IP），因为它的用途是把客户端 IP **透传给上游**，回落到网关自身地址会
 // 污染上游风控判据；日志场景相反——直连（无反代）时 RemoteAddr 就是唯一线索，
-// 必须回落，否则面板里所有来源都显示 "-"。代理头优先保证反代后拿到真实客户端。
+// 必须回落，否则面板里所有来源都显示 "-"。
 func clientIPForLog(r *http.Request) string {
-	if r == nil {
-		return ""
-	}
-	if ip := upstream.ExtractClientIP(r); ip != "" {
-		return ip
-	}
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err != nil {
-		return strings.TrimSpace(r.RemoteAddr)
-	}
-	return host
+	return requestClientIP(r)
 }
 
 // dashIfEmpty 空串统一显示 "-"（来源字段未采集时不留空白列）。

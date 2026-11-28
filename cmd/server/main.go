@@ -420,6 +420,8 @@ func main() {
 		AllowedModels:    allowedModels,
 		AllowlistEnabled: allowlistEnabled,
 		ModelAliases:     livecfg.NormalizeModelAliases(cfg.Models.Aliases),
+		// 入站 IP 黑名单（security.ip_blacklist，issue #244）：命中即在入口 403。
+		IPBlacklist: livecfg.NormalizeIPBlacklist(cfg.Security.IPBlacklist),
 		// 模型降级路由表（pool.model_fallback）：6004 限流时同账号改用等价模型。
 		ModelFallback: cfg.Pool.ModelFallback,
 		// 思考档位策略镜像：面板「模型与档位」页的「网关档位」列据此显示当前生效值。
@@ -595,7 +597,9 @@ func main() {
 		// 模型白名单原始条目（issue #68）；同上，运行期以 livecfg 快照为准。
 		ModelsAllowed: cfg.Models.Allowed,
 		// 模型映射原始条目（issue #30）；同上，运行期以 livecfg 快照为准。
-		ModelsAliases:  cfg.Models.Aliases,
+		ModelsAliases: cfg.Models.Aliases,
+		// 入站 IP 黑名单原始条目（security.ip_blacklist，issue #244）；同上。
+		IPBlacklist:    cfg.Security.IPBlacklist,
 		AdminEnabled:   cfg.Admin.Enabled,
 		MetricsEnabled: cfg.Metrics.Enabled,
 		// 3D 开关的静态回退（运行期以 livecfg 快照为准，热生效）。
@@ -1000,6 +1004,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		AllowedModels:    newAllowedModels,
 		AllowlistEnabled: newAllowlistEnabled,
 		ModelAliases:     livecfg.NormalizeModelAliases(newCfg.Models.Aliases),
+		// 入站 IP 黑名单（issue #244）：面板保存即热生效。
+		IPBlacklist: livecfg.NormalizeIPBlacklist(newCfg.Security.IPBlacklist),
 		// 思考档位策略镜像：与 up.SetEffortPolicy 同批热更新，面板立即回显新生效值。
 		ThinkingEnabled:        newCfg.Thinking.Enabled,
 		ThinkingDefaultEffort:  newCfg.Thinking.DefaultEffort,

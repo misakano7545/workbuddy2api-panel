@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -434,6 +435,21 @@ type Config struct {
 		// 面板保存后经 livecfg 热生效，无需重启。
 		Aliases []string `json:"aliases"`
 	} `json:"models"`
+
+	// Security 入站访问控制（issue #244）。
+	Security struct {
+		// IPBlacklist 拒绝的客户端 IP / CIDR 列表（一条一项，裸 IP 或 1.2.3.0/24）。
+		// 命中即在入口回 403 ip_blocked，**不选号、不进请求日志**——被拦的扫描流量
+		// 不该在面板里继续刷屏。/healthz 与 /panel/ 豁免：策略配错时不能让探活失败
+		// 触发重启，也不能把运维自己关在门外（改回来只能面板或登机）。
+		//
+		// 判定用的客户端 IP：直连对端是回环/私网时信 X-Forwarded-For 首段（反代
+		// 同机或同私网——Caddy 反代、Docker 桥接都属这类），否则用 TCP 对端地址。
+		// 反向代价：反代在**公网另一端**（跨机器 nginx/CDN 直连网关端口）时，看到的
+		// 是反代地址，拉黑会连坐它；那种部署要把网关端口收回内网，或改用反代侧封禁。
+		// 面板保存后经 livecfg 热生效，无需重启。
+		IPBlacklist []string `json:"ip_blacklist"`
+	} `json:"security"`
 
 	// Thinking 网关思考档位策略（issue #18 / #21）。网关按模型声明的
 	// supportedEfforts 解析目标档：缺档时补默认档，可按开关以网关优先改写客户端
@@ -1072,6 +1088,19 @@ func (c *Config) normalize() error {
 	var err error
 	if err = c.normalizeThinking(); err != nil {
 		return err
+	}
+	// 入站黑名单逐项校验（issue #244）：写错的条目静默跳过等于假安全——运维以为
+	// 封了，实际一条没生效。宁可保存时就 400 点名第几项。
+	for i, entry := range c.Security.IPBlacklist {
+		s := strings.TrimSpace(entry)
+		if s == "" {
+			continue
+		}
+		if _, err := netip.ParsePrefix(s); err != nil {
+			if _, aerr := netip.ParseAddr(s); aerr != nil {
+				return fmt.Errorf("security.ip_blacklist 第 %d 项 %q 不是合法 IP 或 CIDR", i+1, s)
+			}
+		}
 	}
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5

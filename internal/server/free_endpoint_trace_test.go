@@ -35,6 +35,7 @@ func TestFreeEndpointsRecordedInPanel(t *testing.T) {
 			RecordClientInfo: true,
 		})
 		req := httptest.NewRequest("POST", c.path, strings.NewReader(c.body))
+		req.RemoteAddr = "127.0.0.1:5000" // 同机反代才采信 XFF（issue #244）
 		req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
 		req.Header.Set("User-Agent", "free-endpoint-test/1.0")
 		rec := httptest.NewRecorder()

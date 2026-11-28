@@ -155,6 +155,8 @@ func TestRequestMetricsCapturesClientInfo(t *testing.T) {
 	})
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[]}`))
+	// 反代与网关同机（Caddy 127.0.0.1）时才采信 XFF，见 requestClientIP。
+	req.RemoteAddr = "127.0.0.1:5000"
 	req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
 	req.Header.Set("User-Agent", "python-requests/2.31.0")
 	rec := httptest.NewRecorder()
@@ -196,6 +198,7 @@ func TestRequestMetricsCoversAllProtocolEntries(t *testing.T) {
 				RecordClientInfo: true,
 			})
 			req := httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body))
+			req.RemoteAddr = "127.0.0.1:5000" // 同机反代
 			req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
 			req.Header.Set("User-Agent", "codex_cli_rs/0.44.0")
 			rec := httptest.NewRecorder()
@@ -242,15 +245,24 @@ func TestRequestMetricsClientInfoDisabled(t *testing.T) {
 	}
 }
 
-// 无代理头时回落到 TCP 对端地址——直连部署下这是唯一来源线索。
+// 无代理头时回落到 TCP 对端地址——直连部署下这是唯一来源线索；代理头只在
+// 对端是回环/私网（反代同机或同私网）时才采信，公网对端填什么都不认（issue #244：
+// 否则黑名单能被一行 header 绕过，也能反过来栽赃任意 IP）。
 func TestClientIPForLogFallsBackToRemoteAddr(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.RemoteAddr = "198.51.100.9:54321"
 	if got := clientIPForLog(req); got != "198.51.100.9" {
 		t.Errorf("got %q want 198.51.100.9", got)
 	}
-	// 代理头优先（X-Real-IP 兜底 XFF）。
+	// 公网对端：代理头一律无视。
 	req.Header.Set("X-Real-IP", "192.0.2.5")
+	req.Header.Set("X-Forwarded-For", "192.0.2.9, 10.1.1.1")
+	if got := clientIPForLog(req); got != "198.51.100.9" {
+		t.Errorf("公网对端的代理头不该被采信，got %q", got)
+	}
+	// 回环对端（反代同机）：代理头优先，X-Real-IP 兜底 XFF。
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Del("X-Forwarded-For")
 	if got := clientIPForLog(req); got != "192.0.2.5" {
 		t.Errorf("X-Real-IP got %q want 192.0.2.5", got)
 	}

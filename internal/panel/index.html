@@ -2017,6 +2017,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="hint">开启后，「请求事件日志」点任意一行可展开当轮发出去的提示词与消息。这是<strong>用户数据</strong>：
               会以明文写进归档文件（保留 7 天），仅在排查「上游为什么拒这条请求」时临时打开。</div>
             <div class="hint" style="margin-top:8px">归档开关、保留天数与容量上限（<code>logging.request_archive_*</code>）需手工编辑配置文件。</div>
+            <div class="hr"></div>
+            <label class="fld"><span class="lb">IP 黑名单</span>
+              <input name="ip_blacklist" placeholder="104.233.189.37, 45.0.0.0/8">
+              <span class="hint">逗号分隔；单个 IP 或 CIDR。命中即在入口回 403 <code>ip_blocked</code>，不选号、不写请求日志；
+                改动即时生效。<code>/healthz</code> 与面板路径不受影响（坏规则不会让探活失败或把你自己关在门外）。
+                反代需与网关同机或同私网（Caddy/Docker 缺省如此），此时按真实客户端 IP 判，否则按 TCP 对端判。</span></label>
             <div class="hint" style="margin-top:8px">「运行日志」按天落盘（<code>logging.panel_log_enabled</code> /
               <code>panel_log_retention_days</code> / <code>panel_log_max_mb</code>，缺省开、保留 7 天、上限 50 MiB）：
               重启后自动回填最近日志，页面右上「导出 ZIP」可按今日 / 3 天 / 7 天打包下载。</div>

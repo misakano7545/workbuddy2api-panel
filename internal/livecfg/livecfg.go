@@ -9,6 +9,7 @@
 package livecfg
 
 import (
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -61,6 +62,56 @@ type Snapshot struct {
 	ThinkingClientPriority bool
 	ThinkingOverrideScope  string
 	ThinkingModelDefaults  map[string]string
+	// IPBlacklist 入站 IP 黑名单（config security.ip_blacklist，issue #244）。
+	// 已归一化为前缀列表；零值 = 不拦。
+	IPBlacklist IPBlacklist
+}
+
+// IPBlacklist 归一化后的入站 IP 黑名单。
+//
+// 单个 IP 与 CIDR 混写：裸 IP 存成 /32（v4）或 /128（v6），CIDR 原样（Masked 掉
+// 主机位——写 1.2.3.4/24 时按 1.2.3.0/24 判，避免「以为只封一个地址」）。零值安全，
+// 调 nil 的方法返回 false。
+type IPBlacklist []netip.Prefix
+
+// NormalizeIPBlacklist 把配置里的原始条目归一化。非法条目跳过（配置校验
+// config.normalize() 已经先拒过一遍，这里兜住裸用/测试路径）。
+func NormalizeIPBlacklist(in []string) IPBlacklist {
+	var out IPBlacklist
+	for _, entry := range in {
+		s := strings.TrimSpace(entry)
+		if s == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(s); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		if a, err := netip.ParseAddr(s); err == nil {
+			a = a.Unmap()
+			out = append(out, netip.PrefixFrom(a, a.BitLen()))
+		}
+	}
+	return out
+}
+
+// Blocks 报告 addr 是否命中黑名单。空 addr / 解析失败 → 不拦（宁可放行也不因为
+// 取不到 IP 就把流量全挡掉）。
+func (b IPBlacklist) Blocks(addr string) bool {
+	if len(b) == 0 || addr == "" {
+		return false
+	}
+	a, err := netip.ParseAddr(strings.TrimSpace(addr))
+	if err != nil {
+		return false
+	}
+	a = a.Unmap()
+	for _, p := range b {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeModelAliases 把用户配置的 aliases 条目（"客户端名=真实模型名"）归一化为查找表。

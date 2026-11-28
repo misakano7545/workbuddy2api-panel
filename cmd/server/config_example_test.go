@@ -66,4 +66,9 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if !c.Features.ThreeDAutoToken {
 		t.Error("features.three_d_auto_token 示例值应为 true（自动签发默认开启）")
 	}
+	// security.ip_blacklist（issue #244）：示例必须是存在的数组，否则用户不知道
+	// 网关能在入口封 IP（标题是「功能升级」，但配置项根本看不见就等于没有）。
+	if c.Security.IPBlacklist == nil {
+		t.Error("security.ip_blacklist 示例应存在（空数组即可）")
+	}
 }

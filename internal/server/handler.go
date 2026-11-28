@@ -93,6 +93,10 @@ type Config struct {
 	// issue #30；Live 为 nil 的裸用/测试路径经 loadLive() 归一化后使用）。
 	ModelsAliases []string
 
+	// IPBlacklist 入站 IP 黑名单原始条目（config security.ip_blacklist，issue #244；
+	// Live 为 nil 的裸用/测试路径经 loadLive() 归一化后使用）。
+	IPBlacklist []string
+
 	// Usage 逐请求用量记录器（可选；nil = 不记录）。
 	Usage *usage.Recorder
 
@@ -179,7 +183,13 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		AllowedModels:         allowed,
 		AllowlistEnabled:      enabled,
 		ModelAliases:          livecfg.NormalizeModelAliases(h.cfg.ModelsAliases),
+		IPBlacklist:           livecfg.NormalizeIPBlacklist(h.cfg.IPBlacklist),
 	}
+}
+
+// ipBlocked 报告入站请求是否命中 security.ip_blacklist（issue #244）。
+func (h *Handler) ipBlocked(r *http.Request) bool {
+	return h.loadLive().IPBlacklist.Blocks(requestClientIP(r))
 }
 
 // modelAlias 查 aliases 映射（issue #30）：客户端名（剥 realm 前缀后的裸名，
@@ -407,6 +417,14 @@ func isChatEntry(path string) bool {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 入站 IP 黑名单（issue #244）：整站第一道闸，先于鉴权与请求日志——被拦的扫描
+	// 流量不选号、不写日志（要的就是不再刷屏，记下来正是要被清掉的那种噪音）。
+	// /healthz 与 /panel/ 豁免：坏规则不能让探活失败触发重启，也不能把运维自己关在
+	// 门外（面板是唯一的在线恢复入口）。
+	if p := r.URL.Path; p != "/healthz" && !strings.HasPrefix(p, "/panel/") && h.ipBlocked(r) {
+		writeOpenAIError(w, http.StatusForbidden, "ip_blocked", "client IP is blocked by gateway policy")
+		return
+	}
 	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && isChatEntry(r.URL.Path) {
 		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path}
 		if h.loadLive().RecordClientInfo {
