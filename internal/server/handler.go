@@ -273,9 +273,9 @@ const ServiceName = "workbuddy2api"
 
 // Handler 主路由。
 type Handler struct {
-	cfg     Config
-	mux     *http.ServeMux
-	degrade degradeGate
+	cfg    Config
+	mux    *http.ServeMux
+	rescue rescueMemory
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
@@ -1519,42 +1519,55 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 系统提示词改写（出站前、轮转前；每个请求一次）。
-	//   - custom：用自有提示词替换客户端 system/developer（从源头消灭 system 指纹误报）。
-	//   - append：开头连续 system/developer 块后插自有提示词，既有消息逐字不动
-	//     （客户端项目规范/工具约定与网关提示词并用，issue #129）。
-	//   - passthrough + 降级期：换 Degraded 中性提示词直达，不再先撞 400。
-	//   - passthrough / append 非降级期：透传客户端原始 system（append 则再插一条网关 system）。
-	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
-	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
-	degradedApplied := false
-	// splitApplied / movedApplied 11-128 的两层「不改文本」抢救各用一次（拆句留在 system、
-	// 搬家进 user），与 degradedApplied（中性提示词替换）按顺序各用一次，避免同请求反复重试。
-	splitApplied := false
-	movedApplied := false
+	// Learn only confirmed successful rescue sequences, scoped to this input.
+	rescueKeyValue := rescueKey(body, realm, curModel, h.cfg.PromptMode, h.cfg.PromptText)
+	rescueModel := curModel
+	var rescueSteps []int
+	rescueStage, rescueAttempts := 0, 0
+	rescueRemembered, rescueInvalidated := false, false
 	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
 		body = prompt.Rewrite(body, h.cfg.PromptText)
-	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
+	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" {
 		body = prompt.Append(body, h.cfg.PromptText)
-	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active() {
-		// 降级期：与下面重试阶梯同一优先级——拆句留在 system 最好，其次搬家，都不行才整体替换。
-		if split, ok := prompt.SplitSystemMessages(body); ok {
-			body = split
-			splitApplied = true
-		} else if moved, ok := prompt.MoveSystemToUser(body, prompt.Degraded); ok {
-			body = moved
-			movedApplied = true
-		} else {
-			body = prompt.Rewrite(body, prompt.Degraded)
-			degradedApplied = true
+	}
+	body = prompt.EnsureSystemFirst(body, h.cfg.PromptText)
+	for _, step := range h.rescue.lookup(rescueKeyValue, time.Now()) {
+		if transformed, ok := applyRescueStep(body, step); ok {
+			body = transformed
+			rescueSteps = append(rescueSteps, step)
+			rescueStage = step
 		}
 	}
-	// 渠道校验兜底：上游要求 messages[0] 必须是 system（首条 user 直接 400
-	// 11-128「first message is not system prompt」，首条 developer 报
-	// unapproved channel）——2026-10-20 真机实测三条对照。custom/append 天然
-	// 以 system 开头，passthrough 透传客户端消息时可能首条就是 user，故这里统一
-	// 兜一次。只补首条缺失这一种情况，其余消息逐字不动。
-	body = prompt.EnsureSystemFirst(body, h.cfg.PromptText)
+	if len(rescueSteps) > 0 {
+		rescueAttempts = 1
+		rescueRemembered = true
+		log.Printf("content rescue: replaying confirmed stage=%d", rescueStage)
+	}
+	learnRescue := func() {
+		if !rescueInvalidated && curModel == rescueModel && len(rescueSteps) > 0 {
+			h.rescue.remember(rescueKeyValue, rescueSteps, time.Now())
+		}
+	}
+	rescueBlocked := func() bool {
+		if rescueRemembered {
+			h.rescue.forget(rescueKeyValue)
+			rescueInvalidated = true
+		}
+		if rescueKeyValue == "" || rescueAttempts >= 3 {
+			return false
+		}
+		for rescueStage < 3 {
+			rescueStage++
+			if transformed, ok := applyRescueStep(body, rescueStage); ok {
+				body = transformed
+				rescueSteps = append(rescueSteps, rescueStage)
+				rescueAttempts++
+				log.Printf("content rescue: retry stage=%d attempt=%d", rescueStage, rescueAttempts)
+				return true
+			}
+		}
+		return false
+	}
 
 	// outbound model 名由 upstream.prepareBody 在同一次 JSON 解析里剥成裸名
 	// （realm 前缀是网关侧路由协议，上游不认前缀）。这里不再提前做整段
@@ -1830,45 +1843,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			// 内容拦截误报（passthrough/append 模式）：三层抢救，从「改动最小」到「改动最大」。
-			// 每一层都只在本来就会失败的请求上多花一次上游调用，正常流量零影响。
-			//   ① SplitSystemMessages：按句界把 system 拆成多条，**仍在 system 里**，
-			//      文本一字不改（实测原段 400 / 拆开后 200，见 prompt 包注释）；
-			//   ② MoveSystemToUser：拆不动（单句 system）时把原文搬进首条 user；
-			//   ③ Rewrite(Degraded)：中性提示词整体替换，保证不再命中。
-			// 都被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
-			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
-			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !splitApplied {
-				if split, ok := prompt.SplitSystemMessages(body); ok {
-					body = split
-					splitApplied = true
-					// 置降级态：这条客户端的 system 每次都会被拦，逐请求重试等于双倍上游调用。
-					// 之后的新请求直接按拆分形态出站，文本不丢也不再撞墙。
-					h.degrade.Trigger()
-					delete(tried, acct.UID)
-					releaseHeld()
-					log.Printf("content-blocked (system fingerprint) -> split system into sentences, retry")
-					continue
-				}
-			}
-			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !movedApplied {
-				if moved, ok := prompt.MoveSystemToUser(body, prompt.Degraded); ok {
-					body = moved
-					movedApplied = true
-					h.degrade.Trigger()
-					delete(tried, acct.UID) // 单账号池也能拿到重试机会（重试占一次名额）
-					releaseHeld()
-					log.Printf("content-blocked (system fingerprint) -> moved system text into first user message, retry")
-					continue
-				}
-			}
-			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
-				h.degrade.Trigger()
-				body = prompt.Rewrite(body, prompt.Degraded)
-				degradedApplied = true
-				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
+			// Rescue has its own three-attempt budget; account/model failures
+			// still consume MaxRotate. Total outer calls are bounded by MaxRotate+3.
+			if kind == upstream.ErrContentBlocked && rescueBlocked() {
+				delete(tried, acct.UID)
 				releaseHeld()
-				log.Printf("content-blocked (likely fingerprint false positive) -> degraded prompt retry")
+				i--
 				continue
 			}
 			if kind == upstream.ErrContentBlocked {
@@ -2110,6 +2090,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if hv.Payload != "" {
 					frameKind = upstream.FrameKind(hv.Payload)
 				}
+				if frameKind == upstream.ErrContentBlocked {
+					h.rescue.forget(rescueKeyValue)
+					rescueInvalidated = true
+				}
 				if _, requestLevel := requestErrorCodes[frameKind]; requestLevel {
 					// 请求级错误与账号无关：只释放租约、不解绑会话，同 HTTP 路径的 11115 / 图片无效 / 11148。
 					failKeepBinding(acct.UID)
@@ -2170,6 +2154,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeStreamError
 			default:
 				st.outcome = reqlog.OutcomeSuccess
+			}
+			if sErr == nil && !stats.SawErrorFrame() {
+				learnRescue()
 			}
 			credit, hasCredit := stats.Credit()
 			total, hasTotal := stats.TotalTokens()
@@ -2269,6 +2256,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		resp, err := upstream.Aggregate(rc)
 		rc.Close()
 		if err != nil {
+			// A rejected/invalid aggregate is not proof that the cached shape works.
+			h.rescue.forget(rescueKeyValue)
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			// 调用方先走了（前置 CDN 回源超时、AsyncOpenAI 类客户端 timeout、用户点停止）：
 			// 上游当时还在正常输出，网关也没出错。此前一律记 502 upstream_parse，把别人掐断
@@ -2382,6 +2371,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if modelEcho != "" {
 			resp["model"] = modelEcho
 		}
+		learnRescue()
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
 		st.outcome = reqlog.OutcomeSuccess
