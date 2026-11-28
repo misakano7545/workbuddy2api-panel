@@ -350,7 +350,7 @@ console.log('task row name fallback passed');`
 	}
 }
 
-// 模型限流时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
+// 模型限流映射时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
 func TestAppJSRateLimitMeta(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {

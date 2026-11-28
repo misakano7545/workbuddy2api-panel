@@ -968,6 +968,79 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .mrx > .mrx-pane:first-child, .mrx > .mrx-pane:last-child { flex: 0 0 auto; width: 100%; }
   .rule-pick { grid-template-columns: 1fr; max-height: 40vh; }
 }
+/* >>> modellimits-css（模型限流映射：工具条筛选、汇总卡、池级进度条、降级链、限流弹窗） */
+/* 汇总卡：一域一张，数值大、标签小；窄了就自动折成单列（不写死列数）。 */
+.ml-sum { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.ml-sc { background: var(--surface); border: 1px solid var(--line); border-radius: 11px; box-shadow: var(--shadow); padding: 13px 15px; }
+.ml-sc-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; min-width: 0; }
+.ml-sc-nm { font-size: 12px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ml-sc-gd { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px 10px; }
+.ml-sc-f { min-width: 0; }
+.ml-sc-k { font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.ml-sc-v { font: 600 15px var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.ml-sc-v.ok { color: var(--ok); }
+.ml-sc-v.warn { color: var(--warn); }
+.ml-sc-v.bad { color: var(--bad); }
+/* 工具条里的勾选胶囊：沿用 28px 的控件高度，别让整条工具条被 checkbox 顶高。 */
+.ml-chk { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+  font-size: 12.5px; color: var(--ink-2); white-space: nowrap; cursor: pointer; }
+.ml-chk input { width: auto; height: auto; margin: 0; accent-color: var(--accent); }
+.ml-chk.on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
+/* 表格列多：给一个下限，窄屏就横滑，不把列挤成竖排文字。 */
+#view-modellimits table.acc { min-width: 1120px; }
+#view-modellimits table.acc tbody tr[data-key] { cursor: pointer; }
+#view-modellimits table.acc td .ml-nm { font: 12.5px var(--mono); }
+.ml-dim { color: var(--ink-3); }
+/* 池级配额进度条：比账号表的 .bar 粗一档，80%/95% 两档颜色才看得出来。 */
+.ml-bar { height: 5px; max-width: 124px; background: var(--line); border-radius: 3px; margin-top: 5px; overflow: hidden; }
+.ml-bar i { display: block; height: 100%; background: var(--accent); }
+.ml-bar.warn i { background: var(--warn); }
+.ml-bar.bad i { background: var(--bad); }
+.ml-bar-k { margin-top: 3px; font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 降级链：箭头串，一条链十几个模型也要读得下去，所以允许换行。 */
+.ml-chain { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; font-size: 12px; }
+.ml-chain .st { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--surface-2); font: 11.5px var(--mono); color: var(--ink-2); }
+.ml-chain .st b { font-weight: 600; color: var(--ink-3); }
+.ml-chain .st.free { border-color: var(--ok); color: var(--ok); }
+.ml-chain .st.free b { color: var(--ok); }
+.ml-chain .ar { color: var(--ink-3); font-size: 11px; }
+.ml-chain .src { color: var(--ink-3); font-size: 11px; border: 1px dashed var(--line); border-radius: 999px; padding: 0 7px; }
+/* 展开行：账号明细用小一号的表，塞进详情行不撑破版面。 */
+#view-modellimits tr.ml-det > td { background: var(--surface-2); padding: 12px 14px; }
+.ml-acct { width: 100%; border-collapse: collapse; }
+.ml-acct th, .ml-acct td { padding: 4px 8px; font-size: 11.5px; text-align: left; border-bottom: 1px solid var(--line-soft); }
+.ml-acct th { color: var(--ink-3); font-weight: 600; white-space: nowrap; }
+.ml-acct th.num, .ml-acct td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ml-acct tr:last-child td { border-bottom: 0; }
+.ml-det-foot { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.ml-det-foot .grow { flex: 1; }
+/* 限流弹窗：两列字段，宽字段（手动链、备注）跨列。 */
+.ml-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
+.ml-f { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ml-f > span { font-size: 11.5px; color: var(--ink-3); }
+.ml-f input, .ml-f select { width: 100%; }
+.ml-f.wide { grid-column: 1 / -1; }
+.ml-f textarea { width: 100%; min-height: 62px; resize: vertical; padding: 7px 9px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--ink); font: 12px var(--mono); }
+/* 弹窗里的预览块：口径依据 + 推算链。 */
+.ml-pv { margin-top: 12px; border: 1px solid var(--line-soft); border-radius: 9px; padding: 10px 12px; background: var(--surface-2); }
+.ml-pv-hd { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); }
+.ml-pv-kv { margin-top: 7px; font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.ml-pv ul { margin: 7px 0 0; padding-left: 18px; }
+.ml-pv li { font-size: 11.5px; color: var(--ink-3); line-height: 1.6; }
+.ml-pv .ml-chain { margin-top: 9px; }
+/* 状态列里的补充信息：窗口边界与建议重试——压在标签下面的小字，不抢主列的视线。 */
+.ml-sub { margin-top: 3px; font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.ml-sub.warn { color: var(--warn); }
+/* 上游给的限流原因原文：可能很长，允许折行并限宽。 */
+.ml-why { margin-top: 3px; font-size: 11px; color: var(--ink-2); line-height: 1.45; max-width: 260px; }
+@media (max-width: 760px) {
+  .ml-form { grid-template-columns: 1fr; }
+  .ml-sc-gd { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+/* <<< modellimits-css */
 /* <<< modelrules-css */
 </style>
 </head>
@@ -1005,6 +1078,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#modelrules" data-view="modelrules">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.9 13 4v4.3c0 3-2 5.6-5 6.4-3-.8-5-3.4-5-6.4V4z"/><path d="M5.7 8.1 7.3 9.7l3-3.2"/></svg>
         模型规则</a></li>
+      <li><a href="#modellimits" data-view="modellimits">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 5.5h11M2.5 10.5h11"/><circle cx="5.5" cy="5.5" r="1.9"/><circle cx="10.5" cy="10.5" r="1.9"/></svg>
+        模型限流映射</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
@@ -1535,6 +1611,47 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
     </section>
     <!-- <<< modelrules-view -->
+    <!-- >>> modellimits-view -->
+    <!-- 模型限流映射：每个域每个模型还剩多少额度、吃紧时按哪条链降级。 -->
+    <section class="view" id="view-modellimits" hidden>
+      <div class="box">
+        <div class="fbar">
+          <span class="flab">预设</span>
+          <select id="mrlPreset" aria-label="限流预设"></select>
+          <span class="flab">域</span>
+          <select id="mrlRealm" aria-label="按域筛选"></select>
+          <input id="mrlQ" type="search" placeholder="搜索模型 / 域名" aria-label="搜索模型">
+          <label class="ml-chk" id="mrlTightLbl"><input type="checkbox" id="mrlTight">仅看吃紧</label>
+          <label class="ml-chk" id="mrlManualLbl"><input type="checkbox" id="mrlManual">仅看手动</label>
+          <span class="grow"></span>
+          <button class="xs primary" id="btnMrlNew">新增限流</button>
+          <button class="xs" id="btnMrlExportJson">导出 JSON</button>
+          <button class="xs" id="btnMrlExportMd">导出 Markdown</button>
+          <button class="xs" id="btnMrlRefresh">刷新</button>
+          <button class="xs danger" id="btnMrlReset">恢复默认</button>
+        </div>
+      </div>
+      <div class="ml-sum" id="mrlSummary"></div>
+      <div class="box">
+        <header>
+          <h3>模型限流映射 <span class="hint">点一行展开账号明细 · 点「设限」改配额与降级链</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="mrlTblNote"></span>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th>域</th><th>模型</th><th class="num">倍率</th><th>口径</th><th class="num">窗口</th>
+              <th class="num">单账号配额</th><th>池级配额</th><th class="num">剩余 token</th>
+              <th class="num">账号</th><th>状态</th><th>降级链</th><th class="c-acts">操作</th>
+            </tr></thead>
+            <tbody id="mrlBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="hint" id="mrlFoot"></div>
+    </section>
+    <!-- <<< modellimits-view -->
     <section class="view" id="view-config" hidden>
       <form id="cfgForm">
         <span class="vtabs" id="cfgRealmTabs">
@@ -2386,6 +2503,52 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   </div>
 </div>
 <!-- <<< modelrules-dlg -->
+<!-- >>> modellimits-dlg -->
+<!-- 限流编辑：一个 (域, 模型) 的配额与降级链；弹窗里可以直接预览推算结果。 -->
+<div class="veil" id="mrlVeil">
+  <div class="dlg" style="width:720px">
+    <header>
+      <h3 id="mrlDlgTitle">设置限流</h3>
+      <div class="hint" id="mrlDlgSub"></div>
+    </header>
+    <div class="body">
+      <div class="ml-form">
+        <label class="ml-f"><span>域</span><select id="mrlDlgRealm" aria-label="域"></select></label>
+        <label class="ml-f"><span>模型（留空 = 该域全部模型）</span><input id="mrlDlgModel" placeholder="例如 deepseek-v4.1-flash" maxlength="80"></label>
+        <label class="ml-f"><span>口径</span><select id="mrlDlgSource" aria-label="口径">
+          <option value="follow">跟随上游（只观测，不本地拦）</option>
+          <option value="manual">手动（本地拦 / 改道）</option>
+        </select></label>
+        <label class="ml-f"><span>命中动作</span><select id="mrlDlgOnHit" aria-label="命中动作">
+          <option value="degrade">降级改道</option>
+          <option value="hold">保持（不增发）</option>
+          <option value="passthrough">放行</option>
+        </select></label>
+        <label class="ml-f"><span>降级链模式</span><select id="mrlDlgChainMode" aria-label="降级链模式">
+          <option value="off">不降级</option>
+          <option value="fallback">用路由表兜底</option>
+          <option value="zero">优先零倍率</option>
+          <option value="auto">自动（零倍率 + 一个付费兜底）</option>
+        </select></label>
+        <label class="ml-f"><span>窗口（秒）</span><input id="mrlDlgWindow" inputmode="numeric" placeholder="86400"></label>
+        <label class="ml-f"><span>单账号 token 配额（0 = 沿用推算）</span><input id="mrlDlgTok" inputmode="numeric" placeholder="0"></label>
+        <label class="ml-f"><span>单账号积分（0 = 不限）</span><input id="mrlDlgCreditAcc" inputmode="numeric" placeholder="0"></label>
+        <label class="ml-f"><span>池级积分（0 = 不限）</span><input id="mrlDlgCreditPool" inputmode="numeric" placeholder="0"></label>
+        <label class="ml-f"><span>备注</span><input id="mrlDlgNote" placeholder="为什么这么设" maxlength="120"></label>
+        <label class="ml-f wide"><span>手动链（逗号或换行分隔，留空 = 用自动链）</span><textarea id="mrlDlgChain" spellcheck="false"></textarea></label>
+      </div>
+      <div class="ml-pv" id="mrlPreview"><div class="hint">点「预览」看这套设置会算成什么配额、走哪条链。</div></div>
+    </div>
+    <footer>
+      <button class="danger" id="btnMrlDelete">删除覆盖</button>
+      <span class="grow"></span>
+      <button id="btnMrlPreview">预览</button>
+      <button id="btnMrlCancel">取消</button>
+      <button class="primary" id="btnMrlSave">保存</button>
+    </footer>
+  </div>
+</div>
+<!-- <<< modellimits-dlg -->
 <script src="app.js"></script>
 </body>
 </html>

@@ -2625,6 +2625,18 @@ func (c *Client) StoreModelMaxOutForTest(realm string, maxOut map[string]int64) 
 	c.storeModelMaxOut(realm, infos)
 }
 
+// StoreModelRatesForTest 跨包测试钩子：直接写入某域的模型倍率快照（真实路径由
+// storeModelRates 在目录刷新时写入）。用于断言「用量/成本记账的倍率维度跟着实际
+// 出站模型走」这类跨包口径；仅测试引用，字符串原样保存不规范化。
+func (c *Client) StoreModelRatesForTest(realm string, rates map[string]string) {
+	c.effortsMu.Lock()
+	defer c.effortsMu.Unlock()
+	if c.modelRates == nil {
+		c.modelRates = make(map[string]map[string]string)
+	}
+	c.modelRates[realmKey(realm)] = rates
+}
+
 // modelMaxOutSnapshot 返回输出上限快照副本；nil 表示未知（不补默认，行为同旧路径）。
 func (c *Client) modelMaxOutSnapshot(realm string) map[string]int64 {
 	c.effortsMu.RLock()
@@ -2648,6 +2660,25 @@ func (c *Client) ModelRate(realm, model string) string {
 	c.effortsMu.RLock()
 	defer c.effortsMu.RUnlock()
 	return c.modelRates[realmKey(realm)][model]
+}
+
+// ModelRatesSnapshot 返回指定域模型倍率快照副本；空表示未知/尚未刷新过目录。
+// 供只读聚合端点一次取整张倍率表（ModelRate 是单模型查询，逐个取要反复拿锁）。
+func (c *Client) ModelRatesSnapshot(realm string) map[string]string {
+	if c == nil {
+		return nil
+	}
+	c.effortsMu.RLock()
+	defer c.effortsMu.RUnlock()
+	bucket := c.modelRates[realmKey(realm)]
+	if len(bucket) == 0 {
+		return nil
+	}
+	cp := make(map[string]string, len(bucket))
+	for k, v := range bucket {
+		cp[k] = v
+	}
+	return cp
 }
 
 // GlobalEffortSnapshot 导出 global 域 effort 能力缓存（探测下发 ∪ 静态兜底合并后的桶），

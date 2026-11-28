@@ -23,11 +23,19 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/prompt"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
+	"github.com/misakano7545/workbuddy2api-panel/internal/ratelimit"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/session"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 	"github.com/misakano7545/workbuddy2api-panel/internal/usage"
 )
+
+// modelLimitDegradeHops 是本地配额降级最多连降几级。
+//
+// 三级足够覆盖「A 配额用尽 → B 也用尽 → C 还有余量」这种常见形态，又不至于让一次
+// 请求连改三次模型把请求体里的顶层 model 改得面目全非。链上真正的模型由策略链决定
+// （人工链 > pool.model_fallback > 自动链），这里只限制「一路降到底」的深度。
+const modelLimitDegradeHops = 3
 
 // Config handler 依赖。
 type Config struct {
@@ -48,6 +56,11 @@ type Config struct {
 	// 前缀均可），value = 6004 限流时改用的等价模型。空/nil = 不降级（老行为）。
 	// 只对 6004 模型级限流生效；降级不写持久状态，冷却到期自动回原模型。
 	ModelFallback func() map[string]string
+
+	// ModelLimits 模型限流映射 tracker（可选；nil = 未启用，全部判定与降级链跳过，
+	// 老行为逐字节不变）。与面板注入的是同一个实例：本地强制用的策略就是面板上
+	// 那份，否则会出现「面板显示超额、请求照样放行」。
+	ModelLimits *ratelimit.Tracker
 
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
@@ -1131,15 +1144,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 本账号换用等价模型重试（curModel 改指向等价模型），随后重置回 bareModel。
 	//
 	// ⚠️ 为什么必须与 bareModel 分开：降级后二者指向**不同模型**，而它们要喂给不同用途 ——
-	//   - **实际用途**（选号 / 出站 body 重写 / 成本记账 / 提示语）→ curModel
-	//   - **冷却记账**（applyErrorPolicy 的 6004 分支）→ bareModel（**限流的是原模型**！
-	//     若误记成等价模型，会把本来好好的等价模型也冷却掉，降级就白做了）
+	//   - **实际用途**（选号 / 出站 body 重写 / 用量与成本记账 / 提示语）→ curModel
+	//   - **冷却记账**（applyErrorPolicy 的 6004 分支）→ 也是 curModel：6004 是**本次**
+	//     出站的那个模型撞墙的，记到它名下才对；记 bareModel 会在多级降级时把「已经
+	//     放弃的模型」反复记一遍、把真正被限流的等价模型当成健康（下一条请求立刻再撞
+	//     一次 6004，限流页也把额度记在错模型上）。降级目标本身没被上游拒绝前不会被
+	//     冷却——applyErrorPolicy 只在**收到错误之后**才调用。
 	curModel := bareModel
 	// fallbackTried 记录本请求**已试过的降级目标**，防 A→B→A 循环。
 	// 与 tried（按账号去重）正交：降级是「同账号换模型」，故需独立追踪。
 	fallbackTried := map[string]bool{}
 	// fallbackTo 返回 curModel 的等价模型（未配置 / 已试过 / 自指 → 空）。
 	fallbackTo := func() string {
+		// 一、模型限流映射的策略链优先：它是运维在面板上对「这个模型额度用尽后该去哪」的
+		// 显式声明，比全局 model_fallback 表更精确（可带域前缀、可写倍率备注）。
+		// 白/黑名单过滤不因来源而放松 —— 链上指到禁用模型就当该环不成立，继续走老表，
+		// 而不是把用户硬送到一个不许用的模型上。
+		if tr := h.cfg.ModelLimits; tr != nil {
+			if to := tr.NextChainTarget(realm, curModel, fallbackTried); to != "" && to != curModel &&
+				h.allowedModel(realm, to) && !h.hiddenModel(realm, to) {
+				return to
+			}
+		}
+		// 二、退回 pool.model_fallback 表（老机制，语义不变）。
 		if h.cfg.ModelFallback == nil {
 			return ""
 		}
@@ -1162,13 +1189,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return to
 	}
 	// applyFallback 把本轮模型切到等价模型，并重写出站 body 的顶层 model。
-	// 只改 curModel —— bareModel 保持原模型，供冷却记账使用。
+	// 只改 curModel —— bareModel 保持原模型（日志里的「原模型 -> 等价模型」、提示语、
+	// 路由显示都用它）；记账与冷却都跟着 curModel，见上。
 	applyFallback := func(to string) bool {
 		if to == "" {
 			return false
 		}
 		fallbackTried[to] = true
-		log.Printf("model fallback: %s -> %s (6004 model rate limit, uid pending)", curModel, to)
+		// 这里不打日志：三个调用点的措辞不一样（6004 冷却、无号可接、本地配额降级），
+		// 各自打自己的那行，免得这里写死一种原因把别的场景说错。
 		curModel = to
 		// 出站 body 重写：上游必须收到等价模型名。与上方 models.aliases 同一手法
 		// （解析 → 改顶层 model → 重序列化），保持单一路径、避免两套改写逻辑漂移。
@@ -1246,6 +1275,55 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.status = http.StatusServiceUnavailable
 		st.outcome = reqlog.OutcomeHTTPError
 		return
+	}
+
+	// 模型限流映射的本地强制（model limits）：在选号之前按 (域, 模型) 的配额判一次，该拦就拦、
+	// 该降就降。为什么不等到撞上游再靠 6004 兜底：本地已经知道超额时还发出去，白烧一次
+	// 上游调用，还可能把账号推进冷却，反而更慢更贵。
+	// tracker 为 nil（未装配）时整段跳过 —— 未启用该功能时行为逐字节不变。
+	if tr := h.cfg.ModelLimits; tr != nil {
+		if d := tr.Decide(realm, curModel); d.Action != "" {
+			switch d.Action {
+			case ratelimit.ActionHold:
+				msg := fmt.Sprintf("model %s hit its token/credit quota on realm %s", curModel, realm)
+				if d.Reason != "" {
+					msg = fmt.Sprintf("model %s hit its token/credit quota on realm %s: %s", curModel, realm, d.Reason)
+				}
+				// Retry-After：给客户端一个「最早什么时候有额度滚出窗口」的提示（近似值，
+				// 口径见 internal/ratelimit/README.md）。不给重试时刻的 429 会让客户端按指数退避
+				// 空转，不如直接告诉它窗口什么时候翻篇。
+				if d.RetryAfterSec > 0 {
+					w.Header().Set("Retry-After", strconv.Itoa(d.RetryAfterSec))
+				}
+				writeOpenAIErrorHint(w, http.StatusTooManyRequests, "model_limit_hold", msg,
+					"this is a local quota policy, not an upstream rate limit: retrying the same model keeps failing until the window rolls over; pick another model or ask the operator to raise the quota")
+				st.status = http.StatusTooManyRequests
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			case ratelimit.ActionDegrade:
+				// 降级目标仍要过白/黑名单：策略链是运维建议，禁用的是运维决定，后者更硬。
+				//
+				// 允许再降一级：配额是**按模型各算的**，目标模型自己也可能已经吃紧。
+				// 不复查就往下走，等于「明知道目标也会超额还照样发出去」，本地限流就成了
+				// 摆设。每换一次模型都重新判一次，最多降 modelLimitDegradeHops 级；
+				// fallbackTried 保证不会在 A→B→A 之间打转。
+				for hop := 0; hop < modelLimitDegradeHops; hop++ {
+					if d.Target == "" || fallbackTried[d.Target] ||
+						!h.allowedModel(realm, d.Target) || h.hiddenModel(realm, d.Target) {
+						break
+					}
+					log.Printf("model limit degrade: %s -> %s (realm %s): %s", curModel, d.Target, realm, d.Reason)
+					applyFallback(d.Target)
+					// 记下本轮实际用的模型：请求日志/归档要看到降级后的模型，
+					// 否则日志里会写着原模型，排查时对不上。
+					st.modelEff = curModel
+					d = tr.Decide(realm, curModel)
+					if d.Action != ratelimit.ActionDegrade {
+						break
+					}
+				}
+			}
+		}
 	}
 
 	tried := map[string]bool{}
@@ -1365,10 +1443,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		} else if delta.HasPromptTokens || delta.HasCompletionTokens {
 			st.totalTokens = st.promptTokens + st.completionTokens
 		}
-		delta.Model = bareModel
-		if delta.Model == "" {
-			delta.Model = peek.Model
-		}
+		// 归属口径 = **本轮实际出站的模型**（curModel），不是请求的原模型：
+		// 6004 降级 / 本地限流降级会把本轮换成等价模型，而上游按「账号 × 模型」发配额，
+		// 记到原模型上会让原模型虚高（限流页出现 941.9M / 600M 这类超额）、兜底模型虚低。
+		delta.Model = attemptModel(curModel, bareModel, peek.Model)
 		latency := time.Since(started)
 		latencyMs := latency.Milliseconds()
 		if latencyMs < 1 {
@@ -1396,6 +1474,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if a, ok := h.cfg.Pool.Status(uid); ok && a.Realm != "" {
 				realm = a.Realm
 			}
+			// 倍率维度同样跟着本轮模型走：降级后实际模型倍率不同，沿用请求原模型的倍率
+			// 会让 /panel/api/usage 的按倍率聚合与成本视图对不上真实出站模型。
+			rate := modelRate
+			if h.cfg.Upstream != nil && delta.Model != bareModel {
+				rate = h.cfg.Upstream.ModelRate(realm, delta.Model)
+			}
 			h.cfg.Usage.Add(time.Now(), realm, uid, delta.Model, usage.Delta{
 				PromptTokens:     delta.PromptTokens,
 				HasPromptTokens:  delta.HasPromptTokens,
@@ -1405,7 +1489,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				HasTotal:         delta.HasTotalTokens,
 				Credit:           credit,
 				HasCredit:        hasCredit,
-				ModelRate:        modelRate,
+				ModelRate:        rate,
 				LatencyMs:        delta.LatencyMs,
 				HasLatency:       delta.HasLatencyMs,
 				TokensPerSecond:  delta.TokensPerSecond,
@@ -1706,21 +1790,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// ⚠️ 为什么只认 6004：11102（该后端无此模型）换模型也救不了（等价模型可能
 			// 同样没有）；11101/普通 429/5xx 是账号级或瞬时问题，换模型无意义。
 			//
-			// ⚠️ 冷却必须记在 **bareModel**（原模型）名下——见函数内 applyErrorPolicy
-			// 调用处。若误记成等价模型，会把本来好好的等价模型也冷却掉，降级白做。
+			// ⚠️ 冷却必须记在**本轮实际出站的模型**（curModel）名下——见下方
+			// applyErrorPolicy 调用处。它才是刚被 6004 拒掉的那个模型；记成 bareModel 会
+			// 在多级降级里把「已经放弃的模型」反复记一遍，而真正撞墙的等价模型仍被当成
+			// 健康：下一条同类请求会在同一个模型上再撞一次，限流页的推算式额度也会把
+			// 已用错记到别的模型上。反过来也不必担心冷却了「还没试过的降级目标」——
+			// applyErrorPolicy 只在收到错误之后才调用。
 			if kind == upstream.ErrSoftRate && upstream.IsModelRateLimit(string(respBody)) {
 				if to := fallbackTo(); to != "" {
-					// 先按原模型罚账号/记冷却（限流的是原模型），再切等价模型重试。
-					h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-					savedBare := bareModel
+					// 先按本轮模型罚账号/记冷却，再切等价模型重试。
+					from := curModel
+					h.applyErrorPolicy(acct.UID, kind, string(respBody), curModel, uerr)
 					if applyFallback(to) {
 						st.modelEff = to
 						// 同账号重试：把该账号从 tried 移除（降级是「换模型」不是「换号」，
 						// 同一账号仍应有机会），并让 sticky 保持（本请求内不重绑）。
 						delete(tried, acct.UID)
-						bareModel = savedBare // 冷却记账口径不变，仅 curModel 改了
 						releaseHeld()
-						log.Printf("model fallback: %s -> %s (6004 model rate limit, uid=%s)", savedBare, to, acct.UID)
+						log.Printf("model fallback: %s -> %s (6004 model rate limit, uid=%s)", from, to, acct.UID)
 						continue
 					}
 				}
@@ -1930,7 +2017,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
-			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+			// 同上：模型级冷却/窗口登记按本轮实际出站的模型，避免降级后把错误记到原模型。
+			h.applyErrorPolicy(acct.UID, kind, string(respBody), curModel, uerr)
 			fail(acct.UID)
 			// 11140 风控连坐（restrict.go）：上游判的是设备/出口而不是单个账号，换号等于
 			// 把下一个号也送进去 → 就地停手，并把这次限制喂给所属域的暂停判定。
@@ -2017,7 +2105,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				} else {
 					// 帧内错误没有独立 HTTP 状态：末端映射只看 Kind，Status 仅作信封占位。
 					kind := frameKind
-					h.applyErrorPolicy(acct.UID, kind, hv.Payload, bareModel, nil)
+					// 与 HTTP ≥400 路径同口径：模型级冷却按本轮实际出站的模型（帧内 6004
+					// 出现在降级重试上时，撞墙的是等价模型，不是请求原模型）。
+					h.applyErrorPolicy(acct.UID, kind, hv.Payload, curModel, nil)
 					// 请求本身的错误（内容拦截 / 超长 / 参数 / 工具定义……）以「200 + 首帧 error 帧」
 					// 出现时与 HTTP ≥400 路径同口径：同一 body 换任何账号都是同一个拒绝，立即回 400
 					// 并透传 error 帧原文。否则轮转额度烧完后落到末端 503 no_healthy_account，
@@ -2143,14 +2233,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			// WARN 信号（issue #92 同步）：曾命中过的模型本次大前缀整段未命中 →
 			// 记一条可行动告警（上游前缀缓存重算，费用数倍放大）。
+			// 本次成功尝试实际服务的模型（降级后 != bareModel）：缓存告警与实测单价都必须
+			// 记在它名下，否则兜底模型的单价记到原模型上，选号会按错的单价挑号。
+			served := attemptModel(curModel, bareModel, peek.Model)
 			if st.hasCache {
-				cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, int64(st.cacheHit), int64(st.cacheMiss))
+				cacheMissWarn.noteCacheTokens(served, st.promptTokens, int64(st.cacheHit), int64(st.cacheMiss))
 			}
 			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
 			// 供下次选号把免费/便宜的号排在前面。
 			if hasCredit {
 				st.credit, st.hasCredit = credit, true
-				h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
+				h.cfg.Pool.NoteModelCost(acct.UID, served, credit, total)
 			}
 			rc.Close()
 			return
@@ -2280,13 +2373,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		// WARN 信号（issue #92 同步）：与流式路径同口径（st.promptTokens 已由
 		// recordAttempt 按本次观测填入）。
+		served := attemptModel(curModel, bareModel, peek.Model)
 		if st.hasCache {
-			cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, int64(st.cacheHit), int64(st.cacheMiss))
+			cacheMissWarn.noteCacheTokens(served, st.promptTokens, int64(st.cacheHit), int64(st.cacheMiss))
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if hasCredit {
 			st.credit, st.hasCredit = credit, true
-			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
+			h.cfg.Pool.NoteModelCost(acct.UID, served, credit, total)
 		}
 		return
 	}

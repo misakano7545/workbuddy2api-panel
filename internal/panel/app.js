@@ -479,7 +479,7 @@ $('btnLogout').onclick = () => {
 };
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', proxies: '代理池', usage: '用量', packages: '积分构成', balhist: '余额趋势', taskscenter: '任务中心', models: '模型与档位', config: '配置', events: '请求事件日志', logs: '运行日志', modelrules: '模型规则' };
+const TITLES = { accounts: '账号池', proxies: '代理池', usage: '用量', packages: '积分构成', balhist: '余额趋势', taskscenter: '任务中心', models: '模型与档位', config: '配置', events: '请求事件日志', logs: '运行日志', modelrules: '模型规则', modellimits: '模型限流映射' };
 function go(v) {
   navSet(false);
   view = v;
@@ -488,6 +488,7 @@ function go(v) {
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'modelrules') loadModelRules();
+  if (v === 'modellimits') loadModelLimits();
   if (v === 'config') loadConfig();
   if (v === 'proxies') loadProxies();
   // 切到日志视图：本地窗口为空（首次）时全量拉一次；已有窗口则继续增量。
@@ -2601,6 +2602,8 @@ function refreshVisible() {
   else if (view === 'logs') loadLogs();
   else if (view === 'proxies') loadProxies(true);
   else if (view === 'taskscenter') reattachQueueView();
+  // 模型限流映射页的数字是实时额度，同样只在它可见时刷；quiet=true 保住上一屏。
+  else if (view === 'modellimits') loadModelLimits(true);
 }
 // startPolling（重）建轮询定时器。间隔取 pollIntervalMs（服务端配置可调）；
 // pollAutoRefresh=false（配置为负）时不开表——只在用户手动操作时更新。
@@ -6600,3 +6603,674 @@ $('mrAccBody').addEventListener('click', e => {
   if (btn) openAccRuleDlg(btn.dataset.uid);
 });
 // <<< modelrules-app
+
+// >>> modellimits-app
+/* ── 模型限流映射（配额 + 降级链） ───────────────────────────────────────────
+   运营要一眼看出「哪个域哪个模型还剩多少、吃紧时降到哪」。
+   数字全部来自后端 internal/ratelimit 的 View；面板只做筛选、展开与编辑，
+   只碰 internal/ratelimit/README.md 里的四个端点：
+   GET model_limits、POST model_limits/policy|preview|export。 */
+let mrlView = null;           // 最近一次拿到的 ratelimit.View
+let mrlRows = [];             // 当前渲染的行（筛选后）
+let mrlExpanded = new Set();  // 展开了账号明细的行 key
+let mrlShowAll = new Set();   // 明细里点过「展开全部」的行 key
+let mrlRealm = 'all';         // 域过滤
+let mrlQ = '';                // 搜索词
+let mrlTightOnly = false;     // 仅看吃紧
+let mrlManualOnly = false;    // 仅看手动
+let mrlEditing = null;        // 弹窗正在编辑的行（null = 新增）
+let mrlFallback = {};         // GET model_limits 返回的 fallback 路由表
+
+// >>> modellimits-pure
+/* 纯渲染函数（不碰页面状态，node+vm 可以单独跑）：
+   limitRowHtml / limitDetailHtml / chainHtml / policyPayload。 */
+function mrlKey(row) {
+  return String((row && row.realm) || '') + '|' + String((row && row.model) || '');
+}
+
+function mrlRealmLabel(realm) {
+  if (realm === 'cn') return '国内版';
+  if (realm === 'global') return '国际版';
+  return realm ? String(realm) : '全部';
+}
+
+function mrlWindowLabel(sec) {
+  const s = Number(sec || 0);
+  if (!s) return '—';
+  if (s % 86400 === 0) return String(s / 86400) + ' 天';
+  if (s % 3600 === 0) return String(s / 3600) + ' 小时';
+  return String(s) + ' 秒';
+}
+
+/* 占用比例是 0..1 的小数（见 internal/ratelimit/README.md 的 pool.pct）：
+   文本如实显示真实占比（超额就写 157.0%），进度条视觉封顶 100%；
+   超过 80% 转黄、超过 95% 转红（用真实值判，超额必红）。 */
+function mrlPctRaw(pct) {
+  const v = Number(pct || 0);
+  return Number.isFinite(v) && v > 0 ? v * 100 : 0;
+}
+
+function mrlPct(pct) {
+  return Math.min(100, mrlPctRaw(pct));
+}
+
+function mrlPctClass(pct) {
+  const p = mrlPctRaw(pct);
+  if (p > 95) return 'bad';
+  if (p > 80) return 'warn';
+  return '';
+}
+
+function mrlBarHtml(pct) {
+  const p = mrlPct(pct);
+  const cls = mrlPctClass(pct);
+  return '<div class="ml-bar' + (cls ? ' ' + cls : '') + '"><i style="width:' + p.toFixed(1) + '%"></i></div>';
+}
+
+function mrlStateTag(state) {
+  if (state === 'locked') return '<span class="tag bad">全部吃紧</span>';
+  if (state === 'partial') return '<span class="tag warn">部分吃紧</span>';
+  return '<span class="tag ok">正常</span>';
+}
+
+function mrlChainSourceLabel(src) {
+  if (src === 'manual') return '人工链';
+  if (src === 'fallback') return '路由表';
+  if (src === 'auto-zero') return '自动零倍率';
+  if (src === 'auto-cheap') return '自动兜底';
+  return '不降级';
+}
+
+function mrlChainStepHtml(step) {
+  const st = step || {};
+  const free = !!st.zero_rate;
+  const rate = free ? '免费' : (st.has_rate && st.rate !== '' && st.rate != null ? '×' + String(st.rate) : '');
+  const tip = st.reason ? ' title="' + esc(String(st.reason)) + '"' : '';
+  return '<span class="st' + (free ? ' free' : '') + '"' + tip + '>' + esc(String(st.model || '?')) +
+    (rate ? '<b>' + esc(rate) + '</b>' : '') + '</span>';
+}
+
+/* 降级链：箭头串；零倍率标「免费」，末尾带来源标签（人工链 / 路由表 / 自动）。 */
+function chainHtml(chain, source) {
+  const list = Array.isArray(chain) ? chain.filter(Boolean) : [];
+  const tag = source && source !== 'none' ? '<span class="src">' + esc(mrlChainSourceLabel(source)) + '</span>' : '';
+  if (!list.length) return '<span class="ml-chain"><span class="ml-dim">不降级</span>' + tag + '</span>';
+  return '<span class="ml-chain">' + list.map(mrlChainStepHtml).join('<span class="ar">→</span>') + tag + '</span>';
+}
+
+/* 冷却时间按本机时区显示（后端给的是 RFC3339）。 */
+function mrlUntilLabel(iso) {
+  const s = String(iso || '');
+  if (!s) return '—';
+  const d = new Date(s);
+  const t = d.getTime();
+  if (!Number.isFinite(t)) return esc(s);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+/* 窗口边界这类可选时间：空就不显示；有值就转本机 HH:MM（不甩 RFC3339 原文）。 */
+function mrlClockLabel(iso) {
+  const s = String(iso || '');
+  if (!s) return '';
+  const d = new Date(s);
+  const t = d.getTime();
+  if (!Number.isFinite(t)) return '';
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+/* 建议重试秒数 → 人话（后端只在已吃紧时才给这个值，0 表示没建议）。 */
+function mrlRetryLabel(sec) {
+  const n = Math.round(Number(sec || 0));
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n < 60) return '建议 ' + String(n) + ' 秒后重试';
+  if (n < 3600) {
+    const m = Math.floor(n / 60);
+    const s = n % 60;
+    return '建议 ' + String(m) + ' 分' + (s ? ' ' + String(s) + ' 秒' : '') + '后重试';
+  }
+  const h = Math.floor(n / 3600);
+  const m = Math.floor((n % 3600) / 60);
+  return '建议 ' + String(h) + ' 小时' + (m ? ' ' + String(m) + ' 分' : '') + '后重试';
+}
+
+function limitRowHtml(row) {
+  const r = row || {};
+  const free = !!r.zero_rate;
+  const rateCell = free
+    ? '<span class="tag ok">免费</span>'
+    : (r.has_rate && r.rate !== '' && r.rate != null ? '×' + esc(String(r.rate)) : '<span class="ml-dim">未知</span>');
+  const srcCell = r.source === 'manual' ? '<span class="tag warn">手动</span>' : '<span class="tag mute">跟随上游</span>';
+  const q = r.quota || {};
+  const pool = r.pool || {};
+  const quotaCell = '<span>' + esc(formatTokenCount(q.token_per_account)) + '</span>' +
+    (q.inferred ? ' <span class="tag mute">推算</span>' : '');
+  const poolCell = '<span>' + esc(formatTokenCount(pool.quota_tokens)) + '</span>' +
+    mrlBarHtml(pool.pct) +
+    '<div class="ml-bar-k">已用 ' + esc(formatTokenCount(pool.used_tokens)) + ' · ' + mrlPctRaw(pool.pct).toFixed(1) + '%</div>';
+  const accCell = String(Number(r.routable_accounts || 0)) +
+    (Number(r.limited_accounts || 0) ? ' <span class="tag warn">吃紧 ' + String(Number(r.limited_accounts || 0)) + '</span>' : '');
+  const qReset = mrlClockLabel(r.quota_reset_at);
+  const retry = mrlRetryLabel(r.retry_after_sec);
+  const stateCell = mrlStateTag(r.limit_state) + (r.degrading ? ' <span class="tag mute">降级中</span>' : '') +
+    (qReset ? '<div class="ml-sub">最早滚出 ' + esc(qReset) + '</div>' : '') +
+    (retry ? '<div class="ml-sub warn">' + esc(retry) + '</div>' : '');
+  return '<tr data-key="' + esc(mrlKey(r)) + '">' +
+    '<td><span class="realm-tag">' + esc(mrlRealmLabel(r.realm)) + '</span></td>' +
+    '<td><div class="ml-nm">' + esc(String(r.model || '(整域)')) + '</div>' +
+      (r.note ? '<div class="ml-dim">' + esc(String(r.note)) + '</div>' : '') + '</td>' +
+    '<td class="num">' + rateCell + '</td>' +
+    '<td>' + srcCell + '</td>' +
+    '<td class="num">' + esc(mrlWindowLabel(r.window_sec || q.window_sec)) + '</td>' +
+    '<td class="num">' + quotaCell + '</td>' +
+    '<td>' + poolCell + '</td>' +
+    '<td class="num">' + esc(formatTokenCount(pool.remaining_tokens)) + '</td>' +
+    '<td class="num">' + accCell + '</td>' +
+    '<td>' + stateCell + '</td>' +
+    '<td>' + chainHtml(r.chain, r.chain_source) + '</td>' +
+    '<td class="c-acts"><button class="xs" data-act="edit">设限</button></td>' +
+  '</tr>';
+}
+
+/* 展开行：账号明细。超过 8 个默认只给前 8 个，后面点「展开全部」。 */
+function limitDetailHtml(row, showAll) {
+  const r = row || {};
+  const list = Array.isArray(r.accounts) ? r.accounts : [];
+  const cut = showAll ? list.length : Math.min(list.length, 8);
+  const cells = list.slice(0, cut).map(a => {
+    const acc = a || {};
+    const limited = acc.limited ? '<span class="tag warn">吃紧</span>' : '<span class="tag ok">正常</span>';
+    const routable = acc.routable ? '' : ' <span class="tag mute">不可路由</span>';
+    const why = acc.reason ? '<div class="ml-why">' + esc(String(acc.reason)) + '</div>' : '';
+    const accReset = mrlClockLabel(acc.quota_reset_at);
+    return '<tr>' +
+      '<td>' + esc(String(acc.uid || '')) +
+        (acc.nickname ? ' <span class="ml-dim">' + esc(String(acc.nickname)) + '</span>' : '') + routable + '</td>' +
+      '<td class="num">' + esc(formatTokenCount(acc.tokens)) + '</td>' +
+      '<td class="num">' + esc(formatTokenCount(acc.remaining_tokens)) + '</td>' +
+      '<td class="num">' + mrlPctRaw(acc.pct).toFixed(1) + '%</td>' +
+      '<td>' + limited + why + '</td>' +
+      '<td>' + esc(mrlUntilLabel(acc.until)) +
+        (accReset ? '<div class="ml-sub">额度滚出 ' + esc(accReset) + '</div>' : '') + '</td>' +
+      '<td class="num">' + esc(acc.credits_left == null ? '—' : String(acc.credits_left)) + '</td>' +
+    '</tr>';
+  }).join('');
+  const table = list.length
+    ? '<table class="ml-acct"><thead><tr><th>账号</th><th class="num">已用</th><th class="num">剩余</th>' +
+      '<th class="num">占比</th><th>状态</th><th>冷却至</th><th class="num">剩余积分</th></tr></thead><tbody>' +
+      cells + '</tbody></table>'
+    : '<div class="hint">这个模型当前没有账号明细</div>';
+  const more = list.length > 8
+    ? (showAll
+      ? '<button class="xs" data-acc="less">收起</button>'
+      : '<button class="xs" data-acc="more">展开全部 ' + String(list.length) + ' 个</button>')
+    : '';
+  return '<tr class="ml-det" data-det="' + esc(mrlKey(r)) + '"><td colspan="12">' + table +
+    '<div class="ml-det-foot"><span class="hint">共 ' + String(list.length) + ' 个账号，其中吃紧 ' +
+    String(Number(r.limited_accounts || 0)) + ' 个</span><span class="grow"></span>' + more +
+    '</div></td></tr>';
+}
+
+/* 表单 → policy upsert 的 limit 体（预览与保存共用同一份口径）。 */
+function policyPayload(f) {
+  const src = f || {};
+  const chain = String(src.chain || '').split(/[\n,，]+/).map(s => s.trim()).filter(Boolean);
+  const num = (v, min) => {
+    const n = Number(v || 0);
+    if (!Number.isFinite(n)) return min;
+    return n < min ? min : n;
+  };
+  return {
+    realm: String(src.realm || '').trim(),
+    model: String(src.model || '').trim(),
+    source: src.source === 'manual' ? 'manual' : 'follow',
+    window_sec: Math.round(num(src.window_sec, 0)),
+    token_quota_per_account: Math.round(num(src.token_quota_per_account, 0)),
+    credit_quota_per_account: num(src.credit_quota_per_account, 0),
+    credit_quota_per_pool: num(src.credit_quota_per_pool, 0),
+    on_hit: src.on_hit || 'degrade',
+    chain_mode: src.chain_mode || 'off',
+    chain: chain,
+    note: String(src.note || '').trim(),
+  };
+}
+/* 行排序：池级已用额度降序优先（一眼看到谁在烧钱），已用相同按剩余可用额度升序
+   （与后端 sortRows 同口径）。 */
+function mrlSortRows(rows) {
+  return rows.slice().sort((a, b) => {
+    const pa = a && a.pool || {}, pb = b && b.pool || {};
+    if (Number(pa.used_tokens || 0) !== Number(pb.used_tokens || 0)) {
+      return Number(pb.used_tokens || 0) - Number(pa.used_tokens || 0);
+    }
+    if (Number(pa.remaining_tokens || 0) !== Number(pb.remaining_tokens || 0)) {
+      return Number(pa.remaining_tokens || 0) - Number(pb.remaining_tokens || 0);
+    }
+    return String((a && a.full_name) || (a && a.model) || '').localeCompare(String((b && b.full_name) || (b && b.model) || ''));
+  });
+}
+// <<< modellimits-pure
+
+/* 汇总卡：每域一张（账号 / 可路由 / 剩余积分 / 吃紧模型 / 降级中模型），
+   外加一张全局卡（窗口 tokens 与请求数）。 */
+function mrlStatCell(k, val, cls) {
+  return '<div class="ml-sc-f"><div class="ml-sc-k">' + esc(k) + '</div><div class="ml-sc-v' +
+    (cls ? ' ' + cls : '') + '">' + esc(val) + '</div></div>';
+}
+
+function mrlCredit(v) {
+  const n = Number(v || 0);
+  if (!Number.isFinite(n)) return '0';
+  return n >= 1000 ? formatTokenCount(n) : String(Math.round(n * 10) / 10);
+}
+
+function mrlFirstWindow() {
+  const rows = (mrlView && mrlView.rows) || [];
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i] && rows[i].window_sec) return rows[i].window_sec;
+  }
+  return 86400;
+}
+
+function mrlSummaryCard(realm, s) {
+  const sum = s || {};
+  const limited = Number(sum.limited_models || 0);
+  const degrading = Number(sum.degrading_models || 0);
+  return '<div class="ml-sc">' +
+    '<div class="ml-sc-hd"><span class="realm-tag">' + esc(mrlRealmLabel(realm)) + '</span>' +
+      '<span class="ml-sc-nm">' + String(Number(sum.models || 0)) + ' 个模型</span></div>' +
+    '<div class="ml-sc-gd">' +
+      mrlStatCell('账号', String(Number(sum.accounts || 0)), '') +
+      mrlStatCell('可路由', String(Number(sum.routable || 0)), '') +
+      mrlStatCell('剩余积分', mrlCredit(sum.credits), '') +
+      mrlStatCell('吃紧模型', String(limited), limited ? 'warn' : '') +
+      mrlStatCell('降级中', String(degrading), degrading ? 'warn' : '') +
+      mrlStatCell('模型数', String(Number(sum.models || 0)), '') +
+    '</div></div>';
+}
+
+function mrlTotalsCard(t) {
+  const tot = t || {};
+  const limited = Number(tot.limited_models || 0);
+  const degrading = Number(tot.degrading_models || 0);
+  return '<div class="ml-sc">' +
+    '<div class="ml-sc-hd"><span class="tag mute">全局</span>' +
+      '<span class="ml-sc-nm">窗口 ' + esc(mrlWindowLabel(mrlFirstWindow())) + ' · 共 ' +
+      String(Number(tot.models || 0)) + ' 个模型</span></div>' +
+    '<div class="ml-sc-gd">' +
+      mrlStatCell('窗口 tokens', formatTokenCount(tot.tokens), '') +
+      mrlStatCell('窗口请求', String(Number(tot.requests || 0)), '') +
+      mrlStatCell('吃紧模型', String(limited), limited ? 'warn' : '') +
+      mrlStatCell('降级中模型', String(degrading), degrading ? 'warn' : '') +
+      mrlStatCell('账号 / 可路由', String(Number(tot.accounts || 0)) + ' / ' + String(Number(tot.routable || 0)), '') +
+      mrlStatCell('剩余积分', mrlCredit(tot.credits), '') +
+    '</div></div>';
+}
+
+function renderMrlSummary() {
+  const box = $('mrlSummary');
+  if (!box) return;
+  const v = mrlView;
+  if (!v) { box.innerHTML = ''; return; }
+  const summary = v.summary || {};
+  const realms = (v.realms && v.realms.length) ? v.realms.slice() : Object.keys(summary);
+  const cards = realms.map(r => mrlSummaryCard(r, summary[r] || {}));
+  cards.push(mrlTotalsCard(v.totals || {}));
+  box.innerHTML = cards.join('');
+}
+
+/* 工具条：预设下拉与域过滤的选项跟着后端给的 View 走。 */
+function syncMrlPresets() {
+  const sel = $('mrlPreset');
+  if (!sel) return;
+  const presets = (mrlView && mrlView.presets) || [];
+  const cur = String((mrlView && mrlView.policy && mrlView.policy.preset) || 'follow');
+  sel.innerHTML = presets.length
+    ? presets.map(p => '<option value="' + esc(String(p.id)) + '">' + esc(String(p.name || p.id)) + '</option>').join('')
+    : '<option value="follow">跟随上游</option>';
+  sel.value = cur;
+  const hit = presets.find(p => String(p.id) === cur);
+  sel.title = hit && hit.note ? String(hit.note) : '';
+}
+
+function syncMrlRealmOptions() {
+  const sel = $('mrlRealm');
+  if (!sel) return;
+  const realms = (mrlView && mrlView.realms && mrlView.realms.length) ? mrlView.realms.slice() : ['cn', 'global'];
+  sel.innerHTML = ['<option value="all">全部域</option>'].concat(
+    realms.map(r => '<option value="' + esc(String(r)) + '">' + esc(mrlRealmLabel(r)) + '</option>')).join('');
+  if (mrlRealm !== 'all' && realms.indexOf(mrlRealm) < 0) mrlRealm = 'all';
+  sel.value = mrlRealm;
+}
+
+function syncMrlDlgRealms() {
+  const sel = $('mrlDlgRealm');
+  if (!sel) return;
+  const realms = (mrlView && mrlView.realms && mrlView.realms.length) ? mrlView.realms.slice() : ['cn', 'global'];
+  sel.innerHTML = realms.map(r => '<option value="' + esc(String(r)) + '">' + esc(mrlRealmLabel(r)) + '</option>').join('');
+}
+
+/* 行的筛选：域 + 搜索词 + 仅看吃紧 + 仅看手动。 */
+function mrlFilteredRows() {
+  const rows = (mrlView && mrlView.rows) || [];
+  const q = String(mrlQ || '').trim().toLowerCase();
+  const out = [];
+  rows.forEach(row => {
+    if (!row) return;
+    if (mrlRealm !== 'all' && String(row.realm || '') !== mrlRealm) return;
+    if (mrlTightOnly && !(row.degrading || row.limit_state === 'partial' || row.limit_state === 'locked' || Number(row.limited_accounts || 0) > 0)) return;
+    if (mrlManualOnly && row.source !== 'manual') return;
+    if (q) {
+      const hay = (String(row.model || '') + ' ' + String(row.full_name || '') + ' ' + String(row.realm || '')).toLowerCase();
+      if (hay.indexOf(q) < 0) return;
+    }
+    out.push(row);
+  });
+  return mrlSortRows(out);
+}
+
+function renderMrlRows() {
+  const tb = $('mrlBody');
+  if (!tb) return;
+  const total = ((mrlView && mrlView.rows) || []).length;
+  if (!mrlView) {
+    tb.innerHTML = '<tr><td colspan="12"><div class="empty"><div class="big">还没有数据</div>后端还没返回限流视图</div></td></tr>';
+    return;
+  }
+  mrlRows = mrlFilteredRows();
+  const gen = mrlView.generated ? fmtLocalDateTime(parseAPITime(mrlView.generated)) : '';
+  $('mrlTblNote').textContent = (mrlRows.length === total ? String(total) + ' 个模型' : String(mrlRows.length) + ' / ' + String(total) + ' 个模型') +
+    (gen ? ' · 生成于 ' + gen : '');
+  if (!mrlRows.length) {
+    tb.innerHTML = '<tr><td colspan="12"><div class="empty"><div class="big">没有匹配的模型</div>换个筛选条件，或点「刷新」重新取一次</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = mrlRows.map(row => {
+    const key = mrlKey(row);
+    return limitRowHtml(row) + (mrlExpanded.has(key) ? limitDetailHtml(row, mrlShowAll.has(key)) : '');
+  }).join('');
+}
+
+function renderMrlFoot() {
+  const box = $('mrlFoot');
+  if (!box) return;
+  const parts = [];
+  const fb = mrlFallback || {};
+  const keys = Object.keys(fb);
+  if (keys.length) parts.push('降级路由表：' + keys.map(k => k + ' → ' + fb[k]).join('，'));
+  const notes = (mrlView && mrlView.notes) || [];
+  notes.forEach(n => parts.push(String(n)));
+  // 口径说明常驻脚注：窗口边界与额度恢复不是一回事，不写清楚就会被读成「到点就有额度」。
+  parts.push('窗口口径：窗口按整点小时桶近似；quota_reset_at 是「最早有多少额度滚出窗口」的时刻，不等于额度到点恢复（上游窗口从该号该模型第一次请求起算，滚动 24h）');
+  box.textContent = parts.join(' · ');
+}
+
+function applyMrlView(v) {
+  mrlView = v || null;
+  syncMrlPresets();
+  syncMrlRealmOptions();
+  renderMrlSummary();
+  renderMrlRows();
+  renderMrlFoot();
+}
+
+/* 轮询时传 quiet=true：失败保留上一屏数字（闪成空态比过期数字更糟）。 */
+async function loadModelLimits(quiet) {
+  const tb = $('mrlBody');
+  if (!quiet && !mrlView && tb) tb.innerHTML = '<tr><td colspan="12"><div class="empty"><div class="big">读取中…</div></div></td></tr>';
+  let d;
+  try {
+    d = await api('model_limits' + (quiet ? '' : '?refresh=1'));
+  } catch (e) {
+    if (!quiet && tb) tb.innerHTML = '<tr><td colspan="12"><div class="empty"><div class="big">读取失败</div>' + esc(e.message) + '</div></td></tr>';
+    return;
+  }
+  mrlFallback = d.fallback || {};
+  applyMrlView(d.view || null);
+}
+
+/* 找到这一行当前生效的那层限流设置（域+模型 > 域 > 模型 > 全局默认）。 */
+function mrlLimitOf(realm, model) {
+  const pol = (mrlView && mrlView.policy) || {};
+  const list = pol.overrides || [];
+  const pick = (r, m) => list.find(l => String(l.realm || '') === r && String(l.model || '') === m);
+  const exact = pick(String(realm || ''), String(model || ''));
+  if (exact) return { limit: exact, scope: '域+模型' };
+  const byRealm = pick(String(realm || ''), '');
+  if (byRealm) return { limit: byRealm, scope: '仅域' };
+  const byModel = pick('', String(model || ''));
+  if (byModel) return { limit: byModel, scope: '仅模型' };
+  return { limit: pol.default || null, scope: '全局默认' };
+}
+
+function openMrlDlg(row) {
+  mrlEditing = row || null;
+  syncMrlDlgRealms();
+  const realm = row ? String(row.realm || '') : (mrlRealm !== 'all' ? mrlRealm : 'cn');
+  const model = row ? String(row.model || '') : '';
+  const found = mrlLimitOf(realm, model);
+  const lim = found.limit || {};
+  $('mrlDlgTitle').textContent = row ? '设置限流 · ' + (row.model || '(整域)') : '新增限流';
+  $('mrlDlgSub').textContent = '这一行现在吃的是「' + found.scope + '」这层的设置；保存会写成「' +
+    realm + (model ? ' + ' + model : ' 整域') + '」这一层。';
+  $('mrlDlgRealm').value = realm;
+  $('mrlDlgModel').value = model;
+  $('mrlDlgSource').value = lim.source === 'manual' ? 'manual' : 'follow';
+  $('mrlDlgOnHit').value = lim.on_hit || 'degrade';
+  $('mrlDlgChainMode').value = lim.chain_mode || 'off';
+  $('mrlDlgWindow').value = lim.window_sec ? String(lim.window_sec) : '86400';
+  $('mrlDlgTok').value = lim.token_quota_per_account ? String(lim.token_quota_per_account) : '0';
+  $('mrlDlgCreditAcc').value = lim.credit_quota_per_account ? String(lim.credit_quota_per_account) : '0';
+  $('mrlDlgCreditPool').value = lim.credit_quota_per_pool ? String(lim.credit_quota_per_pool) : '0';
+  $('mrlDlgNote').value = lim.note || '';
+  $('mrlDlgChain').value = (lim.chain || []).join('\n');
+  $('mrlPreview').innerHTML = '<div class="hint">点「预览」看这套设置会算成什么配额、走哪条链。</div>';
+  $('mrlVeil').classList.add('on');
+}
+
+function readMrlForm() {
+  return {
+    realm: $('mrlDlgRealm').value,
+    model: $('mrlDlgModel').value,
+    source: $('mrlDlgSource').value,
+    on_hit: $('mrlDlgOnHit').value,
+    chain_mode: $('mrlDlgChainMode').value,
+    window_sec: $('mrlDlgWindow').value,
+    token_quota_per_account: $('mrlDlgTok').value,
+    credit_quota_per_account: $('mrlDlgCreditAcc').value,
+    credit_quota_per_pool: $('mrlDlgCreditPool').value,
+    note: $('mrlDlgNote').value,
+    chain: $('mrlDlgChain').value,
+  };
+}
+
+async function saveMrlLimit() {
+  const body = policyPayload(readMrlForm());
+  if (!body.realm) { toast('先选域', 'err'); return; }
+  let d;
+  try {
+    d = await api('model_limits/policy', { method: 'POST', body: JSON.stringify({ op: 'upsert', limit: body }) });
+  } catch (e) {
+    toast('保存失败：' + e.message, 'err');
+    return;
+  }
+  $('mrlVeil').classList.remove('on');
+  toast('已保存 ' + (body.model || body.realm + ' 整域') + ' 的限流设置', 'ok');
+  if (d && d.view) applyMrlView(d.view); else loadModelLimits(true);
+}
+
+/* 恢复默认：把整份策略打回「跟随上游」（后端 op=reset）。
+   动的是全部手动覆盖与手动降级链，所以先问一句——问不出来就别动。 */
+async function resetMrlPolicy() {
+  if (!confirm('恢复默认策略？所有手动限流覆盖与手动降级链都会被清空，回到「跟随上游」。此操作不可撤销。')) return;
+  let d;
+  try {
+    d = await api('model_limits/policy', { method: 'POST', body: JSON.stringify({ op: 'reset' }) });
+  } catch (e) {
+    toast('恢复默认失败：' + e.message, 'err');
+    return;
+  }
+  toast('已恢复默认策略', 'ok');
+  if (d && d.view) applyMrlView(d.view); else loadModelLimits(true);
+}
+
+async function deleteMrlLimit() {
+  const body = policyPayload(readMrlForm());
+  if (!body.realm) { toast('先选域', 'err'); return; }
+  if (!confirm('删除 ' + (body.model || body.realm + ' 整域') + ' 这一层的覆盖？删掉后回落到上一层（域 / 全局默认）。')) return;
+  let d;
+  try {
+    d = await api('model_limits/policy', { method: 'POST', body: JSON.stringify({ op: 'delete', realm: body.realm, model: body.model }) });
+  } catch (e) {
+    toast('删除失败：' + e.message, 'err');
+    return;
+  }
+  $('mrlVeil').classList.remove('on');
+  toast('已删除覆盖', 'ok');
+  if (d && d.view) applyMrlView(d.view); else loadModelLimits(true);
+}
+
+function renderMrlPreview(p) {
+  const pv = p || {};
+  const q = pv.quota || {};
+  const pool = pv.pool || {};
+  const reasons = (pv.rationale || []).map(r => '<li>' + esc(String(r)) + '</li>').join('');
+  $('mrlPreview').innerHTML =
+    '<div class="ml-pv-hd">预览 ' + mrlStateTag(pv.limit_state) +
+      (pv.degrading ? ' <span class="tag mute">会降级</span>' : '') + '</div>' +
+    '<div class="ml-pv-kv">单账号 ' + esc(formatTokenCount(q.token_per_account)) + (q.inferred ? '（沿用推算）' : '') +
+      ' · 池级 ' + esc(formatTokenCount(pool.quota_tokens)) +
+      ' · 已用 ' + esc(formatTokenCount(pool.used_tokens)) +
+      ' · 可路由账号 ' + String(Number(pv.routable_accounts || 0)) + '</div>' +
+    chainHtml(pv.chain, pv.chain_source) +
+    (reasons ? '<ul>' + reasons + '</ul>' : '<div class="hint">后端没有给出推算依据</div>');
+}
+
+async function previewMrlLimit() {
+  const body = policyPayload(readMrlForm());
+  if (!body.realm || !body.model) { toast('预览需要域 + 模型', 'err'); return; }
+  const box = $('mrlPreview');
+  box.innerHTML = '<div class="hint">推算中…</div>';
+  let d;
+  try {
+    d = await api('model_limits/preview', { method: 'POST', body: JSON.stringify({ realm: body.realm, model: body.model, limit: body }) });
+  } catch (e) {
+    box.innerHTML = '<div class="hint">预览失败：' + esc(e.message) + '</div>';
+    return;
+  }
+  renderMrlPreview(d.preview || {});
+}
+
+/* 导出：Blob + a.download，文件名带时间戳（同一分钟导出两次也不打架）。 */
+function mrlStamp() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return String(d.getFullYear()) + p(d.getMonth() + 1) + p(d.getDate()) + '-' +
+    p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
+function mrlDownload(name, text, type) {
+  const blob = new Blob([text], { type: type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+async function mrlExport(format) {
+  let d;
+  try {
+    d = await api('model_limits/export', { method: 'POST', body: JSON.stringify({ format: format }) });
+  } catch (e) {
+    toast('导出失败：' + e.message, 'err');
+    return;
+  }
+  const stamp = mrlStamp();
+  if (format === 'markdown') {
+    mrlDownload('model_limits_' + stamp + '.md', String(d.markdown || ''), 'text/markdown;charset=utf-8');
+    toast('已导出 Markdown', 'ok');
+    return;
+  }
+  mrlDownload('model_limits_' + stamp + '.json', JSON.stringify(d.bundle || {}, null, 2), 'application/json');
+  toast('已导出 JSON', 'ok');
+}
+
+/* ── 事件绑定 ─────────────────────────────────────────────────────── */
+$('btnMrlRefresh').addEventListener('click', () => loadModelLimits(false));
+$('btnMrlNew').addEventListener('click', () => openMrlDlg(null));
+$('btnMrlExportJson').addEventListener('click', () => mrlExport('bundle'));
+$('btnMrlExportMd').addEventListener('click', () => mrlExport('markdown'));
+$('btnMrlReset').addEventListener('click', resetMrlPolicy);
+$('btnMrlCancel').addEventListener('click', () => $('mrlVeil').classList.remove('on'));
+$('btnMrlSave').addEventListener('click', saveMrlLimit);
+$('btnMrlDelete').addEventListener('click', deleteMrlLimit);
+$('btnMrlPreview').addEventListener('click', previewMrlLimit);
+
+$('mrlPreset').addEventListener('change', async e => {
+  const id = String(e.target.value || '');
+  if (!id) return;
+  const opt = e.target.options[e.target.selectedIndex];
+  const label = opt ? String(opt.textContent || id) : id;
+  let d;
+  try {
+    d = await api('model_limits/policy', { method: 'POST', body: JSON.stringify({ op: 'preset', id: id }) });
+  } catch (err) {
+    toast('切换预设失败：' + err.message, 'err');
+    return;
+  }
+  toast('已切到预设「' + label + '」', 'ok');
+  if (d && d.view) applyMrlView(d.view); else loadModelLimits(true);
+});
+
+$('mrlRealm').addEventListener('change', e => {
+  mrlRealm = String(e.target.value || 'all');
+  renderMrlRows();
+});
+
+$('mrlQ').addEventListener('input', e => {
+  mrlQ = String(e.target.value || '');
+  renderMrlRows();
+});
+
+$('mrlTight').addEventListener('change', e => {
+  mrlTightOnly = !!e.target.checked;
+  $('mrlTightLbl').classList.toggle('on', mrlTightOnly);
+  renderMrlRows();
+});
+
+$('mrlManual').addEventListener('change', e => {
+  mrlManualOnly = !!e.target.checked;
+  $('mrlManualLbl').classList.toggle('on', mrlManualOnly);
+  renderMrlRows();
+});
+
+/* 表格里的点击：先认按钮（设限 / 展开全部），再认整行（展开明细）。 */
+$('mrlBody').addEventListener('click', e => {
+  const act = e.target.closest('button[data-act]');
+  if (act) {
+    const tr = act.closest('tr[data-key]');
+    if (!tr) return;
+    const row = mrlRows.find(r => mrlKey(r) === tr.dataset.key);
+    if (row) openMrlDlg(row);
+    return;
+  }
+  const accBtn = e.target.closest('button[data-acc]');
+  if (accBtn) {
+    const det = accBtn.closest('tr.ml-det');
+    if (!det) return;
+    const key = det.dataset.det;
+    if (accBtn.dataset.acc === 'more') mrlShowAll.add(key); else mrlShowAll.delete(key);
+    renderMrlRows();
+    return;
+  }
+  const tr = e.target.closest('tr[data-key]');
+  if (!tr) return;
+  const key = tr.dataset.key;
+  if (mrlExpanded.has(key)) { mrlExpanded.delete(key); mrlShowAll.delete(key); } else { mrlExpanded.add(key); }
+  renderMrlRows();
+});
+// <<< modellimits-app
