@@ -31,6 +31,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
+	"github.com/misakano7545/workbuddy2api-panel/internal/ratelimit"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/scheduler"
 	"github.com/misakano7545/workbuddy2api-panel/internal/updater"
@@ -95,6 +96,11 @@ type Config struct {
 	// 面板据它在限流提示里标注「已路由至 X」—— 否则用户看到「v4.1 限流」
 	// 会以为服务断了，实际请求已被自动改道到等价模型继续服务。
 	ModelFallback func() map[string]string
+	// ModelLimits 模型限流映射（token/credit 配额 + 命中动作 + 降级链）的共享 tracker。
+	// 与 internal/server 注入的是**同一个实例**：面板改策略、请求路径按同一份策略
+	// 判定，两处各建一个就会出现「页面说还能跑、请求已经被拦」。
+	// nil = 未启用（四个 model_limits 端点统一返回 503）。
+	ModelLimits *ratelimit.Tracker
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -292,6 +298,12 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/model_rules/delete", p.modelRuleDelete)
 	p.mux.HandleFunc("POST /panel/api/model_rules/apply", p.modelRuleApply)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_rules", p.accountModelRules)
+	// 模型限流映射（面板「模型限流映射」页）：额度策略、命中动作、降级链、导出。
+	// 全部转发到 internal/ratelimit 的 tracker，面板不自己算额度。
+	p.mux.HandleFunc("GET /panel/api/model_limits", p.modelLimits)
+	p.mux.HandleFunc("POST /panel/api/model_limits/policy", p.modelLimitsPolicy)
+	p.mux.HandleFunc("POST /panel/api/model_limits/preview", p.modelLimitsPreview)
+	p.mux.HandleFunc("POST /panel/api/model_limits/export", p.modelLimitsExport)
 	// 封禁账号探活：只读探测上游是否已解封，不 revive、不参与选号。
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/probe_ban", p.accountProbeBan)
 	p.mux.HandleFunc("POST /panel/api/login/start", p.loginStart)

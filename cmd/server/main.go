@@ -437,6 +437,11 @@ func main() {
 	defer rec.Stop()
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
 
+	// 模型限流映射 tracker：面板与网关共用**同一个实例**——面板改完策略，网关下一次判定
+	// 就按新策略走；两边各建一个会出现「面板说已超额、请求照样放行」。
+	// 策略文件与 state.json 同目录（<数据目录>/model_limits.json），随数据目录搬移。
+	modelLimits := newModelLimitsTracker(p, up, rec, live, cfg.StateFile)
+
 	// 请求指标始终启用；JSONL 归档只写脱敏元数据，写盘失败不影响聊天请求。
 	requestLog := reqlog.New(reqlog.Config{
 		Dir:           stateSibling(cfg.StateFile, "request-logs"),
@@ -476,6 +481,8 @@ func main() {
 		Scheduler:  sch,
 		// 降级路由表：面板据此在限流提示里标注「已路由至 <等价模型>」。
 		ModelFallback: func() map[string]string { return live.Load().ModelFallback },
+		// 模型限流映射 tracker（与网关共用同一个实例）。
+		ModelLimits: modelLimits,
 		// 余额趋势采样记录器：nil 时该视图返回 501。
 		Balance: bal,
 		// 后台任务的自动触发开关与成长任务排程共用热配置（schedule.growth_enabled）。
@@ -573,7 +580,9 @@ func main() {
 		PromptMode:   cfg.Prompt.Mode,
 		// 模型降级路由表：读 live 快照（支持面板热更，改完即生效、无需重启）。
 		ModelFallback: func() map[string]string { return live.Load().ModelFallback },
-		PromptText:    cfg.PromptText,
+		// 模型限流映射 tracker：本地强制（选号前判定）与降级链都走它（nil = 未启用）。
+		ModelLimits: modelLimits,
+		PromptText:  cfg.PromptText,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -608,6 +617,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 模型限流映射 tracker 的后台刷新（重算额度快照、落盘策略）挂在服务生命周期上：
+	// ctx 一取消就停，不留孤儿 goroutine。
+	modelLimits.Start(ctx)
 	proxyCtx, stopProxies := context.WithCancel(ctx)
 	proxyDone := make(chan struct{})
 	go func() {
