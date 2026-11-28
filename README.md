@@ -97,7 +97,7 @@ IPWO 住宅代理：为全球 API 连接提供灵活的网络支持。
 |---|---|---|
 | POST | `/v1/images/generations` | 文生图 |
 | POST | `/v1/images/edits` | 改图 / 图生图；`image` 可传公网 URL、`data:` URL 或 multipart 文件 |
-| POST | `/v1/videos` | 提交视频任务（OpenAI Videos 资源的路径，等价于下一行）。缺省 `wait=true`：阻塞到出片后回 200；`wait=false`：秒回 `task_id` |
+| POST | `/v1/videos` | 提交视频任务（OpenAI Videos 资源的路径，等价于下一行）。缺省秒回 `task_id`（异步，客户端自己轮询）；`wait=true` 才阻塞到出片后回 200 |
 | POST | `/v1/videos/generations` | 同上 |
 | GET | `/v1/videos/{task_id}` | 查任务（`queued` / `in_progress` / `completed` / `failed`） |
 | GET | `/v1/videos/{task_id}/content` | 取成品字节（流式转发签名直链，不落盘；任务没出片回 409） |
@@ -132,18 +132,23 @@ curl -s http://127.0.0.1:7863/v1/images/edits \
 ### 出视频（异步任务）
 
 ```bash
-# 提交（不等待）
+# 提交（缺省就是异步：秒回 task_id，不占连接等出片）
 curl -s http://127.0.0.1:7863/v1/videos/generations \
   -H "Authorization: Bearer $WB2API_KEY" -H 'Content-Type: application/json' \
-  -d '{"prompt":"一杯热咖啡，热气缓缓上升","seconds":4,"wait":false}'
+  -d '{"prompt":"一杯热咖啡，热气缓缓上升","seconds":4}'
 # → {"id":"1312831544-WandVideo-…","object":"video","task_id":"…","status":"queued", …}
 
-# 查（阻塞到出片；不用 wait 参数时 POST 就是阻塞语义）
+# 查（GET 不阻塞：立刻回当前状态；status=completed 时 data[].url 就是成品）
 curl -s http://127.0.0.1:7863/v1/videos/1312831544-WandVideo-… \
   -H "Authorization: Bearer $WB2API_KEY"
+
+# 非要同步也行（自己的请求预算够长再这么用：minimax 约 124s、kling 约 473s）
+curl -s http://127.0.0.1:7863/v1/videos/generations \
+  -H "Authorization: Bearer $WB2API_KEY" -H 'Content-Type: application/json' \
+  -d '{"prompt":"一杯热咖啡，热气缓缓上升","seconds":4,"wait":true,"timeout_seconds":900}'
 ```
 
-请求参数：`prompt`（必填）、`model`、`seconds`（实测 4-15）、`resolution`、`aspect_ratio`（`16:9` / `9:16` / `1:1`）、`negative_prompt`、`enable_audio`（默认 `true`）、`watermark`（默认 `true`）、`image`（图生视频，公网/签名 URL）、`last_image`（尾帧）、`reference_images` / `reference_videos` / `reference_audios`（参考素材，`["url", …]` 或上游原形 `[{"image_url": …}]` 都收，网关补成上游的对象数组）、`wait`（缺省 `true`）、`timeout_seconds`（缺省 900，封顶 1800）。除 `wait` / `timeout_seconds` 与三个 `reference_*` 的形状转换外，都原样交给上游。
+请求参数：`prompt`（必填）、`model`、`seconds`（实测 4-15）、`resolution`、`aspect_ratio`（`16:9` / `9:16` / `1:1`）、`negative_prompt`、`enable_audio`（默认 `true`）、`watermark`（默认 `true`）、`image`（图生视频，公网/签名 URL）、`last_image`（尾帧）、`reference_images` / `reference_videos` / `reference_audios`（参考素材，`["url", …]` 或上游原形 `[{"image_url": …}]` 都收，网关补成上游的对象数组）、`wait`（缺省 `false`，异步秒回 `task_id`；`true` 才同步等到出片）、`timeout_seconds`（同步等待上限，配合 `wait:true` 生效：缺省 900，封顶 1800）。除 `wait` / `timeout_seconds` 与三个 `reference_*` 的形状转换外，都原样交给上游。
 
 回执（出片后）：
 
@@ -170,7 +175,8 @@ curl -s http://127.0.0.1:7863/v1/videos/1312831544-WandVideo-… \
 - **上游 `usage` 只回一次**：第一次查到 `completed` 时回，之后重复查询没有 `usage`（kling 连 `size` 都不回）。网关在任务台账里缓存这次用量，重复查询照样能拿到 `credit` / `size` / `seconds`。
 - **计费只记一次**：提交不扣钱，出片完成那一刻按 `usage.credit` 记一次（任务台账里的「已记账」标记 + 同步/异步两条路径共用同一把锁），重复查询、并发查询都不会重复记账。
 - **任务是账号级可见**：上游任务只对提交它的账号可见，账号结构里没有数字租户 id 可以反推，所以网关自己维护「task → 账号」台账；**台账在进程内存里**，重启后查询会退化成逐个账号试、命中即收养（此时若上游不再回 `usage`，这次查询就不带积分明细，但也不会重复扣费）。
-- **kling 慢一个量级**：MCP 默认 `wait=true`，客户端超时要给到 15 分钟以上；只想拿任务号就传 `wait=false`。
+- **kling 慢一个量级**：minimax 一出片约 124s、kling 约 473s，所以 `POST /v1/videos/generations` **缺省异步**——秒回 `task_id`，出片后自己 `GET /v1/videos/{id}` 取。以前缺省是同步等到出片，但任何客户端的单次请求预算都远小于出片时长（实测 DSH 插件 dsh-imagegen 的提交预算是 120s），提交必然在 120s 被客户端掐断：上游任务已建好、积分照扣，客户端只看到断连（面板日志里就是 `video | 499 | total=120.0s | out=interrupted`）。要同步必须显式 `wait=true`，那等于自己认下这段等待预算。
+- **MCP 侧仍默认阻塞**：`generate_video` 的工具描述承诺「默认阻塞等到出片」，所以 MCP 入口在调用方没写 `wait` 时自己补一次 `wait:true`；显式 `wait:false` 照旧秒回 `task_id`，再用 `get_video_task` 收片。
 
 ### 生 3D（异步任务，默认关闭）
 
@@ -542,7 +548,7 @@ DMG 未公证，首次打开需要右键 →「打开」。
 | **整体不可用模型提升** | 11102「该后端无此模型」原是逐账号负缓存：模型整体下架时每个号都要白撞一次，期间 `/v1/models` 照旧列出它。现在同一 realm 有 **≥2 个不同账号**都被上游明确回 11102 → 记为整体不可用（**只凭上游阳性证据，绝不从「远端目录里没有」反推**；11158「号型不允许」是账号权限差异，不参与提升）→ `/v1/models` 不再列出、点名调用在打上游之前 `400 model_unavailable` 指去换模型；面板「整体不可用模型」单列一张表（与「模型锁池」分清：那是限流等就有，这是等不到），给命中账号数 / 复检时刻 / 上游原话 + 逐条与一键恢复（恢复同时清掉各号的 11102 负缓存，否则「恢复了但请求永远挑不到号」）。24h 自动复检，随 `state.json` 持久化 |
 | **账号备份 / 迁移（未实现，待做设计）** | 面板「添加账号 → 备份 / 迁移」：导出为自包含快照（凭据原文 + 备注 + realm + 企业 id + device token），支持**逐个勾选**子集；可选口令加密，**加密在浏览器侧完成**（PBKDF2-SHA256 200k + AES-GCM），口令与明文都不经过网关落盘与日志。导入两种模式取**白名单**（未知值一律 400，不静默回落）：`merge` **只增加**——池中已有的 uid 一个字节都不写（从别人的老备份导入不会用陈旧 token 打断本机活跃号）；`replace` 覆盖/新增，但**快照外的账号一律保留**（刻意不提供「整体替换」，删凭证不可逆）。判重三层：池内 uid → 文件内重复 uid → 规范化（trim + 小写）后重复。备份**不含**本机配置、模型黑名单、保留积分阈值、排程与告警设置，导出文件里用 `note` 写清这条。**当前 main 上没有这个实现**（全树无 PBKDF2 / AES-GCM / `crypto.subtle`，账号导入只有 cockpit 格式一条路），别按这行去面板里找按钮。**已落地的只有一个最小版本**：面板「账号池 → 导出账号」= `GET /panel/api/accounts/export`，输出明文 JSON `{"accounts":[…]}`（凭据原文 + nickname/domain/realm/enterprise_id/expires_at，**不含**备注、暂停/禁用/分组这类运行态），与导入同形，导出的文件直接喂回 `POST /panel/api/import/cockpit` 就能搬到另一台；没有口令加密、没有逐个勾选（issue #287）。要加密快照或子集导出仍按上面那行做设计；眼下整体迁移也可以直接搬 `auths/` + `data/` 目录（见「账号管理」与「凭据管理（auths）」两节） |
 | **生图 / 改图端点** | `POST /v1/images/generations`、`POST /v1/images/edits`：目录里的 image 模型单列进 `/v1/models`（`image_generation=true`），上游 `/v2/images/generations`、`/v2/images/edits` 透传；`image` 支持公网 URL / `data:` URL / multipart；回执原样透传（含 `usage.credit`），不转存字节 |
-| **出视频端点** | `POST /v1/videos/generations`（上游 `/v2/videos/generations` 提交 → `/v2/videos/tasks` 轮询 → 透出签名直链）+ `GET /v1/videos/{task_id}` + `POST /v1/videos/tasks`。缺省 `wait=true` 阻塞到出片（实测 minimax 4s ≈124s、kling 4s ≈473s），`wait=false` 秒回 `task_id`；任务→账号台账进程内保存，带「已记账」标记与用量快照——重复查询既不重复记账、也不丢 `usage`（上游只回一次） |
+| **出视频端点** | `POST /v1/videos/generations`（上游 `/v2/videos/generations` 提交 → `/v2/videos/tasks` 轮询 → 透出签名直链）+ `GET /v1/videos/{task_id}` + `POST /v1/videos/tasks`。缺省异步秒回 `task_id`（实测 minimax 4s ≈124s、kling 4s ≈473s 出片，所以缺省不等），`wait=true` 才阻塞到出片；任务→账号台账进程内保存，带「已记账」标记与用量快照——重复查询既不重复记账、也不丢 `usage`（上游只回一次） |
 | **生 3D 端点（默认关闭）** | `POST /v1/3d/generations`、`POST /v1/3d/tasks`、`GET /v1/3d/{job_id}`（上游 `agenttool/v1/tcproxy`，TC3 签名）。凭证默认**自动签发**（`features.three_d_auto_token`，默认 true：账号 access token → 官方 `/v2/api-keys` 换 `ck_t_`，按账号缓存、拒绝自动重签；协议自官方客户端 5.9.3 提取并于 2026-11-14 真机验证），`features.three_d_temp_tokens` 作手工覆盖，开关默认关闭（`features.three_d_enabled`）；缺凭证回 503、关着回 403，都不打上游。任务→账号台账与视频同构（`wait` 最长 600s、有界探测自愈、记账只一次、用量快照）。**已做真实上游联通验证**（提交/DONE/计费/下载全链路） |
 | **水印裁切（可选）** | `POST /v1/images/strip-watermark` + MCP 工具 `strip_watermark`：把成品图底部的整条纯白留白裁掉，右下角「AI生成」水印随之消失（实测水印 111×51px、贴边 10px；白底上像素级不可见）。默认关闭（`features.watermark_strip_enabled`），纯 stdlib 实现（`internal/media`，逐行标准差找内容/留白分界），只做裁剪不做 inpainting，留白不足回 422 并给实测数字；图片地址限上游产物域，避免 SSRF |
 | **MCP 端点** | `POST /mcp`：JSON-RPC 2.0 纯 POST 形态（无 SSE、无 session），`initialize` / `ping` / `tools/list` / `tools/call` 齐全，工具 `list_generation_models`、`generate_image`、`edit_image`、`generate_video`、`get_video_task`（另有条件出现的 `generate_3d` / `get_3d_task` / `strip_watermark`，随各自开关）。工具调用复用网关自己的 HTTP handler，换号/错误策略/记账/请求日志与 REST 同一路径 |

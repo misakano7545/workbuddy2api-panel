@@ -209,7 +209,9 @@ func (h *Handler) mcpCallTool(ctx context.Context, params json.RawMessage) (any,
 	case "edit_image":
 		return h.mcpProxyCall(ctx, args, "/v1/images/edits", func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) })
 	case "generate_video":
-		return h.mcpProxyCall(ctx, args, "/v1/videos/generations", h.videos)
+		// 工具描述与 initialize 说明都承诺「默认阻塞等到出片」，而 REST 侧缺省已改成立刻回
+		// task_id（见 videoWait）：这里补一次 wait=true，别让两边的默认值分叉。
+		return h.mcpProxyCall(ctx, mcpVideoArgs(args), "/v1/videos/generations", h.videos)
 	case "get_video_task":
 		return h.mcpVideoTask(ctx, args)
 	case "generate_3d":
@@ -257,6 +259,22 @@ func (h *Handler) mcpProxyCall(ctx context.Context, args map[string]any, path st
 		"structuredContent": parsed,
 		"isError":           false,
 	}, nil
+}
+
+// mcpVideoArgs 给没写 wait 的 generate_video 调用补上 wait=true。
+//
+// 调用方显式给 wait:false 时原样放过：那是要 task_id 自己轮询。不就地改 map，避免调用方复用
+// 同一份参数时被悄悄改语义。
+func mcpVideoArgs(args map[string]any) map[string]any {
+	if _, ok := args["wait"]; ok {
+		return args
+	}
+	out := make(map[string]any, len(args)+1)
+	for k, v := range args {
+		out[k] = v
+	}
+	out["wait"] = true
+	return out
 }
 
 func (h *Handler) mcpThreeDTask(ctx context.Context, args map[string]any) (any, *mcpRPCError) {

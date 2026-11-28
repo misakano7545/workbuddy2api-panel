@@ -231,6 +231,22 @@ func TestMCPGenerateVideoAndTaskMCP(t *testing.T) {
 	}
 }
 
+// TestMCPVideoArgsDefaultBlocks MCP 的 generate_video 仍按工具描述「默认阻塞等到出片」：调用方
+// 没写 wait 时补 wait=true（REST 侧缺省是异步，见 videos.go videoWait）。
+func TestMCPVideoArgsDefaultBlocks(t *testing.T) {
+	in := map[string]any{"prompt": "x"}
+	got := mcpVideoArgs(in)
+	if got["wait"] != true {
+		t.Fatalf("缺 wait 应补 true：%v", got)
+	}
+	if _, ok := in["wait"]; ok {
+		t.Fatalf("不该就地改调用方的 map：%v", in)
+	}
+	if v, _ := mcpVideoArgs(map[string]any{"prompt": "x", "wait": false})["wait"].(bool); v {
+		t.Fatalf("显式 wait=false 不该被改掉")
+	}
+}
+
 // TestMCPToolBusinessErrorIsError 上游拒绝属于「工具执行失败」：result.isError=true，
 // 错误原文进 content（模型能读到），而不是 JSON-RPC error。
 func TestMCPToolBusinessErrorIsError(t *testing.T) {

@@ -243,7 +243,48 @@ func TestVideosSubmitAsync(t *testing.T) {
 	}
 }
 
-// TestVideosSyncWaitsForCompletion 默认同步等：running→completed，回成品 URL 与实扣积分；
+// TestVideosSubmitDefaultsToAsync 不写 wait 时**立刻**回 task_id，不再同步等到出片（2026-11 兼容修）。
+//
+// 钉住的事实：真实客户端的单次请求预算远小于出片时长。实测 DSH 插件 dsh-imagegen 的提交预算是
+// 120s，而 minimax 出片约 124s、kling 约 473s —— 网关替客户端扛等待时，提交必然在 120s 被掐断
+// （面板日志就是 `video | 499 | total=120.0s | out=interrupted`）：上游任务已建好、积分照扣，
+// 客户端却只收到一次断连。缺省异步之后，客户端拿到 task_id 自己轮询，等待预算归它自己管。
+//
+// 同时钉住第二条：单独给 timeout_seconds 只是「wait:true 时的上限」，不该反过来触发同步等待。
+func TestVideosSubmitDefaultsToAsync(t *testing.T) {
+	f := &videoFake{on: func(c videoCall) (int, string) {
+		switch c.Path {
+		case "/v2/videos/generations":
+			return 200, videoSubmitOK
+		case "/v2/videos/tasks":
+			return 200, videoTaskDone
+		}
+		return 404, `{"code":404,"msg":"unexpected"}`
+	}}
+	h := NewHandler(Config{Pool: imagePool(), Upstream: f.client()})
+
+	for _, body := range []string{
+		`{"prompt":"一只猫在草地上奔跑","seconds":4}`,
+		`{"prompt":"一只猫在草地上奔跑","seconds":4,"timeout_seconds":600}`,
+	} {
+		rec := postVideo(t, h, body)
+		if rec.Code != 200 {
+			t.Fatalf("body=%s code=%d body=%s", body, rec.Code, rec.Body)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("回程不是 JSON：%s", rec.Body)
+		}
+		if got["task_id"] != videoTestTaskID || got["status"] != "queued" {
+			t.Fatalf("body=%s 应立刻回 task_id + queued：%v", body, got)
+		}
+	}
+	if n := f.count("/v2/videos/tasks"); n != 0 {
+		t.Fatalf("缺省不该同步轮询上游，实际查了 %d 次", n)
+	}
+}
+
+// TestVideosSyncWaitsForCompletion wait=true 显式同步等：running→completed，回成品 URL 与实扣积分；
 // 同一任务再查不会重复记账（台账 Charged 标记）。
 func TestVideosSyncWaitsForCompletion(t *testing.T) {
 	fastVideoPoll(t)
@@ -264,7 +305,7 @@ func TestVideosSyncWaitsForCompletion(t *testing.T) {
 	p := imagePool()
 	h := NewHandler(Config{Pool: p, Upstream: f.client()})
 
-	rec := postVideo(t, h, `{"prompt":"一只猫在草地上奔跑","seconds":4}`)
+	rec := postVideo(t, h, `{"prompt":"一只猫在草地上奔跑","seconds":4,"wait":true}`)
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
@@ -320,7 +361,7 @@ func TestVideosFailedTaskReturns502(t *testing.T) {
 	}}
 	p := imagePool()
 	h := NewHandler(Config{Pool: p, Upstream: f.client()})
-	rec := postVideo(t, h, `{"prompt":"x","seconds":4}`)
+	rec := postVideo(t, h, `{"prompt":"x","seconds":4,"wait":true}`)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("code=%d want 502 body=%s", rec.Code, rec.Body)
 	}
@@ -553,7 +594,7 @@ func TestVideosRecordedInPanel(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/v1/videos", strings.NewReader(`{"prompt":"一只猫","seconds":4}`))
+	req := httptest.NewRequest("POST", "/v1/videos", strings.NewReader(`{"prompt":"一只猫","seconds":4,"wait":true}`))
 	req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
 	req.Header.Set("User-Agent", "test-video/1.0")
 	h.ServeHTTP(rec, req)
