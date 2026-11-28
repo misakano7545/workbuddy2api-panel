@@ -878,6 +878,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		ReserveBlocked:           p.reserveBlocked(e, false),
 		RateLimitedModels:        p.rateLimitedModelsLocked(e, now),
 		Realm:                    e.a.Realm(),
+		Domain:                   e.a.Domain,
 		Enterprise:               e.a.IsEnterprise(),
 		APIKey:                   e.a.IsAPIKey(),
 		Nickname:                 e.a.Nickname,

@@ -130,6 +130,12 @@ type Status struct {
 	// Realm 账号域（cn/global，auth.Realm() 计算值；含 global.enabled 开关闸）。
 	// 供面板/状态接口按域分组展示。
 	Realm string `json:"realm,omitempty"`
+	// Domain 凭证签发主机（auth 文件里的 domain 原值，如 www.codebuddy.cn /
+	// www.workbuddy.cn / www.workbuddy.ai）。
+	// 为什么单独给：同一 realm 下有多个签发方，上游清退是按签发方整批扫的
+	// （#296：cn 域 23 个 codebuddy.cn 号被清 21，同形态的 workbuddy.cn 号全活）。
+	// 出事时要能按签发方分组看「哪一批没了」，不能靠 realm 分组。
+	Domain string `json:"domain,omitempty"`
 	// Enterprise 企业版账号（auth.EnterpriseID 非空，计算值不落盘）。
 	// 企业版无个人成长体系（签到/成长任务/连登/旅行/夜猫子 上游均拒），
 	// 面板据此隐藏对应按钮；选号、保活、额度展示不受影响。

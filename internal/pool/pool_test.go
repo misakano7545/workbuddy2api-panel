@@ -2315,6 +2315,26 @@ func TestStatusExposesSessionDeadFails(t *testing.T) {
 	}
 }
 
+// TestStatusExposesDomain 同一 realm 下有多个凭证签发方，上游按签发方整批清退
+// （#296：cn 域 23 个 codebuddy.cn 号被清 21，同形态的 workbuddy.cn 号全活）。
+// realm 分组看不出「哪一批没了」，所以 domain 必须原值透出。
+func TestStatusExposesDomain(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1", Domain: "www.codebuddy.cn"})
+	st, ok := p.Status("u1")
+	if !ok || st.Domain != "www.codebuddy.cn" {
+		t.Fatalf("Domain=%q want www.codebuddy.cn", st.Domain)
+	}
+	b, _ := json.Marshal(st)
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire["domain"] != "www.codebuddy.cn" {
+		t.Fatalf("JSON 字段 domain 缺失或值不对: %s", b)
+	}
+}
+
 // TestNextDay4AMIsCST 硬冷却的「次日 04:00」是北京 04:00（签到按上游自然日恢复），
 // 不随宿主时区漂移：UTC 13:00（= 北京 21:00）之后最近的是北京次日 04:00 = 20:00Z。
 func TestNextDay4AMIsCST(t *testing.T) {
