@@ -12,12 +12,25 @@
 # 流程:
 #   1. POST /v2/plugin/auth/state 拿授权 URL（无 PKCE，state 由服务端签发）
 #   2. 你在浏览器打开 URL 完成登录（链接已带官方 version 参数）
-#   3. 回到这里按 y → poll 拿 token+uid+nickname → 签到（仅 CN）→ 落盘 auths/workbuddy-<uid>.json
+#   3. 回到这里按 y → poll 拿 token+uid+nickname → 签到（仅 CN）→ 落盘 %APPDATA%\workbuddy2api\workbuddy-<uid>.json
 #   4. 重启 workbuddy2api 容器加载新账号
 set -euo pipefail
 
 cd "$(dirname "$0")"
-AUTH_DIR="./auths"
+
+# 默认与服务端保持一致：Windows 用 %APPDATA%\workbuddy2api\auths，其他平台同理。
+# Git Bash 里的 %APPDATA% 是 Windows 路径，cygpath 转成POSIX路径再拼。
+if [[ -n "${APPDATA:-}" ]]; then
+    if command -v cygpath >/dev/null 2>&1; then
+        AUTH_DIR="$(cygpath -u "$APPDATA")/workbuddy2api"
+    else
+        AUTH_DIR="${APPDATA}/workbuddy2api"
+    fi
+elif [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    AUTH_DIR="${XDG_CONFIG_HOME}/workbuddy2api"
+else
+    AUTH_DIR="${HOME}/.config/workbuddy2api"
+fi
 CONTAINER="workbuddy2api"
 
 # ─── 站点参数（官方域表：cn / intl / workbuddy）─────────────────

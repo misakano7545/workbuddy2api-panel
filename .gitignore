@@ -18,6 +18,7 @@ config.json
 API_KEY.txt
 
 # Build artifacts
+/dist/
 *.tmp
 __pycache__/
 

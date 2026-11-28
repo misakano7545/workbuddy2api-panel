@@ -35,12 +35,15 @@ jobs:
         run: WB2A_PARITY=1 go test ./internal/upstream -run TestOfficialParity -v
 
       # ponytail: 标签发版用标签名，避免 CI 时钟和标签差一分钟变成两个号。
+      # 非标签构建只把 VERSION 当制品名，不注入二进制：面板保持 dev（AGENTS.md）。
       - name: version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+            echo "APP_VERSION_LDFLAGS=-X main.appVersion=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
           else
             echo "VERSION=$(TZ=Asia/Shanghai date +%Y.%-m.%-d.%-H%M)" >> "$GITHUB_ENV"
+            echo "APP_VERSION_LDFLAGS=" >> "$GITHUB_ENV"
           fi
 
       - name: build
@@ -61,8 +64,11 @@ jobs:
             bin=wb2api
             [ "$os" = windows ] && bin=wb2api.exe
             for arch in amd64 arm64; do
+              ldflags="-s -w ${APP_VERSION_LDFLAGS}"
+              # Windows 用 GUI 子系统构建：双击 exe 不再先弹一个 cmd 窗口。
+              if [ "$os" = windows ]; then ldflags="$ldflags -H=windowsgui"; fi
               CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-                go build -trimpath -ldflags="-s -w -X main.appVersion=${VERSION}" -o "$bin" ./cmd/server
+                go build -trimpath -ldflags="$ldflags" -o "$bin" ./cmd/server
               pack "$os" "$arch" "$bin"
             done
           done

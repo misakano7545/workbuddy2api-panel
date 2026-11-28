@@ -86,7 +86,17 @@ func stateSibling(stateFile, name string) string {
 	return filepath.Join(dir, name)
 }
 
+// logRootFor 把面板日志/请求日志统一放到 %APPDATA%\workbuddy2api；
+// 取不到用户目录时才回落到 state_file 所在目录。
+func logRootFor(stateFile string) string {
+	if dir := workbuddyConfigDir(); dir != "" {
+		return dir
+	}
+	return filepath.Dir(stateFile)
+}
+
 func main() {
+	prepareDesktopUI()
 	if handled, err := updater.HandleSelfUpdate(os.Args); handled {
 		if err != nil {
 			log.Printf("[updater] %v", err)
@@ -397,7 +407,7 @@ func main() {
 		log.Printf("保号任务覆盖禁用账号（schedule.include_disabled_in_tasks=true）：禁用号仍签到 / 活跃 / 保活 / 刷新余额，但不参与选号")
 	}
 
-	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
+	// 控制台日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
 	// 面板环形缓冲，供 /panel/api/logs 读取；控制台输出行为完全不变。
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
 	// 模型白名单（issue #68）：启动时归一化一次，快照只读持有。
@@ -429,6 +439,9 @@ func main() {
 		ThinkingOverrideScope:  cfg.Thinking.OverrideScope,
 		ThinkingModelDefaults:  cfg.Thinking.ModelDefaults,
 	})
+	// 日志统一收拢到用户目录，state/balance 等运行数据仍按 state_file 走。
+	logRoot := logRootFor(cfg.StateFile)
+
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
 	usagePath := usagePathFor(cfg.StateFile)
@@ -444,7 +457,7 @@ func main() {
 
 	// 请求指标始终启用；JSONL 归档只写脱敏元数据，写盘失败不影响聊天请求。
 	requestLog := reqlog.New(reqlog.Config{
-		Dir:           stateSibling(cfg.StateFile, "request-logs"),
+		Dir:           filepath.Join(logRoot, "request-logs"),
 		Enabled:       cfg.Logging.RequestArchiveEnabled,
 		RetentionDays: cfg.Logging.RequestRetentionDays,
 		MaxBytes:      int64(cfg.Logging.RequestArchiveMaxMB) << 20,
@@ -525,7 +538,7 @@ func main() {
 	// 那几行会先入环、再被回填的历史插到前面，时间序就乱了。
 	var panelLogs *panel.LogStore
 	if cfg.Logging.PanelLogEnabled {
-		panelLogs = panel.NewLogStore(stateSibling(cfg.StateFile, "panel-logs"),
+		panelLogs = panel.NewLogStore(filepath.Join(logRoot, "panel-logs"),
 			cfg.Logging.PanelLogRetentionDays, cfg.Logging.PanelLogMaxMB)
 		if panelLogs == nil {
 			log.Printf("WARN: 面板日志落盘不可用（数据目录建不出来），退回纯内存环")
@@ -540,13 +553,13 @@ func main() {
 	}
 	// 兜底：落盘关掉或不可用时，仍用任务频道那份 JSON 快照回填（旧行为）。
 	if panelLogs == nil {
-		if err := pn.Logs().SetTaskArchive(stateSibling(cfg.StateFile, "task-logs.json")); err != nil {
+		if err := pn.Logs().SetTaskArchive(filepath.Join(logRoot, "task-logs.json")); err != nil {
 			log.Printf("WARN: task log archive: %v", err)
 		}
 	}
 	// 日志落盘在 Ring 的后台 goroutine 里做：退出前把排队的行写完（先于上面的 panelLogs.Close 执行）。
 	defer pn.Logs().Flush()
-	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
+	log.SetOutput(io.MultiWriter(desktopLogTargets(pn.Logs())...))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 	// 成长任务队列排程的执行体在面板（队列逻辑唯一实现）：注入回调，避免 scheduler → panel 循环依赖。
 	sch.SetGrowthRunner(pn.RunGrowthQueueNow)
@@ -718,11 +731,17 @@ func main() {
 		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。
 		IdleTimeout: 120 * time.Second,
 	}
+	// 先显式监听再启动桌面入口，保证托盘/自动打开控制台时端口已经可用。
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		p.Flush()
+		log.Fatalf("http listen: %v", err)
+	}
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
 		<-ctx.Done()
-		p.Flush() // 信号触发：先落盘再做优雅停机
+		p.Flush() // 信号或托盘退出：先落盘再做优雅停机
 		// 在途请求排干窗口可配（server.shutdown_timeout，缺省 30s）：长流式 SSE
 		// 合法时长可达分钟级，固定 5s 必然把在途请求掐成连接重置；超时不再静默。
 		shutdownTimeout := cfg.ShutdownTimeoutDur
@@ -740,7 +759,9 @@ func main() {
 		log.Printf("WARN: %s", warn)
 	}
 	log.Print(listenBanner(cfg.Listen, loadedFrom, cfg.APIKey))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	panelURL := "http://127.0.0.1" + panelListenPath(cfg.Listen) + "/panel/"
+	go startDesktop(ctx, stop, panelURL, desktopStatsFor(p, rec))
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		p.Flush() // 监听失败时信号路径不会跑：这里同样兜底落盘再退
 		log.Fatalf("http: %v", err)
 	}
@@ -790,11 +811,46 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 	}
 }
 
+// desktopStatsFor 生成托盘菜单的实时统计行。积分口径与面板顶部卡片一致
+// （Pool.List 的 credits / credits_total 求和），今日消耗取 usage 的实测 credit，
+// 与用量页「今天」筛选同源；没有 credit 样本时显示破折号而不是伪造的 0。
+func desktopStatsFor(p *pool.Pool, rec *usage.Recorder) desktopStatsFunc {
+	return func() desktopStats {
+		var remaining, total int64
+		for _, s := range p.List() {
+			remaining += s.Credits
+			total += s.CreditsTotal
+		}
+		credits := fmt.Sprintf("%d", remaining)
+		if total > 0 {
+			credits = fmt.Sprintf("%d / %d", remaining, total)
+		}
+
+		today := "—"
+		if rec != nil {
+			now := time.Now()
+			from := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+			snap := rec.SnapshotWindow(usage.Window{From: from}, nil, nil)
+			if snap.Totals.CreditSamples > 0 {
+				today = strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", snap.Totals.Credits), "0"), ".")
+				if today == "" {
+					today = "0"
+				}
+			}
+		}
+
+		return desktopStats{
+			CreditsLine: "积分剩余/总额：" + credits,
+			TodayLine:   "今日消耗积分：" + today,
+		}
+	}
+}
+
 // listenBanner 组装启动横幅。api_key 的来源必须写明（issue #155：改了 config.json 却不
 // 生效，旧日志只写 api_key=true，看不出是 WB2A_API_KEY 覆盖了文件还是改错了文件），
 // 密钥本身只出掩码。path 传「实际加载的那份」，退回默认时传空。
 func listenBanner(listen, path, key string) string {
-	return fmt.Sprintf("workbuddy2api listening on %s (api_key=%s, 来源 %s)，管理面板 http://127.0.0.1%s/panel/",
+	return fmt.Sprintf("workbuddy2api listening on %s (api_key=%s, 来源 %s)，控制台 http://127.0.0.1%s/panel/",
 		listen, maskSecret(key), apiKeySource(path), panelListenPath(listen))
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,7 +23,7 @@ import (
 type Config struct {
 	Listen    string `json:"listen"`     // "127.0.0.1:7863"（缺省只绑回环）
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
-	AuthDir   string `json:"auth_dir"`   // ./auths
+	AuthDir   string `json:"auth_dir"`   // %APPDATA%\workbuddy2api（旧目录自动迁移）
 	StateFile string `json:"state_file"` // ./data/state.json
 
 	// DNSServers 出站解析用的 DNS 服务器（空 = 用系统解析器）；也可用 WB2A_DNS 覆盖
@@ -639,6 +640,123 @@ type Config struct {
 	ReloadIntervalDur time.Duration `json:"-"`
 }
 
+const legacyDefaultAuthDir = "./auths"
+
+// userConfigRoot 是 Windows 的 %APPDATA%、Linux 的 XDG 配置目录、macOS 的
+// Application Support。日志和账号凭证都挂在它下面的 workbuddy2api/ 中。
+func userConfigRoot() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return dir
+}
+
+// workbuddyConfigDir 是用户数据的统一根目录：Windows 下即 %APPDATA%\workbuddy2api。
+func workbuddyConfigDir() string {
+	dir := userConfigRoot()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "workbuddy2api")
+}
+
+// defaultAuthDir 账号文件直接平铺在统一根目录下，不再单开 auths 子目录。
+func defaultAuthDir() string {
+	if dir := workbuddyConfigDir(); dir != "" {
+		return dir
+	}
+	return legacyDefaultAuthDir
+}
+
+// legacyUserAuthDir 是上一版短暂用过的 %APPDATA%\auths，仍要兼容迁移。
+func legacyUserAuthDir() string {
+	dir := userConfigRoot()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "auths")
+}
+
+// legacyNestedAuthDir 是上一版短暂用过的 %APPDATA%\workbuddy2api\auths。
+func legacyNestedAuthDir() string {
+	dir := workbuddyConfigDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "auths")
+}
+
+// migrateAuthFiles 把一个旧目录里的 workbuddy-*.json 复制到新目录。
+// 同名文件已存在时保留新文件，不覆盖用户当前在用的凭证。
+func migrateAuthFiles(src, dst string) {
+	if src == "" || dst == "" || filepath.Clean(src) == filepath.Clean(dst) {
+		return
+	}
+	files, err := filepath.Glob(filepath.Join(src, "workbuddy*.json"))
+	if err != nil || len(files) == 0 {
+		return
+	}
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		log.Printf("WARN: 创建用户账号目录 %s 失败: %v", dst, err)
+		return
+	}
+	copied := 0
+	for _, file := range files {
+		st, err := os.Stat(file)
+		if err != nil || st.IsDir() {
+			continue
+		}
+		target := filepath.Join(dst, filepath.Base(file))
+		if _, err := os.Stat(target); err == nil {
+			continue
+		}
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			log.Printf("WARN: 读取旧账号文件 %s 失败: %v", file, err)
+			continue
+		}
+		if err := safefile.Write(target, raw, 0o600); err != nil {
+			log.Printf("WARN: 迁移账号文件到 %s 失败: %v", target, err)
+			continue
+		}
+		copied++
+	}
+	if copied > 0 {
+		log.Printf("账号目录已从 %s 迁移 %d 个文件到 %s（原文件保留）", src, copied, dst)
+	}
+}
+
+// migrateLegacyAuths 兼容程序目录 ./auths、%APPDATA%\auths 以及
+// %APPDATA%\workbuddy2api\auths 三个旧位置。
+func migrateLegacyAuths(dst string) {
+	if os.Getenv("WB2A_NO_AUTH_MIGRATION") != "" {
+		return
+	}
+	migrateAuthFiles(legacyDefaultAuthDir, dst)
+	migrateAuthFiles(legacyUserAuthDir(), dst)
+	migrateAuthFiles(legacyNestedAuthDir(), dst)
+}
+
+// applyAuthDirDefault 把旧默认目录升级到 %APPDATA%\workbuddy2api。
+// 显式配置或 WB2A_AUTH_DIR 覆盖的值一律不动。
+func applyAuthDirDefault(c *Config) {
+	if os.Getenv("WB2A_AUTH_DIR") != "" {
+		return
+	}
+	dst := defaultAuthDir()
+	legacyUser := legacyUserAuthDir()
+	legacyNested := legacyNestedAuthDir()
+	if filepath.Clean(c.AuthDir) != filepath.Clean(legacyDefaultAuthDir) &&
+		filepath.Clean(c.AuthDir) != filepath.Clean(legacyUser) &&
+		filepath.Clean(c.AuthDir) != filepath.Clean(legacyNested) &&
+		filepath.Clean(c.AuthDir) != filepath.Clean(dst) {
+		return
+	}
+	migrateLegacyAuths(dst)
+	c.AuthDir = dst
+}
+
 // Default 默认配置。
 func Default() *Config {
 	c := &Config{
@@ -646,7 +764,7 @@ func Default() *Config {
 		// 组合。要对外先过反代（nginx/caddy），确需直连再显式改 0.0.0.0:7863。
 		Listen:    "127.0.0.1:7863",
 		APIKey:    "",
-		AuthDir:   "./auths",
+		AuthDir:   defaultAuthDir(),
 		StateFile: "./data/state.json",
 	}
 	c.Cooldown.SoftRate = "600s"
@@ -777,6 +895,7 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	applyEnv(c)
+	applyAuthDirDefault(c)
 	if err := c.normalize(); err != nil {
 		return nil, err
 	}
@@ -812,7 +931,8 @@ func WriteDefault(path string) (string, error) {
 	key := "sk-" + base64.RawURLEncoding.EncodeToString(raw)
 	c := Default()
 	c.APIKey = key
-	_ = c.normalize() // Default() 全合法，normalize 仅补齐 header/idle 超时的展示值
+	migrateLegacyAuths(c.AuthDir) // 删掉旧 config 后重建也别把老账号丢在程序目录
+	_ = c.normalize()             // Default() 全合法，normalize 仅补齐 header/idle 超时的展示值
 	out, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal config: %w", err)
@@ -1070,6 +1190,9 @@ func splitCSV(raw string) []string {
 
 func (c *Config) normalize() error {
 	var err error
+	if strings.TrimSpace(c.AuthDir) == "" {
+		c.AuthDir = defaultAuthDir()
+	}
 	if err = c.normalizeThinking(); err != nil {
 		return err
 	}
