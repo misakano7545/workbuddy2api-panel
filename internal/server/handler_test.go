@@ -2151,11 +2151,10 @@ func TestContentBlockedStickyDegraded(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("first req code=%d", rec.Code)
 	}
-	// 降级粘性：新请求 Active()=true，body 已被 Rewrite(Degraded)，上游首字节即 200。
-	// 但 fake 上游只对 firstCall 返回 400，之后都 200，无法区分"直达"与"重试"。
-	// 用 degrade.Active() 直接断言粘性生效。
-	if !h.degrade.Active() {
-		t.Fatal("degrade should be active after trigger")
+	// Only this system/model key records a confirmed successful rescue.
+	// Exact replay and isolation are asserted in TestRescueLearningReplayAndInvalidation.
+	if len(h.rescue.lookup(rescueKey([]byte(`{"messages":[{"role":"system","content":"x"}]}`), "cn", "glm-5.2", "passthrough", ""), time.Now())) == 0 {
+		t.Fatal("successful rescue should be remembered for this key")
 	}
 }
 
@@ -2195,7 +2194,7 @@ func TestContentBlockedCustomModeDoesNotDegrade(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "gateway_hint") {
 		t.Errorf("content_blocked should carry gateway_hint: %s", rec.Body.String())
 	}
-	if h.degrade.Active() {
+	if len(h.rescue.entries) != 0 {
 		t.Error("degrade should NOT be active in custom mode")
 	}
 }
