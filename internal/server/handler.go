@@ -108,10 +108,6 @@ type Config struct {
 	// （features.busy_retry，默认开）。见 chatCompletions 的 ErrUpstreamBusy 分支。
 	BusyRetry bool
 
-	// SystemTail 把开头 system 挪到消息末尾、头部留固定桩（features.system_tail，
-	// 默认关，仅 cn 域生效）。见 prompt.SystemToTail 的实测数据与代价。
-	SystemTail bool
-
 	// BusyWaitMax 单次排队等待上限（features.busy_wait_seconds，默认 60s）。
 	// <=0 = 不等，直接把排队交给客户端按 Retry-After 退避。
 	BusyWaitMax time.Duration
@@ -1457,15 +1453,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 以 system 开头，passthrough 透传客户端消息时可能首条就是 user，故这里统一
 	// 兜一次。只补首条缺失这一种情况，其余消息逐字不动。
 	body = prompt.EnsureSystemFirst(body, h.cfg.PromptText)
-
-	// system 后置（features.system_tail，仅 cn 域）：客户端每轮都改 system 时，system 留在
-	// 头部会让前缀从第 0 个 token 就分叉，长历史全量重算（issue #293 的 5%）。
-	// 位置必须在 EnsureSystemFirst 之后——那一步要求 messages[0] 是 system，挪走就没桩了。
-	// shortcut: 续写段（continueReader 用入站 r.body 重组）不走这里，会退回 system 在头部，
-	// 也就是续写那次不吃缓存；要一致就得挪到 upstream.prepareBodyOpt，等他日再改。
-	if h.cfg.SystemTail && realm == "cn" {
-		body, _ = prompt.SystemToTail(body)
-	}
 
 	// outbound model 名由 upstream.prepareBody 在同一次 JSON 解析里剥成裸名
 	// （realm 前缀是网关侧路由协议，上游不认前缀）。这里不再提前做整段
